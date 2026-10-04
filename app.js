@@ -73,6 +73,63 @@ const _ENV_PREFIX = APP_ENV === 'production' ? '' : `__${APP_ENV}__`;
   }
 })();
 
+// ============================================================
+//   REPO OWNER LAYER (account-portable)
+//
+//   Every data URL is built from VALUATIO_OWNER instead of a hardcoded account,
+//   so the app follows the repos to whatever GitHub account serves it.
+//   Resolution order:
+//     1. ?owner=<login> in the URL (persisted; ?owner=reset clears it)
+//     2. a previously persisted override (valuatio.ghOwner)
+//     3. the Pages host: <login>.github.io  → <login>
+//     4. legacy fallback 'GoodGlobeLLC' (custom domains / local files)
+//   GitHub owner names are case-insensitive on raw/api/web, so the lower-cased
+//   Pages hostname resolves correctly.
+// ============================================================
+const VALUATIO_LEGACY_OWNER = 'GoodGlobeLLC';
+const VALUATIO_OWNER = (() => {
+  const ok = v => typeof v === 'string' && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(v);
+  try {
+    const q = new URLSearchParams(location.search).get('owner');
+    if (q === 'reset') { try { localStorage.removeItem('valuatio.ghOwner'); } catch {} }
+    else if (ok(q)) { try { localStorage.setItem('valuatio.ghOwner', q); } catch {} return q; }
+    const saved = localStorage.getItem('valuatio.ghOwner');
+    if (ok(saved)) return saved;
+    const m = /^([A-Za-z0-9-]+)\.github\.io$/i.exec(location.hostname || '');
+    if (m && ok(m[1])) return m[1];
+  } catch {}
+  return VALUATIO_LEGACY_OWNER;
+})();
+const GH_RAW = 'https://raw.githubusercontent.com/' + VALUATIO_OWNER;
+const GH_WEB = 'https://github.com/' + VALUATIO_OWNER;
+const GH_API_REPOS = 'https://api.github.com/repos/' + VALUATIO_OWNER;
+if (typeof window !== 'undefined') { window.VALUATIO_OWNER = VALUATIO_OWNER; }
+
+// One-shot rewrite of stored settings that still point at the legacy owner
+// (data-base URLs, macro base, repo-target map) — e.g. after restoring a backup
+// taken on the old site. Runs every load; a no-op once nothing matches, and a
+// no-op entirely while the app is still served from the legacy account.
+(function migrateStoredOwner() {
+  try {
+    if (VALUATIO_OWNER.toLowerCase() === VALUATIO_LEGACY_OWNER.toLowerCase()) return;
+    const urlRe = /((?:raw\.githubusercontent\.com|github\.com|api\.github\.com\/repos)\/)GoodGlobeLLC(?=\/|$)/gi;
+    const ownerRe = /("owner"\s*:\s*")GoodGlobeLLC(")/gi;
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key ? localStorage.key(i) : null;
+      if (k && k.startsWith('valuatio.')) keys.push(k);
+    }
+    let n = 0;
+    for (const k of keys) {
+      const v = localStorage.getItem(k);
+      if (typeof v !== 'string' || !/goodglobellc/i.test(v)) continue;
+      const nv = v.replace(urlRe, '$1' + VALUATIO_OWNER).replace(ownerRe, '$1' + VALUATIO_OWNER + '$2');
+      if (nv !== v) { localStorage.setItem(k, nv); n++; }
+    }
+    if (n) console.log(`[owner] re-pointed ${n} stored setting(s) from ${VALUATIO_LEGACY_OWNER} → ${VALUATIO_OWNER}`);
+  } catch (e) { console.warn('[owner] stored-setting migration skipped:', e.message); }
+})();
+
 // Badge so you always know which build you're in.
 // Make native date-picker controls visible in dark mode. The WebKit calendar
 // indicator + the date text default to near-black, which is invisible on the dark
@@ -615,7 +672,7 @@ async function fetchFxRates(force = false) {
   if (!force && cached && (Date.now() - cached.fetchedAt) < FX_RATES_TTL_MS) {
     return cached;
   }
-  const base = getGitHubDataBase() || 'https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2/main/data/';
+  const base = getGitHubDataBase() || GH_RAW + '/TRAPP2/main/data/';
   const url = base.replace(/\/$/, '') + '/fx/rates.json';
   try {
     const r = await fetch(url, { cache: 'no-cache' });
@@ -699,7 +756,7 @@ const NEAR_PARITY_CCY = new Set(['EUR', 'GBP', 'CHF', 'CAD', 'AUD', 'NZD', 'SGD'
 // The FX/crypto/signals-consensus files live in TRAPP2-1 (the dynamic repo
 // that holds all non-US-equity vehicles). US equities are split across TRAPP2
 // and TRAPP2-2. This base targets the dynamic repo for those three feeds.
-const DYNAMIC_DATA_BASE = 'https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2-1/main/data/';
+const DYNAMIC_DATA_BASE = GH_RAW + '/TRAPP2-1/main/data/';
 
 // Fetch the dedicated FX rates file from TRAPP2-1 and store it in the SAME
 // cache the rest of the app reads (_fxRatesMem / FX_RATES_CACHE_KEY, with the
@@ -2561,7 +2618,7 @@ async function loadRegimeSnapshot(baseDir) {
 // (which doesn't carry regime_current.json) and NOT the equities repos. We
 // resolve it from the same place the macro tab uses, so it always tracks
 // wherever macro/regime actually lives.
-const CANONICAL_REGIME_BASE = 'https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2-1/main/data/';
+const CANONICAL_REGIME_BASE = GH_RAW + '/TRAPP2-1/main/data/';
 let _regimeLoadStarted = false;
 async function loadRegimeCanonical() {
   // Load the regime ONCE from the canonical source. Idempotent — repeated tab
@@ -8074,7 +8131,7 @@ async function fetchTrapp2EtfHoldings(ticker) {
     candidates.push(dataRoot);
     if (dataRoot !== manifestBase) candidates.push(manifestBase);
   }
-  candidates.push('https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2/main/data/');
+  candidates.push(GH_RAW + '/TRAPP2/main/data/');
 
   for (const base of candidates) {
     const url = `${base}etf_holdings/${ticker}.json`;
@@ -9644,7 +9701,7 @@ let _optionsManifest = null;
 function resolveOptionsBase() {
   const mb = (typeof state !== 'undefined' && state._historyManifest && state._historyManifest.baseUrl) ? state._historyManifest.baseUrl : null;
   if (mb) return mb.replace(/\/history\/?$/, '/').replace(/\/+$/, '/') + 'options/';
-  return 'https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2/main/data/options/';
+  return GH_RAW + '/TRAPP2/main/data/options/';
 }
 
 async function loadOptionsManifest() {
@@ -11502,7 +11559,7 @@ function ensureDefaultDataSources() {
     const have = new Set(existing);
     const seed = [];
     for (const repo of DEFAULT_DATA_REPOS) {
-      const base = `https://raw.githubusercontent.com/GoodGlobeLLC/${repo}/main/data/`;
+      const base = `${GH_RAW}/${repo}/main/data/`;
       for (const f of ['master.csv', 'history_manifest.json']) {
         const u = base + f;
         if (!have.has(u)) seed.push(u);
@@ -13852,9 +13909,10 @@ async function fetchRepoFinancials(ticker) {
   // Prefer the configured data base, then the known equity repos.
   const cfg = (typeof getGitHubDataBase === 'function') ? getGitHubDataBase() : null;
   if (cfg) bases.push(cfg);
-  bases.push('https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2/main/data/');
-  bases.push('https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2-2/main/data/');
-  bases.push('https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2-1/main/data/');
+  bases.push(GH_RAW + '/TRAPP2/main/data/');
+  bases.push(GH_RAW + '/TRAPP2-2/main/data/');
+  bases.push(GH_RAW + '/TRAPP2-3/main/data/');
+  bases.push(GH_RAW + '/TRAPP2-1/main/data/');
   let sawDefinite404 = false;  // a real "not found" (vs a transient network error)
   let networkError = false;
   for (const base of bases) {
@@ -15116,7 +15174,7 @@ async function fetchLeadershipManifest() {
     candidates.push(dataRoot);
     if (dataRoot !== manifestBase) candidates.push(manifestBase);
   }
-  candidates.push('https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2/main/data/');
+  candidates.push(GH_RAW + '/TRAPP2/main/data/');
   for (const base of candidates) {
     const url = `${base}leadership/_manifest.json`;
     try {
@@ -15142,7 +15200,7 @@ async function fetchPersonProfile(slug) {
       let merged = { ...local };
       try {
         const base = state._historyManifest?.baseUrl?.replace(/\/history\/?$/, '/')
-          || 'https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2/main/data/';
+          || GH_RAW + '/TRAPP2/main/data/';
         const r = await fetch(`${base}leadership/by_person/${slug}.json`, { cache: 'no-cache' });
         if (r.ok) {
           const pipeline = await r.json();
@@ -15162,7 +15220,7 @@ async function fetchPersonProfile(slug) {
     const dataRoot = manifestBase.replace(/\/history\/?$/, '/');
     candidates.push(dataRoot);
   }
-  candidates.push('https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2/main/data/');
+  candidates.push(GH_RAW + '/TRAPP2/main/data/');
   for (const base of candidates) {
     try {
       const r = await fetch(`${base}leadership/by_person/${slug}.json`, { cache: 'no-cache' });
@@ -25140,9 +25198,9 @@ if (typeof window !== 'undefined') window.dedupePortfolioPositions = dedupePortf
 //   is EXPORT here → commit the JSON to the repo → IMPORT on any device to
 //   restore. The repo is the source of truth; localStorage is the local cache.
 // ============================================================
-const PORT_DATA_REPO = 'https://github.com/GoodGlobeLLC/TRAPP2-PORT';
-const PORT_DATA_REPO_RAW = 'https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2-PORT/main/data/portfolio_data.json';
-const PORT_DATA_REPO_EDIT = 'https://github.com/GoodGlobeLLC/TRAPP2-PORT/edit/main/data/portfolio_data.json';
+const PORT_DATA_REPO = GH_WEB + '/TRAPP2-PORT';
+const PORT_DATA_REPO_RAW = GH_RAW + '/TRAPP2-PORT/main/data/portfolio_data.json';
+const PORT_DATA_REPO_EDIT = GH_WEB + '/TRAPP2-PORT/edit/main/data/portfolio_data.json';
 
 // ============================================================
 //   PROBABILITY THESES — durable persistence (PORT repo + Supabase)
@@ -25154,8 +25212,8 @@ const PORT_DATA_REPO_EDIT = 'https://github.com/GoodGlobeLLC/TRAPP2-PORT/edit/ma
 //   every save. This file is intentionally SEPARATE from portfolio_data.json so
 //   the two concerns don't collide.
 // ============================================================
-const PROB_DATA_REPO_RAW = 'https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2-PORT/main/data/probability_data.json';
-const PROB_DATA_REPO_EDIT = 'https://github.com/GoodGlobeLLC/TRAPP2-PORT/edit/main/data/probability_data.json';
+const PROB_DATA_REPO_RAW = GH_RAW + '/TRAPP2-PORT/main/data/probability_data.json';
+const PROB_DATA_REPO_EDIT = GH_WEB + '/TRAPP2-PORT/edit/main/data/probability_data.json';
 
 // Build the durable theses snapshot for the repo. Carries the FULL thesis
 // objects (ticker, probability, weights, components, target date, created date,
@@ -31780,7 +31838,7 @@ async function fetchTrapp2CompanyFacts(ticker, forceRefresh = false) {
       if (m && !candidates.includes(m[1])) candidates.push(m[1]);
     }
   } catch {}
-  const hardFallback = 'https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2/main/data/';
+  const hardFallback = GH_RAW + '/TRAPP2/main/data/';
   if (!candidates.includes(hardFallback)) candidates.push(hardFallback);
 
   if (!state.company._factsCache) state.company._factsCache = {};
@@ -31889,7 +31947,7 @@ function saveCompanyFacts(obj) { try { localStorage.setItem(COMPANY_FACTS_STORAG
 // also fills in any ticker the device doesn't have yet.
 async function loadCompanyOverridesRemote() {
   try {
-    const r = await fetch('https://raw.githubusercontent.com/GoodGlobeLLC/XTRAPP/main/data/company_overrides.json', { cache: 'no-store' });
+    const r = await fetch(GH_RAW + '/XTRAPP/main/data/company_overrides.json', { cache: 'no-store' });
     if (!r.ok) return;
     let j = null;
     try { j = await r.json(); } catch { return; }
@@ -32953,7 +33011,7 @@ async function fetchTrapp2LeadershipCareer(ticker) {
     candidates.push(dataRoot);
     if (dataRoot !== manifestBase) candidates.push(manifestBase);
   }
-  candidates.push('https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2/main/data/');
+  candidates.push(GH_RAW + '/TRAPP2/main/data/');
 
   for (const base of candidates) {
     const url = `${base}leadership/by_ticker/${ticker}.json`;
@@ -37476,7 +37534,7 @@ async function renderBondEtfTable() {
   // the per-asset return columns (esp. 1Y/3Y) could be blank for every bond ETF.
   // Pull them straight from TRAPP2-1 into the in-memory history cache.
   if (missing.length > 0) {
-    const BOND_HIST_BASE = 'https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2-1/main/data/history/';
+    const BOND_HIST_BASE = GH_RAW + '/TRAPP2-1/main/data/history/';
     state._bondHistDirect = state._bondHistDirect || {};
     const stillMissing = missing.filter(t => !state._bondHistDirect[t] && !getHistoryForTicker(t));
     if (stillMissing.length && !state._bondHistFetching) {
@@ -39150,7 +39208,7 @@ function _13fBase() {
   // 13F files live alongside the other dynamic data (TRAPP2-1).
   return (typeof DYNAMIC_DATA_BASE !== 'undefined')
     ? DYNAMIC_DATA_BASE
-    : 'https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2-1/main/data/';
+    : GH_RAW + '/TRAPP2-1/main/data/';
 }
 
 async function load13fInstitutions() {
@@ -39771,7 +39829,7 @@ let _researchCacheStamp = 0;
 //   the backend saw differs from the data this browser sees (stale cache,
 //   missed field, source drift), which is exactly what should surface.
 // ============================================================
-const ANALYTICS_BASE = 'https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2-ANALYTICS/main/data/';
+const ANALYTICS_BASE = GH_RAW + '/TRAPP2-ANALYTICS/main/data/';
 let _backendResearch = null;          // { generatedAt, byTicker, ... } | null
 let _backendResearchFetched = false;
 
@@ -42132,7 +42190,7 @@ if (typeof window !== 'undefined') window.fetchJsonMaybeGz = fetchJsonMaybeGz;
 // shared users get the full app even with no keys at all.
 async function loadSharedKeys() {
   try {
-    const j = await fetchJsonMaybeGz('https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2-1/main/data/app_keys.json');
+    const j = await fetchJsonMaybeGz(GH_RAW + '/TRAPP2-1/main/data/app_keys.json');
     if (!j) return 0;
     const slots = {
       finnhub: FINNHUB_KEY_STORAGE, fmp: FMP_KEY_STORAGE, alphavantage: AV_KEY_STORAGE,
@@ -42159,7 +42217,7 @@ async function loadSharedKeys() {
 // before the first key-dependent fetch even on a completely wiped browser.
 const _sharedKeysReady = (typeof fetch !== 'undefined') ? loadSharedKeys() : Promise.resolve(0);
 
-const XTRAPP_BASE = 'https://raw.githubusercontent.com/GoodGlobeLLC/XTRAPP/main/data/';
+const XTRAPP_BASE = GH_RAW + '/XTRAPP/main/data/';
 // ============================================================
 //   PUSH TO XTRAPP — commit xtrapp_data.json straight from the app.
 //
@@ -42172,8 +42230,8 @@ const XTRAPP_BASE = 'https://raw.githubusercontent.com/GoodGlobeLLC/XTRAPP/main/
 //     opens GitHub's web editor on the file — paste, commit, done.
 // ============================================================
 const GH_TOKEN_KEY = 'valuatio.github.token';
-const XTRAPP_FILE_API = 'https://api.github.com/repos/GoodGlobeLLC/XTRAPP/contents/data/xtrapp_data.json';
-const XTRAPP_FILE_EDIT = 'https://github.com/GoodGlobeLLC/XTRAPP/edit/main/data/xtrapp_data.json';
+const XTRAPP_FILE_API = GH_API_REPOS + '/XTRAPP/contents/data/xtrapp_data.json';
+const XTRAPP_FILE_EDIT = GH_WEB + '/XTRAPP/edit/main/data/xtrapp_data.json';
 
 // ============================================================
 //   GENERIC GITHUB COMMIT — one fine-grained token, all repos
@@ -42198,7 +42256,7 @@ function hasGitHubToken() { return !!getGitHubToken(); }
 //   Contents:read&write on these repos covers them all.
 // ============================================================
 const GH_REPOS_KEY = 'valuatio.github.repos.v1';
-const GH_DEFAULT_OWNER = 'GoodGlobeLLC';
+const GH_DEFAULT_OWNER = VALUATIO_OWNER;
 const GH_DEFAULT_BRANCH = 'main';
 
 // Canonical writable destinations: stable key + builder + DEFAULT target.
@@ -42355,7 +42413,7 @@ function openGitHubReposModal() {
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
           <button class="btn" id="gh-repos-save">Save mapping</button>
           <button class="btn btn-ghost" id="gh-repos-testall">Test all</button>
-          <button class="btn btn-ghost" id="gh-repos-reset" title="Restore GoodGlobeLLC defaults">Reset defaults</button>
+          <button class="btn btn-ghost" id="gh-repos-reset" title="Restore ${VALUATIO_OWNER} defaults">Reset defaults</button>
           <span id="gh-repos-msg" style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);align-self:center"></span>
         </div>
       </div>
@@ -42420,7 +42478,7 @@ async function setGitHubToken() {
   const cur = localStorage.getItem(GH_TOKEN_KEY);
   const t = await appPrompt(
     'Paste a FINE-GRAINED GitHub token with Contents: Read & write, scoped to your\n' +
-    'GoodGlobeLLC data repos (TRAPP2-PORT, TRAPP2-BOT, TRAPP2-ANALYTICS, XTRAPP).\n' +
+    VALUATIO_OWNER + ' data repos (TRAPP2-PORT, TRAPP2-BOT, TRAPP2-ANALYTICS, XTRAPP).\n' +
     '(github.com → Settings → Developer settings → Fine-grained tokens → select those repos)\n\n' +
     'With this set, "Save to Repo" buttons write the JSON straight to GitHub —\n' +
     'no more download + paste. Stored in THIS browser only; never included in any export.\n\n' +
@@ -42711,9 +42769,9 @@ const BOT_KEY = 'valuatio.bot.v1';
 // can't write to GitHub from the browser, so the flow is EXPORT here → manually
 // commit bot_training_data.json to this repo (same pattern as XTRAPP). On load /
 // on demand the app can IMPORT it back to restore history on a fresh device.
-const BOT_DATA_REPO_URL = 'https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2-BOT/main/data/bot_training_data.json';
-const BOT_DATA_REPO = 'https://github.com/GoodGlobeLLC/TRAPP2-BOT';
-const BOT_DATA_REPO_EDIT = 'https://github.com/GoodGlobeLLC/TRAPP2-BOT/edit/main/data/bot_training_data.json';
+const BOT_DATA_REPO_URL = GH_RAW + '/TRAPP2-BOT/main/data/bot_training_data.json';
+const BOT_DATA_REPO = GH_WEB + '/TRAPP2-BOT';
+const BOT_DATA_REPO_EDIT = GH_WEB + '/TRAPP2-BOT/edit/main/data/bot_training_data.json';
 // ---- Learnable signal weights ----
 // Per-signal multipliers (key = the component name botScoreTicker uses, e.g.
 // 'trend', 'health', 'fundamental'). 1.0 = neutral. botRetrain() nudges them
@@ -44265,8 +44323,8 @@ if (typeof window !== 'undefined') {
 const REPO_SYNC_DEFS = {
   xtrapp: {
     name: 'XTRAPP', file: 'xtrapp_data.json',
-    raw: (typeof XTRAPP_BASE !== 'undefined' ? XTRAPP_BASE : 'https://raw.githubusercontent.com/GoodGlobeLLC/XTRAPP/main/data/') + 'xtrapp_data.json',
-    edit: 'https://github.com/GoodGlobeLLC/XTRAPP/edit/main/data/xtrapp_data.json',
+    raw: (typeof XTRAPP_BASE !== 'undefined' ? XTRAPP_BASE : GH_RAW + '/XTRAPP/main/data/') + 'xtrapp_data.json',
+    edit: GH_WEB + '/XTRAPP/edit/main/data/xtrapp_data.json',
     desc: 'lexicon · posts · news fixes · edits (timestamped) · human grades · review queue',
     export: () => (typeof exportXtrappData === 'function') ? exportXtrappData() : null,
     update: () => (typeof fetchXtrappData === 'function') ? fetchXtrappData() : Promise.resolve(null),
@@ -44274,24 +44332,24 @@ const REPO_SYNC_DEFS = {
   },
   bot: {
     name: 'TRAPP2-BOT', file: 'bot_training_data.json',
-    raw: (typeof BOT_DATA_REPO_URL !== 'undefined' ? BOT_DATA_REPO_URL : 'https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2-BOT/main/data/bot_training_data.json'),
-    edit: (typeof BOT_DATA_REPO_EDIT !== 'undefined' ? BOT_DATA_REPO_EDIT : 'https://github.com/GoodGlobeLLC/TRAPP2-BOT/edit/main/data/bot_training_data.json'),
+    raw: (typeof BOT_DATA_REPO_URL !== 'undefined' ? BOT_DATA_REPO_URL : GH_RAW + '/TRAPP2-BOT/main/data/bot_training_data.json'),
+    edit: (typeof BOT_DATA_REPO_EDIT !== 'undefined' ? BOT_DATA_REPO_EDIT : GH_WEB + '/TRAPP2-BOT/edit/main/data/bot_training_data.json'),
     desc: 'every paper trade · why · what worked · learned signal weights · bankroll',
     export: () => (typeof exportBotTrainingData === 'function') ? exportBotTrainingData() : null,
     update: () => (typeof importBotTrainingData === 'function') ? importBotTrainingData() : Promise.resolve(null),
   },
   port: {
     name: 'TRAPP2-PORT', file: 'portfolio_data.json',
-    raw: (typeof PORT_DATA_REPO_RAW !== 'undefined' ? PORT_DATA_REPO_RAW : 'https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2-PORT/main/data/portfolio_data.json'),
-    edit: (typeof PORT_DATA_REPO_EDIT !== 'undefined' ? PORT_DATA_REPO_EDIT : 'https://github.com/GoodGlobeLLC/TRAPP2-PORT/edit/main/data/portfolio_data.json'),
+    raw: (typeof PORT_DATA_REPO_RAW !== 'undefined' ? PORT_DATA_REPO_RAW : GH_RAW + '/TRAPP2-PORT/main/data/portfolio_data.json'),
+    edit: (typeof PORT_DATA_REPO_EDIT !== 'undefined' ? PORT_DATA_REPO_EDIT : GH_WEB + '/TRAPP2-PORT/edit/main/data/portfolio_data.json'),
     desc: 'positions · watchlist · tracking · transactions · cash · GoodGlobe index · conviction',
     export: () => (typeof exportPortfolioData === 'function') ? exportPortfolioData() : null,
     update: () => (typeof importPortfolioData === 'function') ? importPortfolioData() : Promise.resolve(null),
   },
   analytics: {
     name: 'TRAPP2-ANALYTICS', file: 'research_grades.json',
-    raw: (typeof ANALYTICS_BASE !== 'undefined' ? ANALYTICS_BASE : 'https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2-ANALYTICS/main/data/') + 'research_grades.json',
-    edit: 'https://github.com/GoodGlobeLLC/TRAPP2-ANALYTICS/edit/main/data/research_grades.json',
+    raw: (typeof ANALYTICS_BASE !== 'undefined' ? ANALYTICS_BASE : GH_RAW + '/TRAPP2-ANALYTICS/main/data/') + 'research_grades.json',
+    edit: GH_WEB + '/TRAPP2-ANALYTICS/edit/main/data/research_grades.json',
     desc: 'research grades · composite grades · regime · probability (pipeline-authored — app reads it)',
     readOnly: true,
     export: () => exportAnalyticsSnapshot(),
@@ -47872,7 +47930,7 @@ function botReconstructEquityCurve(bot) {
 }
 
 let _botEquityTape = null; let _botEquityTapeAt = 0;
-const BOT_EQUITY_TAPE_URL = 'https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2-BOT/main/data/bot_equity_history.json';
+const BOT_EQUITY_TAPE_URL = GH_RAW + '/TRAPP2-BOT/main/data/bot_equity_history.json';
 // Pull the backend's 30-minute equity tape (Robinhood-style intraday marks). Cached
 // for 5 min; re-render the Bets tab when fresh data lands.
 async function loadBotEquityTape(force) {
@@ -53193,7 +53251,7 @@ let _gtFreshGdp = null;
 async function loadGtFreshGdp() {
   if (_gtFreshGdp) return _gtFreshGdp;
   const base = (typeof DYNAMIC_DATA_BASE !== 'undefined') ? DYNAMIC_DATA_BASE
-    : 'https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2-1/main/data/';
+    : GH_RAW + '/TRAPP2-1/main/data/';
   try {
     const r = await fetch(base + 'global_trade.json', { cache: 'no-cache' });
     if (r.ok) {
@@ -53222,7 +53280,7 @@ async function loadGtFreshGdp() {
 async function loadGtWorldBank() {
   if (_gtWorldBankData) return _gtWorldBankData;
   const base = (typeof DYNAMIC_DATA_BASE !== 'undefined') ? DYNAMIC_DATA_BASE
-    : 'https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2-1/main/data/';
+    : GH_RAW + '/TRAPP2-1/main/data/';
   try {
     const r = await fetch(base + 'worldbank_countries.json', { cache: 'no-cache' });
     if (r.ok) {
@@ -53238,7 +53296,7 @@ async function loadGtWorldBank() {
 async function loadGtTrade() {
   if (_gtTradeData) return _gtTradeData;
   const base = (typeof DYNAMIC_DATA_BASE !== 'undefined') ? DYNAMIC_DATA_BASE
-    : 'https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2-1/main/data/';
+    : GH_RAW + '/TRAPP2-1/main/data/';
   try {
     const r = await fetch(base + 'macro_trade.json', { cache: 'no-cache' });
     if (r.ok) {
@@ -53263,7 +53321,7 @@ const ISO3_TO_M49 = {
 async function loadGtComtrade() {
   if (_gtComtradeData) return _gtComtradeData;
   const base = (typeof DYNAMIC_DATA_BASE !== 'undefined') ? DYNAMIC_DATA_BASE
-    : 'https://raw.githubusercontent.com/GoodGlobeLLC/TRAPP2-1/main/data/';
+    : GH_RAW + '/TRAPP2-1/main/data/';
   try {
     const r = await fetch(base + 'comtrade_flows.json', { cache: 'no-cache' });
     if (r.ok) {
@@ -53445,7 +53503,7 @@ if (typeof window !== 'undefined') { window.vFetchLive = vFetchLive; window.vFet
 
 // ---- The tape --------------------------------------------------------------
 const V_TAPE_REPOS = ['TRAPP2', 'TRAPP2-2', 'TRAPP2-3', 'TRAPP2-1'];
-const V_TAPE_BASE = (repo) => `https://raw.githubusercontent.com/GoodGlobeLLC/${repo}/main/data/intraday/`;
+const V_TAPE_BASE = (repo) => `${GH_RAW}/${repo}/main/data/intraday/`;
 // Beyond this, a tape point is no longer "now". Two full 15-minute buckets plus
 // slack for GitHub Actions queue lag, which is routinely minutes and has been
 // observed in hours on the first trigger of the day.
