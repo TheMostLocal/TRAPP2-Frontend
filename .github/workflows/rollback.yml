@@ -1,0 +1,38 @@
+# .github/workflows/rollback.yml  →  commit into TRAPP2-Frontend
+#
+# ONE-TAP ROLLBACK: resets an environment to its most recent backup tag
+# (created automatically by every promotion). If a promotion breaks
+# production, this puts the previous build back live in about a minute.
+name: Rollback environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Environment to roll back"
+        required: true
+        type: choice
+        options: [main, beta]
+
+permissions:
+  contents: write
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Roll back to latest backup tag
+        run: |
+          set -e
+          DST="${{ github.event.inputs.target }}"
+          git config user.name "valuatio-bot"
+          git config user.email "actions@github.com"
+          git fetch origin --tags
+          TAG=$(git tag -l "backup/$DST/*" | sort | tail -1)
+          if [ -z "$TAG" ]; then echo "No backup tags for $DST — nothing to roll back to"; exit 1; fi
+          git push origin "refs/tags/$TAG:refs/heads/$DST" --force
+          echo "ROLLED BACK: $DST -> $TAG"

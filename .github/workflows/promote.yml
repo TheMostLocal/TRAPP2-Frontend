@@ -1,0 +1,56 @@
+# .github/workflows/promote.yml  →  commit into TRAPP2-Frontend
+#
+# ONE-TAP PROMOTION from the Actions tab (works from the phone):
+#   Actions → "Promote environment" → Run workflow → pick a direction
+#
+#   testing → beta        rolls the testing build out to beta
+#   beta    → production  ships beta to the live app (main)
+#
+# Promotion = the target branch becomes an exact snapshot of the source
+# branch. Before moving anything, the target's current commit is saved as a
+# backup tag (backup/<target>/<timestamp>) — so production can ALWAYS be
+# rolled back in one tap with the "Rollback environment" workflow.
+#
+# Discipline that makes this safe: edit files on the TESTING branch only.
+# Production and beta only change via promotion. If you ever hotfix main
+# directly, make sure testing contains the same fix before the next promote
+# (or the hotfix gets rolled over).
+name: Promote environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      promotion:
+        description: "Which promotion?"
+        required: true
+        type: choice
+        options:
+          - "testing -> beta"
+          - "beta -> production (main)"
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Promote
+        run: |
+          set -e
+          case "${{ github.event.inputs.promotion }}" in
+            "testing -> beta")            SRC=testing; DST=beta ;;
+            "beta -> production (main)")  SRC=beta;    DST=main ;;
+          esac
+          git config user.name "valuatio-bot"
+          git config user.email "actions@github.com"
+          git fetch origin $SRC $DST
+          STAMP=$(date -u +%Y%m%d-%H%M%S)
+          git tag "backup/$DST/$STAMP" "origin/$DST"
+          git push origin "backup/$DST/$STAMP"
+          git push origin "origin/$SRC:refs/heads/$DST" --force
+          echo "PROMOTED: $SRC -> $DST (rollback tag: backup/$DST/$STAMP)"
