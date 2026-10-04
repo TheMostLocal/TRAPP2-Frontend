@@ -1,0 +1,67 @@
+# .github/workflows/deploy_envs.yml  →  commit into TRAPP2-Frontend
+#
+# Builds ONE GitHub Pages site from THREE branches:
+#     https://<user>.github.io/TRAPP2-Frontend/           → main    (PRODUCTION)
+#     https://<user>.github.io/TRAPP2-Frontend/beta/      → beta
+#     https://<user>.github.io/TRAPP2-Frontend/testing/   → testing
+#
+# Any push to any of the three branches redeploys the whole site, so the three
+# URLs always reflect their branches. The app detects which environment it's
+# running in from the URL path and sandboxes its storage accordingly.
+#
+# ONE-TIME SETUP (two minutes, from the phone works):
+#   1. In the repo: create branches `beta` and `testing` from main
+#      (GitHub UI → branch dropdown → type name → "Create branch from main")
+#   2. Settings → Pages → Source: change to "GitHub Actions"
+name: Deploy environments
+
+on:
+  push:
+    branches: [main, beta, testing]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout production (main)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: site
+
+      - name: Checkout beta
+        uses: actions/checkout@v4
+        with:
+          ref: beta
+          path: site/beta
+        continue-on-error: true   # before the beta branch exists, deploy still works
+
+      - name: Checkout testing
+        uses: actions/checkout@v4
+        with:
+          ref: testing
+          path: site/testing
+        continue-on-error: true
+
+      - name: Trim nested git metadata
+        run: rm -rf site/beta/.git site/testing/.git site/.git || true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
