@@ -76,17 +76,16 @@ const _ENV_PREFIX = APP_ENV === 'production' ? '' : `__${APP_ENV}__`;
 // ============================================================
 //   REPO OWNER LAYER (account-portable)
 //
-//   Every data URL is built from VALUATIO_OWNER instead of a hardcoded account,
-//   so the app follows the repos to whatever GitHub account serves it.
-//   Resolution order:
+//   Every data URL is built from VALUATIO_OWNER — the GitHub account that owns
+//   the Valuatio repos (currently TheMostLocal). Resolution order:
 //     1. ?owner=<login> in the URL (persisted; ?owner=reset clears it)
 //     2. a previously persisted override (valuatio.ghOwner)
 //     3. the Pages host: <login>.github.io  → <login>
-//     4. legacy fallback 'GoodGlobeLLC' (custom domains / local files)
+//     4. fallback 'TheMostLocal' (custom domains / local files)
 //   GitHub owner names are case-insensitive on raw/api/web, so the lower-cased
-//   Pages hostname resolves correctly.
+//   Pages hostname (themostlocal.github.io) resolves correctly.
 // ============================================================
-const VALUATIO_LEGACY_OWNER = 'GoodGlobeLLC';
+const VALUATIO_DEFAULT_OWNER = 'TheMostLocal';
 const VALUATIO_OWNER = (() => {
   const ok = v => typeof v === 'string' && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(v);
   try {
@@ -98,22 +97,20 @@ const VALUATIO_OWNER = (() => {
     const m = /^([A-Za-z0-9-]+)\.github\.io$/i.exec(location.hostname || '');
     if (m && ok(m[1])) return m[1];
   } catch {}
-  return VALUATIO_LEGACY_OWNER;
+  return VALUATIO_DEFAULT_OWNER;
 })();
 const GH_RAW = 'https://raw.githubusercontent.com/' + VALUATIO_OWNER;
 const GH_WEB = 'https://github.com/' + VALUATIO_OWNER;
 const GH_API_REPOS = 'https://api.github.com/repos/' + VALUATIO_OWNER;
 if (typeof window !== 'undefined') { window.VALUATIO_OWNER = VALUATIO_OWNER; }
 
-// One-shot rewrite of stored settings that still point at the legacy owner
-// (data-base URLs, macro base, repo-target map) — e.g. after restoring a backup
-// taken on the old site. Runs every load; a no-op once nothing matches, and a
-// no-op entirely while the app is still served from the legacy account.
+// Re-point stored settings that reference a Valuatio repo (TRAPP2*, XTRAPP)
+// under a DIFFERENT owner — e.g. a backup restored from a previous account's
+// site. Runs every load; a no-op once everything matches VALUATIO_OWNER.
 (function migrateStoredOwner() {
   try {
-    if (VALUATIO_OWNER.toLowerCase() === VALUATIO_LEGACY_OWNER.toLowerCase()) return;
-    const urlRe = /((?:raw\.githubusercontent\.com|github\.com|api\.github\.com\/repos)\/)GoodGlobeLLC(?=\/|$)/gi;
-    const ownerRe = /("owner"\s*:\s*")GoodGlobeLLC(")/gi;
+    const me = VALUATIO_OWNER.toLowerCase();
+    const urlRe = /((?:raw\.githubusercontent\.com|github\.com|api\.github\.com\/repos)\/)([A-Za-z0-9-]+)(?=\/(?:TRAPP2(?:-[A-Za-z0-9]+)?|XTRAPP)(?:[\/?#"'\s]|$))/gi;
     const keys = [];
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key ? localStorage.key(i) : null;
@@ -122,11 +119,21 @@ if (typeof window !== 'undefined') { window.VALUATIO_OWNER = VALUATIO_OWNER; }
     let n = 0;
     for (const k of keys) {
       const v = localStorage.getItem(k);
-      if (typeof v !== 'string' || !/goodglobellc/i.test(v)) continue;
-      const nv = v.replace(urlRe, '$1' + VALUATIO_OWNER).replace(ownerRe, '$1' + VALUATIO_OWNER + '$2');
+      if (typeof v !== 'string' || v.indexOf('github') < 0 && k !== 'valuatio.github.repos.v1') continue;
+      let nv = v.replace(urlRe, (all, pre, own) => own.toLowerCase() === me ? all : pre + VALUATIO_OWNER);
+      if (k === 'valuatio.github.repos.v1') {
+        try {
+          const map = JSON.parse(nv) || {};
+          for (const t of Object.values(map)) {
+            if (t && typeof t === 'object' && t.owner && /^(TRAPP2(-[A-Za-z0-9]+)?|XTRAPP)$/i.test(t.repo || '') && t.owner.toLowerCase() !== me) t.owner = VALUATIO_OWNER;
+            else if (t && typeof t === 'object' && t.owner && !t.repo && t.owner.toLowerCase() !== me) t.owner = VALUATIO_OWNER;
+          }
+          nv = JSON.stringify(map);
+        } catch {}
+      }
       if (nv !== v) { localStorage.setItem(k, nv); n++; }
     }
-    if (n) console.log(`[owner] re-pointed ${n} stored setting(s) from ${VALUATIO_LEGACY_OWNER} → ${VALUATIO_OWNER}`);
+    if (n) console.log(`[owner] re-pointed ${n} stored setting(s) → ${VALUATIO_OWNER}`);
   } catch (e) { console.warn('[owner] stored-setting migration skipped:', e.message); }
 })();
 
@@ -31537,7 +31544,7 @@ function countryFlag(name) {
 // Resolves the base URL from multiple sources in priority order:
 //   1) state._historyManifest.baseUrl — set by manifest registration
 //   2) The user's configured sheet URL pointing to a TRAPP2 master.csv/json
-//   3) Hardcoded fallback: GoodGlobeLLC/TRAPP2 main branch (per project setup)
+//   3) Hardcoded fallback: <VALUATIO_OWNER>/TRAPP2 main branch (per project setup)
 // ============================================================
 //   COMPANY DATA ENRICHMENT — multi-source fallback chain
 //
@@ -42238,7 +42245,7 @@ const XTRAPP_FILE_EDIT = GH_WEB + '/XTRAPP/edit/main/data/xtrapp_data.json';
 //
 //   Lets the app write a file STRAIGHT into any of the data repos via the GitHub
 //   Contents API — no manual download → open editor → paste → commit. One
-//   fine-grained token scoped to the GoodGlobeLLC repos with Contents:Read&write
+//   fine-grained token scoped to the Valuatio owner's repos with Contents:Read&write
 //   covers PORT / BOT / ANALYTICS / XTRAPP. Falls back to clipboard + web editor
 //   if no token is set, so nothing breaks without one.
 // ============================================================
@@ -42251,7 +42258,7 @@ function hasGitHubToken() { return !!getGitHubToken(); }
 //   Each writable data type (portfolio / theses / bot journal / social) commits
 //   to its OWN repo. The registry lets the user point every one at THEIR repo
 //   (owner + name + branch + path), toggle which ones "Save Everything" pushes,
-//   and test the connection. Defaults reproduce the original GoodGlobeLLC layout,
+//   and test the connection. Defaults reproduce the standard Valuatio-owner layout,
 //   so nothing changes until the user edits it. One fine-grained token with
 //   Contents:read&write on these repos covers them all.
 // ============================================================
@@ -42347,7 +42354,7 @@ async function commitTarget(key, message) {
 }
 
 // Back-compat: commit an arbitrary object to <repo>/<path>. Resolves owner/branch
-// from the registry by repo-name match (defaults to GoodGlobeLLC/main).
+// from the registry by repo-name match (defaults to VALUATIO_OWNER/main).
 async function commitFileToRepo(repo, path, obj, message) {
   const m = getGitHubTargets().find(t => t.repo.toLowerCase() === String(repo).toLowerCase());
   return _ghCommit({ owner: m ? m.owner : GH_DEFAULT_OWNER, repo, branch: m ? m.branch : GH_DEFAULT_BRANCH, path }, obj, message);
