@@ -42526,6 +42526,7 @@ async function pushXtrappToGitHub() {
       const err = await put.json().catch(() => ({}));
       throw new Error('HTTP ' + put.status + (err.message ? ' — ' + err.message : ''));
     }
+    try { localStorage.setItem('valuatio.xtrapp.lastPushAt', new Date().toISOString()); } catch {}
     if (typeof flashStatus === 'function') flashStatus('✓ Pushed to XTRAPP — fixes, posts, bets, articles all committed', 'success');
   } catch (e) {
     console.error('[xtrapp-push]', e);
@@ -42564,24 +42565,124 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') _xtrappAutoPush('tab-hidden');
 });
 
+// ============================================================
+//   XTRAPP MERGE RULES — human corrections (z75)
+//
+//   XTRAPP is the human-in-the-loop store. Two invariants:
+//     1. HUMAN beats PULLED. Corrections are layered over pipeline data
+//        everywhere they are read (applyOverridesToRow, article fixes, the
+//        leadership override layer, human grades). Pulled data never writes
+//        into these stores.
+//     2. NEWEST HUMAN beats OLDER HUMAN. When this browser and the repo
+//        disagree on the same correction, the one made LATER wins — decided
+//        per entry by its own timestamp (fix.ts, override.setAt, person
+//        .updatedAt). "Repo wins" applies only on a tie / missing timestamp,
+//        and the timestamp-less stores (lexicon, bot weights) only take the
+//        repo copy when the repo snapshot is not older than this browser's
+//        newest correction. This protects corrections made after the repo
+//        file was last written (e.g. a restored backup, or a device that was
+//        offline) from being silently reverted, then auto-pushed back.
+// ============================================================
+function _xtTs(v) {
+  if (v == null) return 0;
+  if (typeof v === 'number') return isFinite(v) ? v : 0;
+  const t = Date.parse(v);
+  return isFinite(t) ? t : 0;
+}
+// Newest timestamp of any human correction this browser holds.
+function _xtNewestLocalHumanAt(stores) {
+  let m = 0;
+  const bump = v => { const t = _xtTs(v); if (t > m) m = t; };
+  for (const f of Object.values(stores.articleFixes || {})) bump(f && f.ts);
+  for (const per of Object.values(stores.overrides || {})) {
+    if (per && typeof per === 'object') for (const e of Object.values(per)) bump(e && e.setAt);
+  }
+  const ppl = stores.leadership && stores.leadership.people;
+  if (ppl && typeof ppl === 'object') for (const p of Object.values(ppl)) bump(p && (p.updatedAt || p.createdAt));
+  const log = stores.editLog || {};
+  for (const v of Object.values(log)) {
+    if (Array.isArray(v)) v.forEach(e => bump(e && e.editedAt));
+    else if (v && typeof v === 'object') {
+      bump(v.editedAt);
+      for (const e of Object.values(v)) if (e && typeof e === 'object') bump(e.editedAt);
+    }
+  }
+  for (const g of Object.values(stores.humanGrades || {})) bump(g && g.updatedAt);
+  bump(stores.lastPushAt);
+  return m;
+}
+// Per-key merge where each entry carries its own timestamp. The incoming
+// (repo) entry wins when it is at least as new; local-only keys survive.
+function _xtMergeByTs(local, repo, tsOf) {
+  const out = { ...(local || {}) };
+  let repoWon = 0, localKept = 0;
+  for (const [k, inc] of Object.entries(repo || {})) {
+    const cur = out[k];
+    if (cur == null || _xtTs(tsOf(inc)) >= _xtTs(tsOf(cur))) { out[k] = inc; repoWon++; }
+    else localKept++;
+  }
+  return { merged: out, repoWon, localKept };
+}
+// Field overrides: { TICKER: { field: {value,setAt,expiresAt,...} } } — merged
+// per ticker AND per field (the old merge replaced a ticker's whole object).
+function _xtMergeOverrides(local, repo) {
+  const out = { ...(local || {}) };
+  let repoWon = 0, localKept = 0;
+  for (const [tk, fields] of Object.entries(repo || {})) {
+    if (!fields || typeof fields !== 'object') continue;
+    const r = _xtMergeByTs(out[tk], fields, e => (e && typeof e === 'object') ? e.setAt : 0);
+    out[tk] = r.merged; repoWon += r.repoWon; localKept += r.localKept;
+  }
+  return { merged: out, repoWon, localKept };
+}
+// Leadership store: { version, updatedAt, people: { slug: {...updatedAt} } } —
+// merged per person (the old top-level spread replaced the whole people map).
+function _xtMergeLeadership(local, repo) {
+  local = (local && typeof local === 'object') ? local : {};
+  repo = (repo && typeof repo === 'object') ? repo : {};
+  const r = _xtMergeByTs(local.people, repo.people, p => p && (p.updatedAt || p.createdAt));
+  const at = Math.max(_xtTs(local.updatedAt), _xtTs(repo.updatedAt));
+  return {
+    merged: { ...repo, ...local, people: r.merged, ...(at ? { updatedAt: new Date(at).toISOString() } : {}) },
+    repoWon: r.repoWon, localKept: r.localKept,
+  };
+}
+
 async function fetchXtrappData() {
   try {
     const j = await fetchJsonMaybeGz(XTRAPP_BASE + 'xtrapp_data.json');
     if (!j) { console.warn('[xtrapp] xtrapp_data.json not found (plain or .gz)'); return null; }
+    // Freshness: is the repo snapshot older than the newest correction here?
+    const _lsObj = k => { try { const v = JSON.parse(localStorage.getItem(k) || 'null'); return (v && typeof v === 'object') ? v : {}; } catch { return {}; } };
+    const _localNewest = _xtNewestLocalHumanAt({
+      articleFixes: (typeof loadArticleFixes === 'function') ? loadArticleFixes() : {},
+      overrides: _lsObj('valuatio.overrides.v1'),
+      leadership: _lsObj('valuatio.leadership.v1'),
+      editLog: (typeof loadEditLog === 'function') ? loadEditLog() : {},
+      humanGrades: (typeof loadHumanGrades === 'function') ? loadHumanGrades() : {},
+      lastPushAt: localStorage.getItem('valuatio.xtrapp.lastPushAt'),
+    });
+    const _repoAt = _xtTs(j.updatedAt);
+    const _repoStale = !!(_localNewest && _repoAt && _repoAt < _localNewest);
+    if (_repoStale) {
+      console.warn(`[xtrapp] repo snapshot (${j.updatedAt}) is OLDER than this browser's newest correction (${new Date(_localNewest).toISOString()}) — keeping local values on conflict; the next push brings the repo up to date.`);
+    }
     // Merge the repo lexicon with local (repo wins on conflict — it's the
     // shared source of truth), but never clobber locally-learned phrases that
     // aren't in the repo yet.
     if (j.lexicon && typeof saveLexicon === 'function') {
       const local = loadLexicon();
-      const merged = { bull: { ...local.bull, ...j.lexicon.bull }, bear: { ...local.bear, ...j.lexicon.bear },
-        meta: j.lexicon.meta || local.meta };
+      const merged = _repoStale
+        ? { bull: { ...j.lexicon.bull, ...local.bull }, bear: { ...j.lexicon.bear, ...local.bear }, meta: local.meta || j.lexicon.meta }
+        : { bull: { ...local.bull, ...j.lexicon.bull }, bear: { ...local.bear, ...j.lexicon.bear }, meta: j.lexicon.meta || local.meta };
       saveLexicon(merged);
     }
-    // Merge article fixes (repo wins on conflict). Keeps news corrections in
-    // sync across devices.
+    // Article fixes: per article, the NEWER fix (fix.ts) wins — repo on a tie.
     if (j.articleFixes && typeof saveArticleFixes === 'function') {
       const localFixes = (typeof loadArticleFixes === 'function') ? loadArticleFixes() : {};
-      saveArticleFixes({ ...localFixes, ...j.articleFixes });
+      const r = _xtMergeByTs(localFixes, j.articleFixes, f => f && f.ts);
+      saveArticleFixes(r.merged);
+      if (r.localKept) console.log(`[xtrapp] article fixes: kept ${r.localKept} newer local fix(es) over the repo copy`);
     }
     // Bot state: union bets by id (the track record is append-only — never drop
     // a bet from either side); bankroll/lastRunDate from whichever side ran
@@ -42599,7 +42700,7 @@ async function fetchXtrappData() {
     }
     if (j.botWeights && typeof saveBotWeights === 'function') {
       const localW = (typeof loadBotWeights === 'function') ? loadBotWeights() : {};
-      saveBotWeights({ ...localW, ...j.botWeights });
+      saveBotWeights(_repoStale ? { ...j.botWeights, ...localW } : { ...localW, ...j.botWeights });
     }
     // News corpus from the repo: merge by URL (fill-if-missing — live pulls and
     // local edits always win; the repo backfills what this browser hasn't seen).
@@ -42649,10 +42750,25 @@ async function fetchXtrappData() {
       } catch (e) { console.warn(`[xtrapp] ${field} merge failed:`, e.message); return false; }
     };
     let _xtrappApplied = 0;
-    // Field overrides (Editor changes, reclassifications) — repo wins.
-    if (_mergeRepoWins('overrides', 'valuatio.overrides.v1')) { _xtrappApplied++; console.log('[xtrapp] applied field overrides (repo wins)'); }
-    // Leadership overrides — repo wins.
-    if (_mergeRepoWins('leadershipOverrides', 'valuatio.leadership.v1')) _xtrappApplied++;
+    // Field overrides (Editor changes, reclassifications): per ticker + field,
+    // the NEWER correction (setAt) wins; repo wins a tie. (_mergeRepoWins kept
+    // for any future timestamp-less store.)
+    if (j.overrides && typeof j.overrides === 'object' && !Array.isArray(j.overrides)) {
+      try {
+        const r = _xtMergeOverrides(_lsObj('valuatio.overrides.v1'), j.overrides);
+        localStorage.setItem('valuatio.overrides.v1', JSON.stringify(r.merged));
+        _xtrappApplied++;
+        console.log(`[xtrapp] field overrides merged — ${r.repoWon} from repo, ${r.localKept} newer local kept`);
+      } catch (e) { console.warn('[xtrapp] overrides merge failed:', e.message); }
+    }
+    // Leadership overrides: per person, the NEWER record (updatedAt) wins.
+    if (j.leadershipOverrides && typeof j.leadershipOverrides === 'object') {
+      try {
+        const r = _xtMergeLeadership(_lsObj('valuatio.leadership.v1'), j.leadershipOverrides);
+        localStorage.setItem('valuatio.leadership.v1', JSON.stringify(r.merged));
+        _xtrappApplied++;
+      } catch (e) { console.warn('[xtrapp] leadership merge failed:', e.message); }
+    }
 
     // Personal/portfolio data: still FILL-IF-MISSING (your live device is truth
     // for YOUR holdings; the repo is only a parachute for a fresh browser).
