@@ -15344,6 +15344,7 @@ function saveLeadershipPerson(person) {
 function deleteLeadershipPerson(slug) {
   const store = loadLeadershipOverrides();
   if (store.people[slug]) {
+    if (typeof recordXtrappTombstone === 'function') recordXtrappTombstone('lead', slug);
     delete store.people[slug];
     saveLeadershipOverrides(store);
   }
@@ -21985,6 +21986,7 @@ function setOverride(ticker, field, value, opts = {}) {
   const all = loadOverrides();
   if (!all[ticker]) all[ticker] = {};
   if (value == null || value === '') {
+    if (all[ticker][field] != null && typeof recordXtrappTombstone === 'function') recordXtrappTombstone('ovr', ticker, field);
     delete all[ticker][field];
   } else {
     // Verified = approved through the human review loop (or the Editor). These
@@ -22179,12 +22181,18 @@ function getOverride(ticker, field) {
 }
 function clearOverrides(ticker) {
   const all = loadOverrides();
+  if (all[ticker] && typeof recordXtrappTombstone === 'function') {
+    for (const f of Object.keys(all[ticker])) recordXtrappTombstone('ovr', ticker, f);
+  }
   delete all[ticker];
   saveOverrides(all);
 }
 function clearOverrideField(ticker, field) {
   const all = loadOverrides();
-  if (all[ticker]) { delete all[ticker][field]; if (!Object.keys(all[ticker]).length) delete all[ticker]; saveOverrides(all); }
+  if (all[ticker]) {
+    if (all[ticker][field] != null && typeof recordXtrappTombstone === 'function') recordXtrappTombstone('ovr', ticker, field);
+    delete all[ticker][field]; if (!Object.keys(all[ticker]).length) delete all[ticker]; saveOverrides(all);
+  }
 }
 
 // Prune expired overrides across the whole store. Called on load.
@@ -39672,6 +39680,7 @@ function setHumanGrade(ticker, { grade, status, note }) {
 function clearHumanGrade(ticker) {
   const tk = (ticker || '').toUpperCase();
   const all = loadHumanGrades();
+  if (all[tk] && typeof recordXtrappTombstone === 'function') recordXtrappTombstone('grade', tk);
   delete all[tk];
   saveHumanGrades(all);
 }
@@ -42057,7 +42066,10 @@ if (typeof window !== 'undefined') {
       const key = item?.key;
       if (key && typeof loadArticleFixes === 'function' && typeof saveArticleFixes === 'function') {
         const fixes = loadArticleFixes() || {};
-        if (fixes[key]) { delete fixes[key]; saveArticleFixes(fixes); }
+        if (fixes[key]) {
+          if (typeof recordXtrappTombstone === 'function') recordXtrappTombstone('fix', key);
+          delete fixes[key]; saveArticleFixes(fixes);
+        }
       }
       if (typeof renderNewsFeed === 'function') renderNewsFeed();
       if (typeof flashStatus === 'function') flashStatus('News fix reverted', 'success');
@@ -42127,6 +42139,9 @@ function _buildXtrappPayload() {
     editLog: (typeof loadEditLog === 'function') ? loadEditLog() : {},
     editsQueue: (() => { try { return JSON.parse(localStorage.getItem(XTRAPP_EDITS_QUEUE_KEY) || '{}'); } catch { return {}; } })(),
     humanGrades: (typeof loadHumanGrades === 'function') ? loadHumanGrades() : {},
+    // Deletions of corrections (z79) — so a delete made here wins over an older
+    // copy held by another device or an older repo snapshot.
+    tombstones: (typeof loadXtrappTombstones === 'function') ? _gcXtrappTombstones(loadXtrappTombstones()) : {},
     // News corpus — the pulled articles themselves (last 500, lean fields), so
     // the article database lives in the repo, not just this browser. Fixed
     // fields ride along; on import, articleFixes still override everything.
@@ -42608,6 +42623,7 @@ function _xtNewestLocalHumanAt(stores) {
     }
   }
   for (const g of Object.values(stores.humanGrades || {})) bump(g && g.updatedAt);
+  for (const ts of Object.values(stores.tombstones || {})) bump(ts);   // a deletion is a correction too
   bump(stores.lastPushAt);
   return m;
 }
@@ -42648,6 +42664,72 @@ function _xtMergeLeadership(local, repo) {
   };
 }
 
+// ---- XTRAPP tombstones (z79) ---------------------------------------------
+// Deleting a correction must win over an OLDER copy of it held elsewhere
+// (another device, an old repo snapshot). Each deletion records
+// "<kind>:<id...>" -> ms; the merge drops any entry whose own timestamp is not
+// newer than its tombstone, on both the repo side and the local side. A
+// correction re-made after the deletion has a newer timestamp and survives.
+// Tombstones ride in the XTRAPP payload and expire after 120 days.
+//   kinds: ovr:<TICKER>:<field> · fix:<articleKey> · lead:<slug> · grade:<TICKER>
+function loadXtrappTombstones() {
+  try {
+    const v = JSON.parse(localStorage.getItem('valuatio.xtrapp.tombstones.v1') || '{}');
+    return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+  } catch { return {}; }
+}
+function saveXtrappTombstones(t) {
+  try { localStorage.setItem('valuatio.xtrapp.tombstones.v1', JSON.stringify(t || {})); } catch {}
+}
+function _gcXtrappTombstones(t, now = Date.now()) {
+  const out = {};
+  for (const [k, ts] of Object.entries(t || {})) {
+    const n = Number(ts);
+    if (isFinite(n) && n > 0 && now - n < 120 * 24 * 3600 * 1000) out[k] = n;
+  }
+  return out;
+}
+function recordXtrappTombstone(kind, ...ids) {
+  try {
+    const t = loadXtrappTombstones();
+    t[[kind, ...ids].join(':')] = Date.now();
+    saveXtrappTombstones(_gcXtrappTombstones(t));
+  } catch {}
+}
+// Union two tombstone maps (latest deletion wins), GC'd.
+function _xtUnionTombstones(a, b) {
+  const out = { ...(a || {}) };
+  for (const [k, ts] of Object.entries(b || {})) {
+    const n = Number(ts);
+    if (isFinite(n) && !(Number(out[k]) >= n)) out[k] = n;
+  }
+  return _gcXtrappTombstones(out);
+}
+// Drop entries killed by a tombstone: map {id: entry}, key = prefix + id.
+function _xtDropDead(map, tomb, prefix, tsOf) {
+  if (!map || typeof map !== 'object') return { kept: map, dropped: 0 };
+  const kept = {};
+  let dropped = 0;
+  for (const [id, e] of Object.entries(map)) {
+    const t = tomb[prefix + id];
+    if (t != null && _xtTs(tsOf(e)) <= t) { dropped++; continue; }
+    kept[id] = e;
+  }
+  return { kept, dropped };
+}
+function _xtDropDeadOverrides(all, tomb) {
+  if (!all || typeof all !== 'object') return { kept: all, dropped: 0 };
+  const kept = {};
+  let dropped = 0;
+  for (const [tk, fields] of Object.entries(all)) {
+    if (!fields || typeof fields !== 'object') { kept[tk] = fields; continue; }
+    const r = _xtDropDead(fields, tomb, `ovr:${tk}:`, e => (e && typeof e === 'object') ? e.setAt : 0);
+    dropped += r.dropped;
+    if (Object.keys(r.kept).length) kept[tk] = r.kept;
+  }
+  return { kept, dropped };
+}
+
 async function fetchXtrappData() {
   try {
     const j = await fetchJsonMaybeGz(XTRAPP_BASE + 'xtrapp_data.json');
@@ -42661,9 +42743,14 @@ async function fetchXtrappData() {
       editLog: (typeof loadEditLog === 'function') ? loadEditLog() : {},
       humanGrades: (typeof loadHumanGrades === 'function') ? loadHumanGrades() : {},
       lastPushAt: localStorage.getItem('valuatio.xtrapp.lastPushAt'),
+      tombstones: loadXtrappTombstones(),
     });
     const _repoAt = _xtTs(j.updatedAt);
     const _repoStale = !!(_localNewest && _repoAt && _repoAt < _localNewest);
+    // Tombstones: union of this browser's and the repo's deletions.
+    const _tomb = _xtUnionTombstones(loadXtrappTombstones(), j.tombstones);
+    saveXtrappTombstones(_tomb);
+    let _tombDropped = 0;
     if (_repoStale) {
       console.warn(`[xtrapp] repo snapshot (${j.updatedAt}) is OLDER than this browser's newest correction (${new Date(_localNewest).toISOString()}) — keeping local values on conflict; the next push brings the repo up to date.`);
     }
@@ -42680,8 +42767,11 @@ async function fetchXtrappData() {
     // Article fixes: per article, the NEWER fix (fix.ts) wins — repo on a tie.
     if (j.articleFixes && typeof saveArticleFixes === 'function') {
       const localFixes = (typeof loadArticleFixes === 'function') ? loadArticleFixes() : {};
-      const r = _xtMergeByTs(localFixes, j.articleFixes, f => f && f.ts);
-      saveArticleFixes(r.merged);
+      const inc = _xtDropDead(j.articleFixes, _tomb, 'fix:', f => f && f.ts);
+      const r = _xtMergeByTs(localFixes, inc.kept, f => f && f.ts);
+      const out = _xtDropDead(r.merged, _tomb, 'fix:', f => f && f.ts);
+      _tombDropped += inc.dropped + out.dropped;
+      saveArticleFixes(out.kept);
       if (r.localKept) console.log(`[xtrapp] article fixes: kept ${r.localKept} newer local fix(es) over the repo copy`);
     }
     // Bot state: union bets by id (the track record is append-only — never drop
@@ -42755,8 +42845,11 @@ async function fetchXtrappData() {
     // for any future timestamp-less store.)
     if (j.overrides && typeof j.overrides === 'object' && !Array.isArray(j.overrides)) {
       try {
-        const r = _xtMergeOverrides(_lsObj('valuatio.overrides.v1'), j.overrides);
-        localStorage.setItem('valuatio.overrides.v1', JSON.stringify(r.merged));
+        const inc = _xtDropDeadOverrides(j.overrides, _tomb);
+        const r = _xtMergeOverrides(_lsObj('valuatio.overrides.v1'), inc.kept);
+        const out = _xtDropDeadOverrides(r.merged, _tomb);
+        _tombDropped += inc.dropped + out.dropped;
+        localStorage.setItem('valuatio.overrides.v1', JSON.stringify(out.kept));
         _xtrappApplied++;
         console.log(`[xtrapp] field overrides merged — ${r.repoWon} from repo, ${r.localKept} newer local kept`);
       } catch (e) { console.warn('[xtrapp] overrides merge failed:', e.message); }
@@ -42764,7 +42857,13 @@ async function fetchXtrappData() {
     // Leadership overrides: per person, the NEWER record (updatedAt) wins.
     if (j.leadershipOverrides && typeof j.leadershipOverrides === 'object') {
       try {
-        const r = _xtMergeLeadership(_lsObj('valuatio.leadership.v1'), j.leadershipOverrides);
+        const incL = { ...j.leadershipOverrides };
+        const incP = _xtDropDead(incL.people, _tomb, 'lead:', p => p && (p.updatedAt || p.createdAt));
+        if (incL.people) incL.people = incP.kept;
+        const r = _xtMergeLeadership(_lsObj('valuatio.leadership.v1'), incL);
+        const outP = _xtDropDead(r.merged.people, _tomb, 'lead:', p => p && (p.updatedAt || p.createdAt));
+        r.merged.people = outP.kept || {};
+        _tombDropped += incP.dropped + outP.dropped;
         localStorage.setItem('valuatio.leadership.v1', JSON.stringify(r.merged));
         _xtrappApplied++;
       } catch (e) { console.warn('[xtrapp] leadership merge failed:', e.message); }
@@ -42849,14 +42948,18 @@ async function fetchXtrappData() {
     if (j.humanGrades && typeof loadHumanGrades === 'function' && typeof saveHumanGrades === 'function') {
       try {
         const local = loadHumanGrades();
-        for (const tk of Object.keys(j.humanGrades)) {
-          const inc = j.humanGrades[tk];
+        const incG = _xtDropDead(j.humanGrades, _tomb, 'grade:', g => g && g.updatedAt);
+        for (const tk of Object.keys(incG.kept || {})) {
+          const inc = incG.kept[tk];
           const cur = local[tk];
           if (!cur || new Date(inc.updatedAt || 0) >= new Date(cur.updatedAt || 0)) local[tk] = inc;
         }
-        saveHumanGrades(local);
+        const outG = _xtDropDead(local, _tomb, 'grade:', g => g && g.updatedAt);
+        _tombDropped += incG.dropped + outG.dropped;
+        saveHumanGrades(outG.kept);
       } catch (e) { console.warn('[xtrapp] human-grades merge failed:', e.message); }
     }
+    if (_tombDropped) console.log(`[xtrapp] tombstones: dropped ${_tombDropped} deleted correction(s) (deleted on this or another device)`);
     const fixCount = j.articleFixes ? Object.keys(j.articleFixes).length : 0;
     console.log(`[xtrapp] loaded lexicon (${j.lexicon?Object.keys(j.lexicon.bull||{}).length:0} bull phrases) + ${(j.posts||[]).length} posts + ${fixCount} news fixes`);
     return j;
