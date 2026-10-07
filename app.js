@@ -43718,7 +43718,8 @@ function _enrichPortfolioPosition(rec, ctx) {
       if (sb.sector) out.sector = sb.sector;
       if (sb.assetClass || sb.asset_class) out.assetClass = sb.assetClass || sb.asset_class;
     }
-    const livePrice = sb ? (sb.price ?? sb.fmpPrice ?? null) : null;
+    const mark = _portUsdMark(sb);
+    const livePrice = mark.price;                 // USD, or null -> marked at cost
     const qty = +rec.qty || 0;
     const costBasis = +rec.costBasis || 0;
     const fees = parseFloat(rec.fees) || 0;
@@ -43737,6 +43738,17 @@ function _enrichPortfolioPosition(rec, ctx) {
       }
     } else if (isActive && qty > 0 && costBasis > 0) {
       out.marketValue = +(qty * costBasis * mult).toFixed(2);
+    }
+    if (isActive) {
+      out.priceSource = mark.source;             // 'market' (USD-converted) | 'cost'
+      out.priceCurrency = 'USD';
+      if (mark.price != null) out.markPriceUsd = +mark.price.toFixed(6);
+      if (mark.localCurrency && mark.localCurrency !== 'USD') {
+        out.localCurrency = mark.localCurrency;
+        if (mark.localPrice != null) out.localPrice = +(+mark.localPrice).toFixed(6);
+        if (mark.fxRate != null) out.fxRate = +(+mark.fxRate).toPrecision(8);
+      }
+      if (mark.source === 'cost' && mark.reason) out.priceNote = mark.reason;
     }
     // Weight = this position's share of total active market value (filled in by
     // the caller when it knows the book total; default from ctx if provided).
@@ -43762,6 +43774,30 @@ function _enrichPortfolioPosition(rec, ctx) {
   } catch { return rec; }
 }
 if (typeof window !== 'undefined') window._enrichPortfolioPosition = _enrichPortfolioPosition;
+
+// USD mark for a portfolio holding (z81). Stock Book rows hold LOCAL quotes until
+// ensureRowNormalized() converts them (foreign listings via rates.json, US-cent
+// futures, London pence) - a sync that ran before a row was normalized wrote a
+// local-currency price into Supabase. This forces the conversion first and
+// refuses to mark in an unknown unit: no FX rate -> marked at cost, flagged.
+// Same provenance fields the server-side sync writes (priceSource/markPriceUsd).
+function _portUsdMark(sb) {
+  if (!sb) return { price: null, source: 'cost', reason: 'no Stock Book row' };
+  try { if (typeof ensureRowNormalized === 'function') ensureRowNormalized(sb); } catch {}
+  const p = sb.price ?? sb.fmpPrice ?? null;
+  if (p == null || !isFinite(p) || p <= 0) return { price: null, source: 'cost', reason: 'no live quote' };
+  if (sb._currencyUnconverted) {
+    return { price: null, source: 'cost', reason: `no FX rate for ${sb._localCurrency || sb.currency}`,
+             localCurrency: sb._localCurrency || sb.currency };
+  }
+  // Quote unit as listed (USX / GBp / JPY ...) - row.currency is left untouched by
+  // ensureRowNormalized, whereas _localCurrency is the converted base (USX -> USD).
+  const local = sb._usdNormalized ? (sb.currency || sb._localCurrency || 'USD') : 'USD';
+  return { price: +p, source: 'market', localCurrency: local,
+           localPrice: sb._usdNormalized ? (sb._localPrice ?? null) : +p,
+           fxRate: sb._usdNormalized ? (sb._fxRate ?? null) : 1 };
+}
+if (typeof window !== 'undefined') window._portUsdMark = _portUsdMark;
 
 function _portSupabaseRow(rec) {
   _ensurePortId(rec);
@@ -43893,7 +43929,7 @@ async function portSupabaseSyncAll() {
   for (const rec of records) {
     if (rec._kind !== 'entry' || !ACTIVE.includes(rec.position)) continue;
     const sb = _sbRows.find(r => (r.ticker || '').toUpperCase() === (rec.ticker || '').toUpperCase());
-    const px = sb ? (sb.price ?? sb.fmpPrice ?? rec.costBasis) : rec.costBasis;
+    const px = _portUsdMark(sb).price ?? rec.costBasis;     // USD (same basis as each row's marketValue)
     const mult = (typeof positionMultiplier === 'function') ? positionMultiplier(rec) : 1;
     if (px && rec.qty) _totalActiveMV += Math.abs((+rec.qty) * (+px) * mult);
   }
@@ -43992,10 +44028,43 @@ async function portSupabaseSyncAll() {
       if (!r.ok && r.status !== 409) { console.warn('[port-supabase] bulk chunk failed', r.status); if (typeof flashStatus === 'function') flashStatus(`Portfolio sync failed at row ${i} (HTTP ${r.status})`, 'error'); break; }
       sent += chunk.length;
     }
-    if (typeof flashStatus === 'function') flashStatus(`Synced ${sent} portfolio record${sent !== 1 ? 's' : ''}${deleted ? `, removed ${deleted} stale` : ''} → Supabase mirror`, 'success');
+    // Read back what Supabase now holds, so "synced" means VERIFIED in USD - not
+    // just "the POST returned 201".
+    let verify = '';
+    try {
+      const v = await portSupabaseVerifyUsd();
+      if (v) verify = ` · verified ${v.active} holding${v.active !== 1 ? 's' : ''} in USD (${v.market} market${v.cost ? `, ${v.cost} at cost` : ''}${v.unlabeled ? `, ${v.unlabeled} unlabeled` : ''})`;
+    } catch {}
+    if (typeof flashStatus === 'function') flashStatus(`Synced ${sent} portfolio record${sent !== 1 ? 's' : ''}${deleted ? `, removed ${deleted} stale` : ''} → Supabase mirror${verify}`, 'success');
     return sent;
   } catch (e) { console.warn('[port-supabase] bulk error', e.message); if (typeof flashStatus === 'function') flashStatus('Portfolio Supabase sync error — see console', 'error'); return 0; }
 }
+
+// Read back the portfolio mirror and check every ACTIVE holding is valued in USD
+// with provenance (z81). Returns {active, market, cost, unlabeled, rows} and keeps
+// the last result on window._portSupabaseLastVerify for the console / UI.
+async function portSupabaseVerifyUsd() {
+  if (!portSupabaseConfigured()) return null;
+  const r = await fetch(`${getPortSupabaseUrl()}/rest/v1/${PORT_SUPABASE_TABLE}?select=id,position,updated_at`, { headers: _portSupabaseHeaders() });
+  if (!r.ok) { console.warn('[port-supabase] verify read failed', r.status); return null; }
+  const rows = await r.json();
+  const ACTIVE = (typeof ACTIVE_POSITIONS !== 'undefined') ? ACTIVE_POSITIONS : ['Long', 'Short', 'Buy to open', 'Sell to open'];
+  const out = { active: 0, market: 0, cost: 0, unlabeled: 0, rows: [] };
+  for (const row of rows || []) {
+    const p = row && row.position;
+    if (!p || p._kind !== 'entry' || !ACTIVE.includes(p.position)) continue;
+    out.active++;
+    const src = p.priceSource || null;
+    if (src === 'market') out.market++; else if (src === 'cost') out.cost++; else out.unlabeled++;
+    out.rows.push({ ticker: p.ticker, priceSource: src || '(none)', markPriceUsd: p.markPriceUsd ?? null,
+                    localCurrency: p.localCurrency || 'USD', marketValue: p.marketValue ?? null,
+                    note: p.priceNote || '', updated: row.updated_at });
+  }
+  if (typeof window !== 'undefined') window._portSupabaseLastVerify = { at: new Date().toISOString(), ...out };
+  if (out.rows.length && typeof console.table === 'function') console.table(out.rows);
+  return out;
+}
+if (typeof window !== 'undefined') window.portSupabaseVerifyUsd = portSupabaseVerifyUsd;
 
 // Restore portfolio entries from Supabase records (fresh-device load). Merges
 // entries back into the portfolio list by ticker+role, appends unseen
