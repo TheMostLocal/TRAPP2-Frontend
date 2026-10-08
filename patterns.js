@@ -20,7 +20,7 @@
    ========================================================================== */
 (function () {
   'use strict';
-  const VER = 'z83';
+  const VER = 'z84';
   const $ = (s, r) => (r || document).querySelector(s);
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const base = () => {
@@ -42,7 +42,17 @@
     open:        { c: '#5aa9e6', g: '◇', t: 'Open — not enough bars to judge yet' },
   };
   const PIVOT_LABELS = { hs_top: ['LS', 'T1', 'H', 'T2', 'RS'], hs_bottom: ['LS', 'P1', 'H', 'P2', 'RS'],
-                         double_top: ['P1', 'T', 'P2'], double_bottom: ['B1', 'P', 'B2'] };
+                         double_top: ['P1', 'T', 'P2'], double_bottom: ['B1', 'P', 'B2'],
+                         cup_handle: ['Rim', 'Cup', 'Rim', 'Handle'], bull_flag: ['Base', 'Pole', 'Flag'],
+                         bear_flag: ['Top', 'Pole', 'Flag'], asc_triangle: ['R1', 'S1', 'R2', 'S2'],
+                         desc_triangle: ['S1', 'R1', 'S2', 'R2'], breakout_52w: ['52W hi', 'Breakout'] };
+  // VCP has 2 or 3 contractions -> label by position (H1 L1 H2 L2 ...)
+  const labelsFor = (tpl, pv) => PIVOT_LABELS[tpl] ||
+    pv.map((p, k) => (p[2] === 'H' ? 'H' : 'L') + (Math.floor(k / 2) + 1));
+  const GROUPS = [['Trend templates', ['minervini']],
+                  ['Reversal patterns', ['hs_top', 'hs_bottom', 'double_top', 'double_bottom']],
+                  ['Continuation patterns', ['vcp', 'cup_handle', 'bull_flag', 'bear_flag', 'asc_triangle', 'desc_triangle']],
+                  ['Breakouts', ['breakout_52w']]];
 
   async function getJSON(url) {
     const r = await fetch(url, { cache: 'no-cache' });
@@ -117,7 +127,7 @@
     if ($('#pat-css')) return;
     const st = document.createElement('style'); st.id = 'pat-css';
     st.textContent = `
-#pat-card{grid-column:1/-1}
+#pat-card{margin:14px 0}
 #pat-card .pat-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:4px 0 10px}
 #pat-card select,#pat-card .pat-seg button{background:var(--bg-elev,#14161a);color:var(--ink,#f0e7d0);border:1px solid var(--rule,#2d2d33);font-family:var(--mono,monospace);font-size:11px;padding:5px 8px;border-radius:4px}
 #pat-card .pat-seg button.on{border-color:var(--amber,#e0b04c);color:var(--amber,#e0b04c)}
@@ -141,7 +151,8 @@
   function ensureCard() {
     let card = $('#pat-card');
     if (card) return card;
-    const grid = $('.ta-analytics-grid');
+    const panel = $('.val-subpanel[data-subpanel="ta"]');
+    const grid = (panel && $('.ta-analytics-grid', panel)) || $('.ta-analytics-grid');
     if (!grid) return null;
     injectCSS();
     card = document.createElement('section');
@@ -167,13 +178,11 @@
         <div class="pat-box"><h4>TRACK RECORD — THIS TICKER</h4><div class="pat-scroll" id="pat-record"></div></div>
         <div class="pat-box"><h4>ACTIVE SIGNALS — LAST 10 BARS</h4><div class="pat-scroll" id="pat-signals"></div></div>
       </div>
-      <div class="pat-note">Close-based detection (daily closes, no intraday wicks), no lookahead: a pattern is only identified on the bar its last pivot became knowable, and is then judged only by later bars. Success = measured-move target before the stop (pattern extreme) within 60 bars of confirmation; unsuccessful = invalidated (broke out the other way), expired (never confirmed in 40 bars) or stopped out. Minervini = fresh 10/10, judged on 63-day return vs SPY. Paper research — not advice.</div>`;
-    grid.prepend(card);
+      <div class="pat-note">Close-based detection (daily closes, no intraday wicks), no lookahead: a pattern is only identified on the bar its last pivot became knowable, and is then judged only by later bars. Success = target before the stop within 60 bars of confirmation (measured move for H&amp;S, doubles, triangles, cup &amp; handle; the pole for flags; 2R for VCP and 52-week breakouts); unsuccessful = invalidated (broke out the other way), expired (never confirmed in 40 bars) or stopped out. Minervini = fresh 10/10, judged on 63-day return vs SPY. Paper research — not advice.</div>`;
+    // Full-width section right under the TA price chart (before the analytics grid).
+    grid.parentNode.insertBefore(card, grid);
     const sel = $('#pat-tpl', card);
-    const tpls = (P.current && P.current.templates) || { minervini: { label: 'Minervini Trend Template' }, hs_top: { label: 'Head & Shoulders (top)' },
-      hs_bottom: { label: 'Inverse Head & Shoulders' }, double_top: { label: 'Double Top' }, double_bottom: { label: 'Double Bottom' } };
-    sel.innerHTML = Object.entries(tpls).map(([k, v]) => `<option value="${k}">${esc(v.label)}</option>`).join('');
-    sel.value = P.tpl;
+    buildMenu(sel);
     sel.onchange = () => { P.tpl = sel.value; render(); };
     card.querySelectorAll('#pat-range button').forEach(b => b.onclick = () => {
       card.querySelectorAll('#pat-range button').forEach(x => x.classList.toggle('on', x === b));
@@ -182,6 +191,22 @@
     $('#pat-calls', card).onchange = e => { P.showCalls = e.target.checked; render(); };
     $('#pat-guide', card).onchange = e => { P.showGuide = e.target.checked; render(); };
     return card;
+  }
+
+  // Template menu - rebuilt from current.json once it loads, so new templates
+  // published by the scanner appear without a frontend change.
+  function buildMenu(sel) {
+    const tpls = (P.current && P.current.templates) || { minervini: { label: 'Minervini Trend Template' } };
+    if (sel.dataset.n === String(Object.keys(tpls).length)) return;
+    sel.dataset.n = String(Object.keys(tpls).length);
+    const seen = new Set();
+    sel.innerHTML = GROUPS.map(([g, keys]) => {
+      const opts = keys.filter(k => tpls[k]).map(k => { seen.add(k);
+        return `<option value="${k}">${esc(tpls[k].label)}${tpls[k].direction === 'bearish' ? ' ▼' : tpls[k].direction === 'bullish' && k !== 'minervini' ? ' ▲' : ''}</option>`; }).join('');
+      return opts ? `<optgroup label="${esc(g)}">${opts}</optgroup>` : '';
+    }).join('') + Object.entries(tpls).filter(([k]) => !seen.has(k)).map(([k, v]) => `<option value="${k}">${esc(v.label)}</option>`).join('');
+    if (!tpls[P.tpl]) P.tpl = 'minervini';
+    sel.value = P.tpl;
   }
 
   // ---- chart ----
@@ -224,7 +249,7 @@
     for (let i = start + 1; i < n; i++) {
       parts.push(`<line x1="${X(i - 1).toFixed(1)}" y1="${Y(all[i - 1]).toFixed(1)}" x2="${X(i).toFixed(1)}" y2="${Y(all[i]).toFixed(1)}" stroke="${scoreColor(ind.score[i])}" stroke-width="1.6"/>`);
     }
-    const tpl = P.tpl, labels = PIVOT_LABELS[tpl];
+    const tpl = P.tpl;
     // system calls
     if (P.showCalls && rec && Array.isArray(rec.detections)) {
       for (const dt of rec.detections) {
@@ -238,10 +263,24 @@
         }
         const pv = (dt.pv || []).map(p => [idx.get(p[0]), p[1]]);
         if (!pv.length || !pv.some(p => inView(p[0]))) continue;
+        if (tpl === 'breakout_52w') {
+          // a level + a marker, not a price path: dashed prior 52-week high from
+          // where it was set to the breakout bar, ▲ on the breakout close.
+          const s = STATUS[dt.st] || STATUS.open, [hi, bo] = pv;
+          if (!inView(bo[0])) continue;
+          const lvl = dt.nk && dt.nk[0] ? dt.nk[0][1] : hi[1];
+          parts.push(`<line x1="${X(Math.max(start, hi[0]))}" x2="${X(bo[0])}" y1="${Y(lvl)}" y2="${Y(lvl)}" stroke="${s.c}" stroke-dasharray="4,3" stroke-width="1" opacity="0.8"><title>prior 52-week high ${fmt(lvl)}</title></line>`,
+                     `<path d="M${X(bo[0])},${Y(all[bo[0]]) - 7} l-5,-9 h10 z" transform="rotate(180 ${X(bo[0])} ${Y(all[bo[0]]) - 11.5})" fill="${s.c}"><title>52-week breakout ${dt.id} · ${esc(s.t)}${dt.rt != null ? ` · ${dt.rt}%` : ''}</title></path>`);
+          const end = dt.xd ? idx.get(dt.xd) : n - 1;
+          if (dt.tg != null && end != null) parts.push(`<line x1="${X(bo[0])}" x2="${X(end)}" y1="${Y(dt.tg)}" y2="${Y(dt.tg)}" stroke="${s.c}" stroke-dasharray="2,3" stroke-width="1"><title>2R target ${fmt(dt.tg)}</title></line>`);
+          if (dt.xd && inView(idx.get(dt.xd))) parts.push(`<text x="${X(idx.get(dt.xd)) + 4}" y="${Y(all[idx.get(dt.xd)]) - 6}" font-size="12" fill="${s.c}">${s.g}</text>`);
+          continue;
+        }
+        const labels = labelsFor(tpl, dt.pv);
         const s = STATUS[dt.st] || STATUS.open;
         parts.push(`<path d="${pv.map((p, k) => (k ? 'L' : 'M') + X(p[0]).toFixed(1) + ',' + Y(p[1]).toFixed(1)).join('')}" fill="none" stroke="${s.c}" stroke-width="1.3" opacity="0.9"/>`);
         pv.forEach((p, k) => parts.push(`<circle cx="${X(p[0])}" cy="${Y(p[1])}" r="2.6" fill="${s.c}"/>`,
-          `<text x="${X(p[0])}" y="${Y(p[1]) + (dt.pv[k][2] === 'H' ? -6 : 13)}" font-size="9" text-anchor="middle" fill="${s.c}" font-family="var(--mono)">${labels[k]}</text>`));
+          `<text x="${X(p[0])}" y="${Y(p[1]) + (dt.pv[k][2] === 'L' ? 13 : -6)}" font-size="9" text-anchor="middle" fill="${s.c}" font-family="var(--mono)">${labels[k]}</text>`));
         drawNeck(parts, dt.nk, idx, X, Y, dt.xd ? idx.get(dt.xd) : (dt.cd ? idx.get(dt.cd) : n - 1), s.c);
         if (dt.cd && inView(idx.get(dt.cd))) {
           const ci = idx.get(dt.cd);
@@ -255,13 +294,21 @@
       }
     }
     // template guide (current candidate)
-    if (P.showGuide && tpl !== 'minervini' && cur && cur.cand && cur.cand[tpl]) {
+    if (P.showGuide && tpl === 'breakout_52w' && cur && cur.cand && cur.cand[tpl]) {
+      // guide = the level to clear: prior 52-week high from where it was set to today
+      const cd = cur.cand[tpl], hi = idx.get(cd.pv[0][0]), lvl = cd.nk && cd.nk[0] ? cd.nk[0][1] : cd.pv[0][1];
+      const col = cd.ok ? 'var(--amber-bright,#ffc960)' : 'var(--ink-dim,#b8b1a4)';
+      if (hi != null && lvl != null) parts.push(`<line x1="${X(Math.max(start, hi))}" x2="${X(n - 1)}" y1="${Y(lvl)}" y2="${Y(lvl)}" stroke="${col}" stroke-dasharray="6,3" stroke-width="1.4"/>`,
+        `<text x="${X(n - 1) - 4}" y="${Y(lvl) - 5}" font-size="10" text-anchor="end" fill="${col}" font-family="var(--mono)" font-weight="600">52W high ${fmt(lvl)}</text>`);
+    }
+    if (P.showGuide && tpl !== 'minervini' && tpl !== 'breakout_52w' && cur && cur.cand && cur.cand[tpl]) {
       const cd = cur.cand[tpl], col = cd.ok ? 'var(--amber-bright,#ffc960)' : 'var(--ink-dim,#b8b1a4)';
       const pv = cd.pv.map(p => [idx.get(p[0]), p[1]]);
+      const labels = labelsFor(tpl, cd.pv);
       if (pv.every(p => p[0] != null)) {
         parts.push(`<path d="${pv.map((p, k) => (k ? 'L' : 'M') + X(p[0]).toFixed(1) + ',' + Y(p[1]).toFixed(1)).join('')}" fill="none" stroke="${col}" stroke-width="1.6" stroke-dasharray="5,3"/>`);
         pv.forEach((p, k) => parts.push(`<circle cx="${X(p[0])}" cy="${Y(p[1])}" r="3.2" fill="none" stroke="${col}" stroke-width="1.4"/>`,
-          `<text x="${X(p[0])}" y="${Y(p[1]) + (cd.pv[k][2] === 'H' ? -8 : 15)}" font-size="10" text-anchor="middle" fill="${col}" font-family="var(--mono)" font-weight="600">${labels[k]}</text>`));
+          `<text x="${X(p[0])}" y="${Y(p[1]) + (cd.pv[k][2] === 'L' ? 15 : -8)}" font-size="10" text-anchor="middle" fill="${col}" font-family="var(--mono)" font-weight="600">${labels[k]}</text>`));
         drawNeck(parts, cd.nk, idx, X, Y, n - 1, col, '6,3');
       }
     }
@@ -296,12 +343,12 @@
       return;
     }
     const cd = cur.cand && cur.cand[P.tpl], rn = names[P.tpl] || [];
-    if (!cd) { host.innerHTML = `<h4>${esc(TPLNAME(P.tpl).toUpperCase())}</h4><div class="dim">No pivot sequence of this shape yet.</div>`; return; }
+    if (!cd) { host.innerHTML = `<h4>${esc(TPLNAME(P.tpl).toUpperCase())}</h4><div class="dim">${P.tpl === 'breakout_52w' ? 'Needs 260+ bars with real volume.' : 'No pivot sequence of this shape yet.'}</div>`; return; }
     const passes = cd.p.split('').filter(x => x === '1').length;
-    host.innerHTML = `<h4>${esc(TPLNAME(P.tpl).toUpperCase())} — LATEST CANDIDATE ${passes}/${cd.p.length}</h4>` +
-      rn.map((r, k) => `<div class="pat-row" title="${esc(r[1] || '')}"><span>${esc(r[0])}</span><span><span class="dim">${cd.val[k] == null ? '' : esc(cd.val[k])}</span> <span class="${cd.p[k] === '1' ? 'ok' : 'no'}">${cd.p[k] === '1' ? '✓' : '✗'}</span></span></div>`).join('') +
+    host.innerHTML = `<h4>${esc(TPLNAME(P.tpl).toUpperCase())} — ${P.tpl === 'breakout_52w' ? 'TODAY' : 'LATEST CANDIDATE'} ${passes}/${cd.p.length}</h4>` +
+      rn.map((r, k) => `<div class="pat-row" title="${esc(r[1] || '')}"><span>${esc(r[0])}</span><span><span class="dim">${cd.val[k] == null ? '' : esc(Array.isArray(cd.val[k]) ? cd.val[k].join(' → ') : cd.val[k])}</span> <span class="${cd.p[k] === '1' ? 'ok' : 'no'}">${cd.p[k] === '1' ? '✓' : '✗'}</span></span></div>`).join('') +
       `<div class="pat-row" style="margin-top:6px"><span>${cd.ok ? '<span class="ok">VALID — identified ' + esc(cd.id) + '</span>' : '<span class="dim">Not a valid pattern (manual read only)</span>'}</span></div>` +
-      `<div class="pat-note">Pivots: ${cd.pv.map((p, k) => `${PIVOT_LABELS[P.tpl][k]} ${p[0]} @ ${fmt(p[1])}`).join(' · ')}. Hover a rule for its threshold.</div>`;
+      `<div class="pat-note">Pivots: ${cd.pv.map((p, k) => `${labelsFor(P.tpl, cd.pv)[k]} ${p[0]} @ ${fmt(p[1])}`).join(' · ')}. Hover a rule for its threshold.</div>`;
   }
   function statLine(s, label) {
     if (!s || !s.n) return `<div class="pat-row dim"><span>${label}</span><span>no data</span></div>`;
@@ -347,6 +394,7 @@
       chart.innerHTML = `<div class="dim">Pattern data unavailable (${esc(e.message)}). It's written by TRAPP2-ANALYTICS → Analytics refresh.</div>`;
       return;
     }
+    buildMenu($('#pat-tpl', card));
     const cur = P.current.tickers && P.current.tickers[t];
     $('#pat-asof', card).textContent = `${t} · scan ${P.current.asOf} · ${P.current.engine}`;
     const [rec, H] = await Promise.all([loadRecord(t), loadHistory(t, cur && cur.b)]);
@@ -355,7 +403,9 @@
     else drawChart(chart, H, cur, rec);
     $('#pat-legend', card).innerHTML = `Line colour = trend-template score from the 9 price criteria (<span style="color:${scoreColor(0)}">0</span> → <span style="color:${scoreColor(4.5)}">4.5</span> → <span style="color:${scoreColor(9)}">9</span>; RS is ranked across the universe and shown for today only). ` +
       `<span style="color:#e0b04c">SMA 50</span> · <span style="color:#5aa9e6">SMA 150</span> · <span style="color:#8a6fd1">SMA 200</span>. ` +
-      (P.tpl === 'minervini' ? 'Triangles = fresh 10/10 signals, coloured by outcome.' : 'Solid = system identifications (colour = outcome, □ = confirmation, dotted = target); dashed amber = current candidate.');
+      (P.tpl === 'minervini' ? 'Triangles = fresh 10/10 signals, coloured by outcome.' :
+       P.tpl === 'breakout_52w' ? 'Solid = system breakouts (dashed level = prior 52-week high, colour = outcome, dotted = 2R target).' :
+       'Solid = system identifications (colour = outcome, □ = confirmation, dotted = target); dashed amber = current candidate.');
     renderChecklist($('#pat-check', card), cur);
     renderStats($('#pat-stats', card), rec);
     renderRecord($('#pat-record', card), rec);
@@ -380,6 +430,18 @@
   // Follows CHANGES of the TA ticker only, so a ticker opened from the signals
   // list (or openPatterns()) stays put until the TA ticker itself changes.
   let lastTa = null;
+  // Open immediately when Valuation → Technical Analysis is clicked (the poll
+  // below also covers programmatic switches and TA-input changes).
+  document.addEventListener('click', e => {
+    const b = e.target && e.target.closest && e.target.closest('.val-subtab[data-subtab="ta"]');
+    if (!b) return;
+    setTimeout(() => {
+      ensureCard();
+      let t = currentTaTicker();
+      try { if (!t && typeof state !== 'undefined' && state.stock && state.stock.ticker) t = state.stock.ticker; } catch (err) {}
+      if (t) { lastTa = String(t).toUpperCase(); open(t); }
+    }, 0);
+  }, true);
   setInterval(() => {
     const panel = $('.val-subpanel[data-subpanel="ta"]');
     if (!panel || panel.style.display === 'none') return;
