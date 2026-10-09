@@ -20,7 +20,7 @@
    ========================================================================== */
 (function () {
   'use strict';
-  const VER = 'z85';
+  const VER = 'z87';
   const $ = (s, r) => (r || document).querySelector(s);
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const base = () => {
@@ -367,8 +367,18 @@
   function renderStats(host, rec) {
     const st = P.stats && P.stats.templates && P.stats.templates[P.tpl];
     const mine = rec && rec.stats && rec.stats[P.tpl];
+    const now = P.stats && P.stats.regimeNow ? P.stats.regimeNow.trend : null;
+    const tr = (st && st.byRegime && st.byRegime.trend) || {};
+    const regimeRows = ['up', 'mixed', 'down'].filter(r => tr[r]).map(r => {
+      const x = tr[r], cur = r === now;
+      return `<div class="pat-row ${x.usable ? '' : 'dim'}" title="${x.usable ? '' : 'fewer than ' + ((P.stats && P.stats.minRegimeN) || 50) + ' judged calls - not used by the bot'}"` +
+        `${cur ? ' style="color:var(--amber,#e0b04c)"' : ''}><span>&nbsp; ${cur ? '▸ ' : ''}${r}-trend market · n ${x.judged}</span>` +
+        `<span>${x.successRate == null ? '—' : x.successRate + '%'} <span class="${(x.edgeVsBaselinePct || 0) > 0 ? 'ok' : 'no'}">${pct(x.edgeVsBaselinePct)}</span></span></div>`;
+    }).join('');
     host.innerHTML = `<h4>STATISTICAL RECORD — ${esc(TPLNAME(P.tpl).toUpperCase())}</h4>` +
-      statLine(mine, esc(P.ticker)) + statLine(st && st.backtest, 'Universe · backtest') + statLine(st && st.live, 'Universe · live') +
+      statLine(mine, esc(P.ticker)) + statLine(st && st.backtest, 'Universe · backtest') +
+      (regimeRows ? `<div class="pat-row dim" style="margin-top:4px"><span>By market regime (SPY trend${now ? ', now ' + esc(now) : ''})</span><span>success · edge</span></div>` + regimeRows : '') +
+      statLine(st && st.live, 'Universe · live') +
       `<div class="pat-note">Success rate with 95% Wilson interval. ${P.tpl === 'minervini' ? 'Success = beat SPY over 63 trading days.' : 'Success = target reached after confirmation.'} Live record since ${esc((P.stats && P.stats.liveStart) || '—')}.</div>`;
   }
   function renderRecord(host, rec) {
@@ -510,6 +520,20 @@
       if (conf <= 0) continue;
       out.push({ key: k, conf, passes, of, ok: !!cd.ok, bars, status: s ? s.status : (cd.ok ? 'identified' : 'forming') });
     }
+    // System calls from the last 10 bars (signals.json) count too - e.g. a 52-week
+    // breakout confirmed last week is the chart's pattern even though today's bar
+    // isn't a breakout. A call that already failed is not a prediction.
+    for (const sg of sig) {
+      if (['invalidated', 'failure', 'expired'].includes(sg.status)) continue;
+      const bars = barsBetween(sg.confirmDate || sg.identDate, cur.dt);
+      const conf = Math.round(recencyFactor(bars) * 100);
+      const prev = out.find(o => o.key === sg.template);
+      const meta = (P.current.templates || {})[sg.template] || {};
+      const rulesOf = cur.cand && cur.cand[sg.template] ? cur.cand[sg.template].p.length : null;
+      const row = { key: sg.template, conf, passes: rulesOf, of: rulesOf, ok: true, bars, status: sg.status, fromCall: true };
+      if (!prev) { if (conf > 0 && meta.kind !== 'template') out.push(row); }
+      else if (conf > prev.conf || (conf === prev.conf && !prev.fromCall)) Object.assign(prev, row);
+    }
     const rank = { confirmed: 3, success: 2, identified: 2, open: 2, forming: 1 };
     out.sort((a, b) => b.conf - a.conf || (rank[b.status] || 0) - (rank[a.status] || 0) || b.passes / b.of - a.passes / a.of);
     return out;
@@ -540,16 +564,21 @@
     }
     const meta = (P.current.templates || {})[top.key] || {};
     const up = meta.direction === 'bullish';
-    const st = P.stats && P.stats.templates && P.stats.templates[top.key] && P.stats.templates[top.key].backtest;
-    const why = `Confidence = ${top.ok ? 'all' : top.passes + ' of ' + top.of} rules met x recency (last swing ~${top.bars} bars ago). ` +
-                `Historical: ${st && st.successRate != null ? st.successRate + '% reached target (n ' + st.judged + ')' : 'n/a'}. ` +
+    const tpl = P.stats && P.stats.templates && P.stats.templates[top.key];
+    const now = P.stats && P.stats.regimeNow ? P.stats.regimeNow.trend : null;
+    const rg = tpl && tpl.byRegime && tpl.byRegime.trend && tpl.byRegime.trend[now];
+    const useRg = !!(rg && rg.usable && rg.successRate != null);
+    const st = useRg ? rg : (tpl && tpl.backtest);
+    const why = (top.fromCall ? `Confidence = a system call (${top.status}) ~${top.bars} bars ago x recency. `
+                              : `Confidence = ${top.ok ? 'all' : top.passes + ' of ' + top.of} rules met x recency (last swing ~${top.bars} bars ago). `) +
+                `Historical: ${st && st.successRate != null ? st.successRate + '% reached target (n ' + st.judged + (useRg ? ', ' + now + '-trend markets only' : '') + ')' : 'n/a'}. ` +
                 (list[1] ? `Runner-up: ${TPLNAME(list[1].key)} ${list[1].conf}%.` : '');
     host.title = why;
     host.innerHTML = `<span class="k">PATTERN READ</span>` +
       `<span class="v">${esc(TPLNAME(top.key))} <span class="${up ? 'up' : 'dn'}">${up ? '▲' : '▼'}</span></span>` +
       `<span>${esc(top.status)}</span>` +
       `<span>confidence <span class="v">${top.conf}%</span></span>` +
-      (st && st.successRate != null ? `<span class="k">hist. ${st.successRate}% hit target</span>` : '') +
+      (st && st.successRate != null ? `<span class="k">hist. ${st.successRate}% hit target${useRg ? ' in ' + esc(now) + '-trend markets' : ''}</span>` : '') +
       `<a data-k="${esc(top.key)}">details</a>`;
     const a = $('a', host);
     if (a) a.onclick = () => openInTA(top.key);
