@@ -20,7 +20,7 @@
    ========================================================================== */
 (function () {
   'use strict';
-  const VER = 'z84';
+  const VER = 'z85';
   const $ = (s, r) => (r || document).querySelector(s);
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const base = () => {
@@ -144,7 +144,12 @@
 #pat-card .pat-scroll{max-height:260px;overflow:auto}
 #pat-card .pat-chart{overflow-x:auto}
 #pat-card .pat-note{font-family:var(--mono,monospace);font-size:10px;color:var(--ink-faint,#6e6a5f);margin-top:6px;line-height:1.5}
-#pat-card .pat-sig{cursor:pointer} #pat-card .pat-sig:hover td{color:var(--amber,#e0b04c)}`;
+#pat-card .pat-sig{cursor:pointer} #pat-card .pat-sig:hover td{color:var(--amber,#e0b04c)}
+#pat-pred{font-family:var(--mono,monospace);font-size:11px;color:var(--ink-dim,#b8b1a4);margin:6px 2px 2px;display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline}
+#pat-pred .k{color:var(--ink-faint,#6e6a5f);letter-spacing:.04em}
+#pat-pred .v{color:var(--ink,#f0e7d0)} #pat-pred .up{color:var(--green,#6cc28a)} #pat-pred .dn{color:var(--red,#d97a6c)}
+#pat-pred a{color:var(--ink-faint,#6e6a5f);cursor:pointer;text-decoration:underline dotted}
+#pat-pred a:hover{color:var(--amber,#e0b04c)}`;
     document.head.appendChild(st);
   }
 
@@ -416,7 +421,7 @@
     const t = String(ticker || '').trim().toUpperCase();
     if (!t) return;
     P.ticker = t;
-    render();
+    if (patternsOn()) render();
   }
   window.openPatterns = open;
   window.patternsState = P;
@@ -427,6 +432,140 @@
     const inp = $('#ta-ticker-input');
     return inp && inp.value ? inp.value.trim().toUpperCase() : null;
   }
+  // ---- "Patterns" button among the TA tools ----------------------------------
+  // The card shows only while the Patterns tool is on, like the other TA tools.
+  // The app's own #ta-tools handler toggles 'patterns' in state.ta.activeTools
+  // (and Cursor / Clear turn it off); this file just follows that state and
+  // remembers the choice between sessions.
+  const PREF = 'valuatio.ta.patternsOn';
+  function toolsSet() { try { return (typeof state !== 'undefined' && state.ta && state.ta.activeTools) || null; } catch (e) { return null; } }
+  function ensureButton() {
+    const bar = $('#ta-tools');
+    if (!bar) return null;
+    let btn = $('.ta-tool[data-tool="patterns"]', bar);
+    if (btn) return btn;
+    btn = document.createElement('button');
+    btn.className = 'ta-tool'; btn.dataset.tool = 'patterns';
+    btn.title = 'Chart patterns & trend templates - every call statistically tracked (success rate, 95% CI, record per ticker)';
+    btn.innerHTML = '<span class="ta-tool-icon">◇</span><span class="ta-tool-name">Patterns</span>';
+    const right = [...bar.children].find(el => el.tagName === 'DIV' && /margin-left:\s*auto/.test(el.getAttribute('style') || ''));
+    bar.insertBefore(btn, right || null);
+    // restore the remembered choice once per page load
+    let on = false;
+    try { on = localStorage.getItem(PREF) === '1'; } catch (e) {}
+    const set = toolsSet();
+    if (on && set && !set.has('patterns')) { set.add('patterns'); btn.classList.add('active'); }
+    bar.addEventListener('click', () => setTimeout(syncVisibility, 0));      // runs after the app's handler
+    const clr = $('#ta-clear-drawings');
+    if (clr) clr.addEventListener('click', () => setTimeout(syncVisibility, 0));
+    return btn;
+  }
+  function patternsOn() {
+    const set = toolsSet();
+    if (set) return set.has('patterns');
+    const b = $('.ta-tool[data-tool="patterns"]');
+    return !!(b && b.classList.contains('active'));
+  }
+  function syncVisibility() {
+    const on = patternsOn();
+    try { localStorage.setItem(PREF, on ? '1' : '0'); } catch (e) {}
+    const b = $('.ta-tool[data-tool="patterns"]');
+    if (b) b.classList.toggle('active', on);
+    let card = $('#pat-card');
+    if (on && !card) card = ensureCard();
+    if (card) card.style.display = on ? '' : 'none';
+    if (on && P.ticker && card && !$('#pat-chart svg', card)) render();
+  }
+
+  // ---- pattern read under the Valuation overview chart ----------------------
+  // A one-line "what pattern does this chart look like" for the valued ticker:
+  // the best-fitting candidate across the pattern templates, with a confidence
+  // = share of that template's rules met x recency of its last swing point
+  // (100% within 15 bars, fading to 40% at 45, nothing after 60), and the
+  // template's historical success rate for context.
+  function barsBetween(a, b) {
+    const d = (Date.parse(b) - Date.parse(a)) / 86400000;
+    return isFinite(d) ? Math.max(0, Math.round(d * 5 / 7)) : 999;
+  }
+  function recencyFactor(bars) {
+    if (bars <= 15) return 1;
+    if (bars <= 45) return 1 - 0.6 * (bars - 15) / 30;
+    if (bars <= 60) return 0.4 * (60 - bars) / 15;
+    return 0;
+  }
+  function predictPattern(t) {
+    const cur = P.current && P.current.tickers && P.current.tickers[t];
+    if (!cur || !cur.cand) return null;
+    const sig = ((P.signals && P.signals.signals) || []).filter(x => x.ticker === t);
+    const out = [];
+    for (const [k, cd] of Object.entries(cur.cand)) {
+      if (!cd || !cd.p) continue;
+      const passes = cd.p.split('').filter(x => x === '1').length, of = cd.p.length;
+      const last = cd.pv && cd.pv.length ? cd.pv[cd.pv.length - 1][0] : cd.id;
+      const bars = barsBetween(last, cur.dt);
+      let fit = cd.ok ? 1 : passes / of;
+      if (k === 'breakout_52w' && !cd.ok && passes < of - 1) continue;      // not "near" a breakout
+      const s = sig.find(x => x.template === k);
+      const conf = Math.round(fit * recencyFactor(k === 'breakout_52w' ? 0 : bars) * 100);
+      if (conf <= 0) continue;
+      out.push({ key: k, conf, passes, of, ok: !!cd.ok, bars, status: s ? s.status : (cd.ok ? 'identified' : 'forming') });
+    }
+    const rank = { confirmed: 3, success: 2, identified: 2, open: 2, forming: 1 };
+    out.sort((a, b) => b.conf - a.conf || (rank[b.status] || 0) - (rank[a.status] || 0) || b.passes / b.of - a.passes / a.of);
+    return out;
+  }
+  async function renderPrediction() {
+    const sec = $('#price-chart-section');
+    if (!sec || sec.style.display === 'none') return;
+    let t = null;
+    try { if (typeof state !== 'undefined' && state.stock && state.stock.ticker) t = String(state.stock.ticker).toUpperCase(); } catch (e) {}
+    if (!t) return;
+    let host = $('#pat-pred');
+    if (!host) {
+      injectCSS();
+      host = document.createElement('div'); host.id = 'pat-pred';
+      const wrap = $('.price-chart-wrap', sec);
+      if (wrap && wrap.nextSibling) sec.insertBefore(host, wrap.nextSibling); else sec.appendChild(host);
+    }
+    if (host.dataset.t === t && host.dataset.at === String(P.loadedAt)) return;
+    try { await loadShared(); } catch (e) { host.innerHTML = '<span class="k">PATTERN READ</span><span>unavailable</span>'; return; }
+    host.dataset.t = t; host.dataset.at = String(P.loadedAt);
+    const list = predictPattern(t);
+    if (!list) { host.innerHTML = '<span class="k">PATTERN READ</span><span>not scanned (needs 300+ daily bars)</span>'; return; }
+    const top = list[0];
+    if (!top || top.conf < 45) {
+      host.innerHTML = '<span class="k">PATTERN READ</span><span>no clear pattern</span>' +
+        (top ? `<span class="k">closest: ${esc(TPLNAME(top.key))} ${top.conf}%</span>` : '');
+      return;
+    }
+    const meta = (P.current.templates || {})[top.key] || {};
+    const up = meta.direction === 'bullish';
+    const st = P.stats && P.stats.templates && P.stats.templates[top.key] && P.stats.templates[top.key].backtest;
+    const why = `Confidence = ${top.ok ? 'all' : top.passes + ' of ' + top.of} rules met x recency (last swing ~${top.bars} bars ago). ` +
+                `Historical: ${st && st.successRate != null ? st.successRate + '% reached target (n ' + st.judged + ')' : 'n/a'}. ` +
+                (list[1] ? `Runner-up: ${TPLNAME(list[1].key)} ${list[1].conf}%.` : '');
+    host.title = why;
+    host.innerHTML = `<span class="k">PATTERN READ</span>` +
+      `<span class="v">${esc(TPLNAME(top.key))} <span class="${up ? 'up' : 'dn'}">${up ? '▲' : '▼'}</span></span>` +
+      `<span>${esc(top.status)}</span>` +
+      `<span>confidence <span class="v">${top.conf}%</span></span>` +
+      (st && st.successRate != null ? `<span class="k">hist. ${st.successRate}% hit target</span>` : '') +
+      `<a data-k="${esc(top.key)}">details</a>`;
+    const a = $('a', host);
+    if (a) a.onclick = () => openInTA(top.key);
+  }
+  function openInTA(key) {
+    P.tpl = key;
+    const set = toolsSet();
+    if (set) set.add('patterns');
+    try { localStorage.setItem(PREF, '1'); } catch (e) {}
+    const tab = $('.val-subtab[data-subtab="ta"]');
+    if (tab) tab.click();
+    setTimeout(() => { ensureButton(); syncVisibility(); const sel = $('#pat-tpl'); if (sel) sel.value = key; render();
+      const c = $('#pat-card'); if (c && c.scrollIntoView) c.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 50);
+  }
+  window.patternRead = t => (P.current ? predictPattern(String(t).toUpperCase()) : null);
+
   // Follows CHANGES of the TA ticker only, so a ticker opened from the signals
   // list (or openPatterns()) stays put until the TA ticker itself changes.
   let lastTa = null;
@@ -436,16 +575,20 @@
     const b = e.target && e.target.closest && e.target.closest('.val-subtab[data-subtab="ta"]');
     if (!b) return;
     setTimeout(() => {
-      ensureCard();
+      ensureButton();
+      syncVisibility();
       let t = currentTaTicker();
       try { if (!t && typeof state !== 'undefined' && state.stock && state.stock.ticker) t = state.stock.ticker; } catch (err) {}
-      if (t) { lastTa = String(t).toUpperCase(); open(t); }
+      if (t && patternsOn()) { lastTa = String(t).toUpperCase(); open(t); }
     }, 0);
   }, true);
   setInterval(() => {
+    renderPrediction();
     const panel = $('.val-subpanel[data-subpanel="ta"]');
     if (!panel || panel.style.display === 'none') return;
-    if (!$('#pat-card')) ensureCard();
+    ensureButton();
+    syncVisibility();
+    if (!patternsOn()) return;
     const t = currentTaTicker();
     if (t && t !== lastTa) { lastTa = t; open(t); }
   }, 1200);
