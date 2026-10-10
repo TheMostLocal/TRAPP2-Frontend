@@ -2241,6 +2241,15 @@ function parseSheetCsv(text) {
     'dividend_yield','dividend yield','div yield','divyield','fetched_at','profile_fetched_at',
     // Financials (legacy / additional)
     'revenue','fcf','ebitda','debt','cash','operating margin','op margin','ev/ebitda',
+    // Pipeline financial columns (fetch_data.py writes them camelCase; headers are
+    // lowercased above). z89: these were missing, so everything AFTER the last
+    // known column (currentRatio, quickRatio, debtToEquity, payoutRatio, pegRatio,
+    // ownership, short interest) was treated as trailing price-history columns
+    // and dropped - the Research tab showed no current/quick/payout ratio.
+    'asset_class','returnonequity','returnonassets','grossmargin','operatingmargin','profitmargin',
+    'revenuegrowth','earningsgrowth','freecashflow','netincome','stockbasedcomp','pricetobook',
+    'evtoebitda','evtorevenue','totaldebt','totalequity','totalassets','currentratio','quickratio',
+    'debttoequity','payoutratio','pegratio','heldpctinsiders','heldpctinstitutions','shortpctfloat',
   ]);
   let lastDataCol = -1;
   for (let i = 0; i < headers.length; i++) {
@@ -11765,6 +11774,24 @@ async function loadStockBook(forceRefresh = false) {
         return5y: sheetNum(row, 'return260'),
         netAssets: sheetNum(row, 'net assets', 'netassets'),
         expenseRatio: sheetNum(row, 'expense ratio', 'expenseratio'),
+        // Pipeline financial columns (z89) - only set when the sheet has them.
+        ...(() => {
+          const f = {};
+          const put = (key, ...cols) => { const v = sheetNum(row, ...cols); if (v != null) f[key] = v; };
+          put('returnOnEquity', 'returnonequity'); put('returnOnAssets', 'returnonassets');
+          put('grossMargin', 'grossmargin'); put('operatingMargin', 'operatingmargin'); put('profitMargin', 'profitmargin');
+          put('revenueGrowth', 'revenuegrowth'); put('earningsGrowth', 'earningsgrowth');
+          put('freeCashFlow', 'freecashflow'); put('netIncome', 'netincome'); put('stockBasedComp', 'stockbasedcomp');
+          put('priceToBook', 'pricetobook'); put('evToEbitda', 'evtoebitda'); put('evToRevenue', 'evtorevenue');
+          put('totalDebt', 'totaldebt'); put('totalEquity', 'totalequity'); put('totalAssets', 'totalassets');
+          put('currentRatio', 'currentratio'); put('quickRatio', 'quickratio'); put('payoutRatio', 'payoutratio');
+          put('pegRatio', 'pegratio'); put('heldPctInsiders', 'heldpctinsiders');
+          put('heldPctInstitutions', 'heldpctinstitutions'); put('shortPctFloat', 'shortpctfloat');
+          // yfinance reports debt/equity in PERCENT (78.4 = 0.784x); the app's ratio is a multiple.
+          const de = sheetNum(row, 'debttoequity');
+          if (de != null) f.debtToEquity = de / 100;
+          return f;
+        })(),
         morningstarRating: sheetNum(row, 'morningstarrating', 'morningstar rating'),
         revenue: sheetNum(row, 'revenue'),
         fcf: sheetNum(row, 'fcf', 'free cash flow'),
@@ -22754,6 +22781,7 @@ const _NUMERIC_ROW_FIELDS = [
   'revenueGrowth','earningsGrowth','revenue','ebitda','freeCashFlow','netIncome',
   'priceToBook','evToEbitda','evToRevenue','totalDebt','totalEquity','totalAssets',
   'cash','stockBasedComp','goodwill','intangibleAssets','intangibles','employees',
+  'currentRatio','quickRatio','payoutRatio','pegRatio','heldPctInsiders','heldPctInstitutions','shortPctFloat',
 ];
 function normalizeRowFields(row) {
   if (!row) return row;
@@ -26112,7 +26140,7 @@ function _ledgerCheckBannerHtml() {
   const over = findLedgerOversells();
   const voided = loadAllTransactions().filter(t => t && t.void);
   if (!over.length && !voided.length) return '';
-  const d = ts => { try { return new Date(ts).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }); } catch { return ts || ''; } };
+  const d = ts => { const x = ts ? new Date(ts) : null; return (x && isFinite(x)) ? x.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : ''; };
   const rows = over.map(o => {
     const t = o.tx, proceeds = (t.proceeds != null) ? +t.proceeds : (+t.qty || 0) * (+t.price || 0) - (+t.fee || 0);
     return `<div style="display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;margin-top:6px">
@@ -26143,6 +26171,111 @@ function portfolioIntegrityPass(source) {
   return bad.length;
 }
 if (typeof window !== 'undefined') window.portfolioIntegrityPass = portfolioIntegrityPass;
+
+// ============================================================================
+//   CASH RECONCILIATION (z89)
+//   The cash balance is a stored number; every trade also leaves a ledger row.
+//   Expected cash = OPENING CAPITAL (what you started with, entered once)
+//                 + every non-void ledger row's cash effect (buys, sells, shorts,
+//                   options, deposits, withdrawals, adjustments).
+//   Any gap between expected and stored cash came from moves that never reached
+//   the ledger (e.g. the old double credit on full sales). "Post correction"
+//   sets cash to the expected value and records an ADJUSTMENT row, so the fix
+//   is itself on the books.
+// ============================================================================
+const CASH_OPENING_KEY = 'valuatio.cash.opening.v1';
+function loadCashOpening() {
+  try { const v = JSON.parse(localStorage.getItem(CASH_OPENING_KEY) || 'null'); return (v && isFinite(+v.amount)) ? v : null; } catch { return null; }
+}
+function saveCashOpening(amount) {
+  try { localStorage.setItem(CASH_OPENING_KEY, JSON.stringify({ amount: +amount, setAt: new Date().toISOString() })); } catch {}
+}
+function txCashEffect(tx) {
+  if (!tx || tx.void) return 0;
+  const q = +tx.qty || 0, px = +tx.price || 0, fee = +tx.fee || 0;
+  const mult = (typeof txMultiplier === 'function') ? (txMultiplier(tx) || 1) : 1;
+  switch (tx.type) {
+    case 'buy':          return -((+tx.cost) || (q * px * mult + fee));
+    case 'short':        return (tx.proceeds != null && +tx.proceeds) ? +tx.proceeds : (q * px * mult - fee);
+    case 'sell':         return (tx.proceeds != null && tx.proceeds !== '') ? +tx.proceeds : (q * px * mult - fee);
+    case 'buy-to-open':  return -((+tx.cost) || q * px * 100);
+    case 'sell-to-open': return  ((+tx.cost) || q * px * 100);
+    case 'deposit': case 'withdrawal': case 'adjustment': return +tx.amount || 0;
+    default:
+      // closing legs of shorts / options, if present: proceeds in, cost out
+      if (tx.proceeds != null && +tx.proceeds) return +tx.proceeds;
+      if (tx.cost != null && +tx.cost) return -(+tx.cost);
+      return 0;
+  }
+}
+function cashReconciliation() {
+  const txns = loadTransactions();
+  // ADJUSTMENT rows are corrections that bring stored cash onto the books; they
+  // are not part of "what the trades imply", so they're excluded here (counting
+  // them would move the target by the same amount and never balance).
+  const flow = txns.filter(t => t.type !== 'adjustment').reduce((s, t) => s + txCashEffect(t), 0);
+  const adjusted = txns.filter(t => t.type === 'adjustment').reduce((s, t) => s + (+t.amount || 0), 0);
+  const stored = (typeof getCashPosition === 'function') ? getCashPosition() : 0;
+  const opening = loadCashOpening();
+  const implied = stored - flow;
+  const expected = opening ? opening.amount + flow : null;
+  return { flow: +flow.toFixed(2), stored: +(+stored).toFixed(2), opening: opening ? opening.amount : null,
+           openingSetAt: opening ? opening.setAt : null, implied: +implied.toFixed(2),
+           expected: expected != null ? +expected.toFixed(2) : null,
+           diff: expected != null ? +(stored - expected).toFixed(2) : null, rows: txns.length,
+           adjusted: +adjusted.toFixed(2) };
+}
+function setCashOpeningFromInput() {
+  const el = document.getElementById('cash-recon-opening');
+  const v = parseFloat(String(el?.value || '').replace(/[,$\s]/g, ''));
+  if (!isFinite(v) || v < 0) { if (typeof flashStatus === 'function') flashStatus('Enter the cash you started with (a number)', 'error'); return; }
+  saveCashOpening(v);
+  try { renderStockBook(); } catch {}
+}
+function postCashCorrection() {
+  const r = cashReconciliation();
+  if (r.expected == null || Math.abs(r.diff) < 0.005) return false;
+  const amount = +(r.expected - r.stored).toFixed(2);
+  appendTransaction({ type: 'adjustment', amount, ticker: '', qty: 0, price: 0, fee: 0,
+                      reason: `cash reconciliation: stored ${r.stored} vs expected ${r.expected} (opening ${r.opening} + ledger ${r.flow})`,
+                      cashBefore: r.stored, cashAfter: r.expected });
+  setCashPosition(r.expected);
+  if (typeof flashStatus === 'function') flashStatus(`Cash corrected to ${fmt$(r.expected)} (${amount >= 0 ? '+' : ''}${fmt$(amount)} adjustment recorded)`, 'success');
+  try { renderStockBook(); } catch {}
+  return true;
+}
+if (typeof window !== 'undefined') Object.assign(window, { cashReconciliation, setCashOpeningFromInput, postCashCorrection, txCashEffect });
+function _cashReconHtml() {
+  const r = cashReconciliation();
+  const box = 'padding:10px 14px;background:var(--bg-elev);font-family:var(--mono);font-size:10.5px;color:var(--ink-dim);line-height:1.7;margin-bottom:14px';
+  const row = (k, v, extra = '') => `<div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap"><span>${k}</span><span style="${extra}">${v}</span></div>`;
+  const signed = v => `${v >= 0 ? '+' : '−'}${fmt$(Math.abs(v))}`;
+  const input = `<span style="display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap">
+      <input id="cash-recon-opening" inputmode="decimal" placeholder="e.g. 100000" value="${r.opening != null ? r.opening : ''}" style="width:130px;background:var(--bg-card);border:1px solid var(--rule);color:var(--ink);font-family:var(--mono);font-size:11px;padding:4px 6px;border-radius:4px">
+      <button class="btn btn-ghost" style="padding:4px 10px;font-size:10px" onclick="setCashOpeningFromInput()">${r.opening != null ? 'Update' : 'Save'}</button></span>`;
+  if (r.opening == null) {
+    return `<div style="${box};border-left:2px solid var(--amber)">
+      <strong style="color:var(--amber)">CASH RECONCILIATION</strong> · enter the cash you started with to check the balance against the ledger
+      ${row('Opening capital (before the first transaction)', input)}
+      ${row('Ledger cash flow', signed(r.flow))}
+      ${row('Stored cash', fmt$(r.stored))}
+      ${row('Opening implied by stored cash', fmt$(r.implied), 'color:var(--ink-faint)')}
+    </div>`;
+  }
+  const ok = Math.abs(r.diff) < 0.005;
+  return `<div style="${box};border-left:2px solid ${ok ? 'var(--pos)' : 'var(--red)'}">
+    <strong style="color:${ok ? 'var(--pos)' : 'var(--red)'}">CASH RECONCILIATION</strong> · ${ok ? 'balanced' : 'stored cash does not match the ledger'}
+    <div style="color:var(--ink-faint);font-size:9.5px">Ledger cash flow = every non-void buy, sell, short, option, deposit and withdrawal.</div>
+    ${row('Opening capital', input)}
+    ${row('+ Ledger cash flow', signed(r.flow))}
+    ${row('= Expected cash', fmt$(r.expected), 'color:var(--ink)')}
+    ${row('Stored cash', fmt$(r.stored))}
+    ${row('Difference', signed(r.diff), ok ? '' : 'color:var(--red);font-weight:700')}
+    ${r.adjusted ? row('Corrections already posted', signed(r.adjusted), 'color:var(--ink-faint)') : ''}
+    ${ok ? '' : `<div style="margin-top:6px"><button class="btn" style="padding:5px 12px;font-size:10px" onclick="if(confirm('Set cash to ${fmt$(r.expected)} and record a ${signed(r.expected - r.stored)} ADJUSTMENT row?')){postCashCorrection();}">Post correction → ${fmt$(r.expected)}</button>
+      <span style="color:var(--ink-faint);margin-left:8px">records an ADJUSTMENT row; nothing is deleted</span></div>`}
+  </div>`;
+}
 setTimeout(() => { try { portfolioIntegrityPass('startup'); } catch (e) { console.warn('[portfolio] integrity pass failed', e); } }, 4000);
 function updatePortfolioEntry(id, patch) {
   const arr = loadPortfolio();
@@ -27612,11 +27745,11 @@ function renderGoodGlobeIndexView(content, summary, subTabs) {
             </div>
             <div id="gg-sub-readout" style="font-family:var(--mono);font-size:10px;color:var(--ink-dim);margin-top:2px">since inception · hover to scrub</div>
           </div>
-          <div class="seg-control" style="font-size:10px">
+          ${(typeof window !== 'undefined' && window.VChart) ? '' : `          <div class="seg-control" style="font-size:10px">
             ${['week','month','quarter','year','all'].map(w => `<button class="seg-btn ${win===w?'active':''}" data-ggperfwin="${w}" style="font-size:10px;text-transform:capitalize">${w==='all'?'All':w==='week'?'1W':w==='month'?'1M':w==='quarter'?'1Q':'1Y'}</button>`).join('')}
-          </div>
+          </div>`}
         </div>
-        ${chart}
+        ${(typeof window !== 'undefined' && window.VChart) ? '<div id="gg-hist-mount"></div>' : chart}
         <div style="font-family:var(--mono);font-size:8px;color:var(--ink-faint);margin-top:8px;opacity:0.8">${perf.weightMode === 'mktcap' ? 'Market-cap weighted: bigger companies move the index more.' : 'Equal-weighted: every member counts the same.'} Shorts tracked inverse. Removed tickers freeze (no retro change). <button id="gg-weight-toggle" class="btn btn-ghost" style="font-size:8px;padding:2px 8px;margin-left:6px">Switch to ${perf.weightMode === 'mktcap' ? 'equal weight' : 'market-cap'}</button> <button id="gg-ledger-btn" class="btn btn-ghost" style="font-size:8px;padding:2px 8px">Membership ledger ↗</button></div>
       </div>`;
     })()}
@@ -27758,6 +27891,9 @@ function renderGoodGlobeIndexView(content, summary, subTabs) {
     renderStockBookPortfolio(content);
   });
 
+  // z89: real index chart from member price histories (charts.js). The old
+  // snapshot chart below stays as the fallback when charts.js isn't loaded.
+  try { if (window.VChart && document.getElementById('gg-hist-mount')) window.VChart.mountGoodGlobeChart(); } catch (e) { console.warn('[gg] chart', e); }
   // ---- Floating chart hover: scrub the curve, read out price + % ----
   (function wireGgHover() {
     const hit = document.getElementById('gg-hit');
@@ -27929,6 +28065,7 @@ function renderTransactionsLedger(content, summary, subTabs) {
     if (tx.type === 'buy')   { totalCashFlow -= (tx.cost || tx.qty * tx.price + (tx.fee || 0)); totalCostBuys += (tx.qty * tx.price); }
     else if (tx.type === 'short') totalCashFlow += (tx.qty * tx.price - (tx.fee || 0));
     else if (tx.type === 'sell')  { totalCashFlow += (tx.proceeds || tx.qty * tx.price - (tx.fee || 0)); totalProceedsSells += (tx.qty * tx.price); }
+    else if (tx.type === 'deposit' || tx.type === 'withdrawal' || tx.type === 'adjustment') totalCashFlow += (+tx.amount || 0);
   });
   // Realized P/L % = realized P/L / total cost basis of sold lots
   const realizedCostBasis = transactions
@@ -28009,6 +28146,7 @@ function renderTransactionsLedger(content, summary, subTabs) {
     if (tx.type === 'buy')   cashFlow = -((tx.cost) || (tx.qty * tx.price + (tx.fee || 0)));
     else if (tx.type === 'short') cashFlow = tx.qty * tx.price - (tx.fee || 0);
     else if (tx.type === 'sell')  cashFlow = tx.proceeds || (tx.qty * tx.price - (tx.fee || 0));
+    else if (tx.type === 'deposit' || tx.type === 'withdrawal' || tx.type === 'adjustment') cashFlow = +tx.amount || 0;
     const cashColor = cashFlow >= 0 ? 'var(--pos)' : 'var(--neg)';
     const _rpl = (tx.realizedPL != null && isFinite(tx.realizedPL)) ? tx.realizedPL : (tx.type === 'sell' && tx.entryPrice != null && tx.qty ? (tx.price - tx.entryPrice) * tx.qty * txMultiplier(tx) - (tx.fee || 0) : null);
     const showPL = tx.type === 'sell' && _rpl != null;
@@ -28105,9 +28243,10 @@ function renderTransactionsLedger(content, summary, subTabs) {
       </div>
     </div>
     <div style="padding:10px 14px;background:var(--bg-elev);font-family:var(--mono);font-size:10px;color:var(--ink-faint);line-height:1.7;border-left:2px solid var(--amber);margin-bottom:14px">
-      Immutable transaction ledger — no edits or deletions allowed (a proven error is VOIDED, never deleted — see the ledger check above). <strong style="color:var(--ink-dim)">Click any SELL row to expand the full receipt</strong> with cost basis, dates, P/L, and notes. <strong style="color:var(--ink-dim)">Unrealized P/L</strong> shows mark-to-market on open BUY/SHORT/BUY-TO-OPEN/SELL-TO-OPEN rows using the latest live price.
+      Immutable transaction ledger — no edits or deletions allowed (a proven error is VOIDED, never deleted — see the ledger check below). <strong style="color:var(--ink-dim)">Click any SELL row to expand the full receipt</strong> with cost basis, dates, P/L, and notes. <strong style="color:var(--ink-dim)">Unrealized P/L</strong> shows mark-to-market on open BUY/SHORT/BUY-TO-OPEN/SELL-TO-OPEN rows using the latest live price.
     </div>
     ${(typeof _ledgerCheckBannerHtml === 'function') ? _ledgerCheckBannerHtml() : ''}
+    ${(typeof _cashReconHtml === 'function') ? _cashReconHtml() : ''}
     <div class="sb-table-wrap">
       <table class="sb-table portfolio-table">
         <thead>
@@ -48461,44 +48600,92 @@ if (typeof window !== 'undefined') window.botConfidenceFactor = botConfidenceFac
 // known pnl as a proxy, scaled toward 0 at entry so early days aren't flat).
 // Returns [{date, value}] ascending. Merges UNDER the stored curve (real recorded
 // points win) so genuine intraday marks aren't lost.
+// ============================================================================
+//   BOT EQUITY RECONSTRUCTION (z89) — real mark-to-market, not a ramp.
+//   Value(day) = starting bankroll
+//              + realized P/L of every bet closed on/before that day
+//              + every bet OPEN that day marked at that day's actual close:
+//                direction x shares x (close - entry)
+//   Closes come from each ticker's daily history in the books (charts.js
+//   fetches them once, then the Bets tab re-renders). Before this, an open
+//   bet's P/L was drawn as a straight line from 0 at entry to today's P/L,
+//   which is why the curve showed long straight runs and then spikes.
+//   Foreign / sub-unit quotes use the Stock Book row's current USD factor;
+//   a mark more than 10x away from entry is treated as a unit mismatch and
+//   skipped (same guard the backend runner uses).
+// ============================================================================
+const _botCloseCache = {};        // TICKER -> sorted [{d, c}]
+let _botClosesLoading = false;
+async function loadBotPriceHistories() {
+  if (_botClosesLoading || typeof window === 'undefined' || !window.VChart) return false;
+  let bot; try { bot = botMarkToMarket(); } catch { return false; }
+  const tks = [...new Set((bot.bets || []).map(b => String(b.ticker || '').toUpperCase()).filter(Boolean))]
+    .filter(t => !(t in _botCloseCache));
+  if (!tks.length) return false;
+  _botClosesLoading = true;
+  try {
+    await Promise.all(tks.map(async t => {
+      try { _botCloseCache[t] = (await window.VChart.fetchDaily(t)) || []; } catch { _botCloseCache[t] = []; }
+    }));
+  } finally { _botClosesLoading = false; }
+  try { if (document.getElementById('bets-body') && typeof renderBetsTab === 'function') renderBetsTab(); } catch {}
+  return true;
+}
+function _botUsdFactor(tic) {
+  try {
+    const row = (typeof getStockbookRow === 'function') ? getStockbookRow(tic) : null;
+    if (row) {
+      if (typeof ensureRowNormalized === 'function') ensureRowNormalized(row);
+      if (row._usdNormalized && +row._localPrice > 0 && +row.price > 0) return +row.price / +row._localPrice;
+      if (String(row.currency || '').toUpperCase() === 'USX') return 0.01;
+    }
+  } catch {}
+  return 1;
+}
 function botReconstructEquityCurve(bot) {
   try {
     const bets = (bot && Array.isArray(bot.bets)) ? bot.bets : [];
     if (!bets.length) return [];
-    // Earliest entry date.
     let minDate = null;
-    for (const b of bets) {
-      if (b.entryDate && (!minDate || b.entryDate < minDate)) minDate = b.entryDate;
-    }
+    for (const b of bets) if (b.entryDate && (!minDate || b.entryDate < minDate)) minDate = b.entryDate;
     if (!minDate) return [];
-    const start = new Date(minDate + 'T00:00:00Z');
-    const today = new Date();
-    const dayMs = 86400000;
+    const today = (typeof lastTradingDate === 'function') ? lastTradingDate() : new Date().toISOString().slice(0, 10);
+    // per-ticker pointer walk over its sorted closes
+    const ptr = {}, lastC = {}, fx = {};
+    const closeOn = (tic, ds) => {
+      const h = _botCloseCache[tic];
+      if (!h || !h.length) return null;
+      let i = ptr[tic] || 0;
+      while (i < h.length && h[i].d <= ds) { lastC[tic] = h[i].c; i++; }
+      ptr[tic] = i;
+      return lastC[tic] != null ? lastC[tic] : null;
+    };
     const out = [];
-    // Cap at ~370 daily points (1y+) for performance.
-    const totalDays = Math.min(370, Math.round((today - start) / dayMs) + 1);
-    for (let d = 0; d < totalDays; d++) {
-      const cur = new Date(start.getTime() + d * dayMs);
+    const start = new Date(minDate + 'T00:00:00Z'), end = new Date(today + 'T00:00:00Z');
+    for (let t = start.getTime(); t <= end.getTime(); t += 86400000) {
+      const cur = new Date(t), dow = cur.getUTCDay();
+      if (dow === 0 || dow === 6) continue;                          // markets closed
       const ds = cur.toISOString().slice(0, 10);
       let realized = 0, openMark = 0;
       for (const b of bets) {
-        if (!b.entryDate || b.entryDate > ds) continue;             // not entered yet
+        if (!b.entryDate || b.entryDate > ds) continue;
         const closed = b.status === 'closed' && b.exitDate && b.exitDate <= ds;
-        if (closed) {
-          realized += (b.pnl || 0);
-        } else if (b.status === 'open' || (b.exitDate && b.exitDate > ds)) {
-          // Open on this day. Ramp the mark from 0 at entry to its current pnl
-          // over the holding period so the curve isn't a flat step.
-          const entT = new Date(b.entryDate + 'T00:00:00Z').getTime();
-          const span = Math.max(1, (today.getTime() - entT) / dayMs);
-          const elapsed = Math.max(0, Math.min(span, (cur.getTime() - entT) / dayMs));
-          openMark += (b.pnl || 0) * (elapsed / span);
-        }
+        if (closed) { realized += (+b.pnl || 0); continue; }
+        if (!(b.status === 'open' || (b.exitDate && b.exitDate > ds))) continue;
+        const tic = String(b.ticker || '').toUpperCase();
+        const c = closeOn(tic, ds);
+        const entry = +b.entryPrice, sh = +b.shares;
+        if (c == null || !(entry > 0) || !(sh > 0)) continue;           // no history yet: no invented mark
+        if (!(tic in fx)) fx[tic] = _botUsdFactor(tic);
+        const px = c * fx[tic];
+        if (px / entry > 10 || px / entry < 0.1) continue;               // unit mismatch guard
+        const dir = (b.direction === 'short') ? -1 : 1;
+        openMark += dir * sh * (px - entry) * (b.instrument === 'option' || b.optionType ? 100 : 1);
       }
       out.push({ date: ds, value: +(BOT_STARTING_BANKROLL + realized + openMark).toFixed(2) });
     }
     return out;
-  } catch { return []; }
+  } catch (e) { console.warn('[bot] reconstruct failed', e); return []; }
 }
 
 let _botEquityTape = null; let _botEquityTapeAt = 0;
@@ -48677,13 +48864,21 @@ const BOT_GRAN_LABEL = { daily: 'D', weekly: 'W', monthly: 'M' };
 function _botDailySeries() {
   const bot = botMarkToMarket();
   let curve = Array.isArray(bot.equityCurve) ? bot.equityCurve.slice() : [];
+  // z89: once real closes are loaded, the mark-to-market reconstruction is the
+  // book of record for every past day; stored snapshots (taken whenever the app
+  // happened to be open, some before the USD fix) only fill days it can't cover.
+  try { if (typeof loadBotPriceHistories === 'function') loadBotPriceHistories(); } catch {}
+  let _reconDates = null;
   try {
     const recon = (typeof botReconstructEquityCurve === 'function') ? botReconstructEquityCurve(bot) : [];
     if (recon && recon.length) {
+      const haveCloses = Object.keys(_botCloseCache).length > 0;
       const byDate = new Map();
+      if (!haveCloses) for (const p of curve) byDate.set(p.date, { date: p.date, value: p.value });
       for (const p of recon) byDate.set(p.date, { date: p.date, value: p.value });
-      for (const p of curve) byDate.set(p.date, { date: p.date, value: p.value });
+      if (haveCloses) for (const p of curve) if (!byDate.has(p.date)) byDate.set(p.date, { date: p.date, value: p.value });
       curve = Array.from(byDate.values());
+      if (haveCloses) _reconDates = new Set(recon.map(p => p.date));
     }
   } catch {}
   const byDay = new Map();
@@ -48700,7 +48895,9 @@ function _botDailySeries() {
       const byD = new Map(series.map(p => [p.date, p.value]));
       for (const pt of tape) {
         if (!pt || !pt.t || !isFinite(pt.value)) continue;
-        byD.set(String(pt.t).slice(0, 10), +pt.value);   // tape is ascending ⇒ last wins
+        const d = String(pt.t).slice(0, 10);
+        if (_reconDates && _reconDates.has(d)) continue;   // real closes win for past days (no spikes)
+        byD.set(d, +pt.value);   // tape is ascending ⇒ last wins
       }
       series = Array.from(byD.entries()).map(([date, value]) => ({ date, value }))
         .sort((a, b) => a.date < b.date ? -1 : 1);
@@ -48720,7 +48917,18 @@ function _botDailySeries() {
   if (openUnreal == null || !isFinite(openUnreal)) {
     openUnreal = (bot.bets || []).filter(b => b.status === 'open').reduce((s, b) => s + (isFinite(b.pnl) ? b.pnl : 0), 0);
   }
-  const liveVal = +(((isFinite(bot.bankroll) ? bot.bankroll : BOT_STARTING_BANKROLL)) + openUnreal).toFixed(2);
+  let liveVal = +(((isFinite(bot.bankroll) ? bot.bankroll : BOT_STARTING_BANKROLL)) + openUnreal).toFixed(2);
+  // z89: with real closes loaded the curve is LEDGER-based (start + realized +
+  // open marks). End it on the ledger value too, so it can't jump to a bankroll
+  // that has drifted from the trade journal; the gap is shown under the chart.
+  try {
+    if (_reconDates) {
+      const realized = (bot.bets || []).filter(b => b.status === 'closed').reduce((s2, b) => s2 + (+b.pnl || 0), 0);
+      const ledgerLive = +(BOT_STARTING_BANKROLL + realized + openUnreal).toFixed(2);
+      window._botLedgerGap = { bankrollBook: liveVal, ledger: ledgerLive, gap: +(liveVal - ledgerLive).toFixed(2) };
+      liveVal = ledgerLive;
+    } else { window._botLedgerGap = null; }
+  } catch {}
   // "Today" for a market series is the last TRADING date, not the wall-clock
   // date. On a Saturday the old code appended a Saturday point, which invented
   // a session and made every weekend chart end on a phantom bar.
@@ -49329,6 +49537,9 @@ function renderBetsTab() {
           ${_granTabs}
         </div>
       </div>
+      ${(() => { const g = (typeof window !== 'undefined') ? window._botLedgerGap : null;
+        if (!g || Math.abs(g.gap) < 1) return '';
+        return `<div style="font-family:var(--mono);font-size:9.5px;color:var(--ink-faint);margin:4px 0 6px;line-height:1.5">LEDGER CHECK · bankroll-based value ${fmt$(g.bankrollBook)} vs trade ledger ${fmt$(g.ledger)} — <span style="color:var(--red)">${g.gap >= 0 ? '+' : '−'}${fmt$(Math.abs(g.gap))} not explained by recorded trades</span>. The chart follows the ledger (real closes).</div>`; })()}
       <div class="bot-eq-plot"><canvas id="bot-eq-canvas"
         data-baseval="$${_lastV.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}"
         data-basecol="${_upWin ? '#00c805' : '#ff5000'}"
