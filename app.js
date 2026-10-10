@@ -9094,9 +9094,106 @@ function fedRateExpectation() {
 // ============================================================
 //   FED TAB RENDERER
 // ============================================================
+// ---- Decisions from data (z90) ----------------------------------------------
+// The decision history was a hand-typed seed that stopped at the 2026-04-29
+// meeting, so later meetings never appeared. Now every scheduled meeting that
+// has passed is filled in from FRED: the target range (DFEDTARU / DFEDTARL,
+// fetched by TRAPP2-1 since z90) or, until those land, the effective funds
+// rate (DFF) the day after the meeting, rounded to the 25bp grid.
+let _fedSyncAt = 0, _fedSyncing = false;
+async function syncFedDecisionsFromFred(force) {
+  if (_fedSyncing || (!force && Date.now() - _fedSyncAt < 6 * 3600 * 1000)) return false;
+  _fedSyncing = true;
+  try {
+    const base = (typeof getMacroBaseOverride === 'function' && getMacroBaseOverride()) ||
+                 ((typeof GH_RAW !== 'undefined' ? GH_RAW : 'https://raw.githubusercontent.com/TheMostLocal') + '/TRAPP2-1/main/data');
+    const get = async id => { try { const r = await fetch(`${base}/macro/${id}.json`, { cache: 'no-cache' }); if (!r.ok) return null;
+      const j = await r.json(); return (j.observations || []).filter(o => o && o.date && isFinite(+o.value)).map(o => ({ d: o.date, v: +o.value })); } catch { return null; } };
+    const [up, lo, dff] = await Promise.all([get('DFEDTARU'), get('DFEDTARL'), get('DFF')]);
+    const usingTarget = !!(up && up.length && lo && lo.length);
+    const series = usingTarget ? up : dff;
+    if (!series || !series.length) return false;
+    const at = (arr, pred) => { let x = null; for (const o of arr) { if (pred(o.d)) x = o; } return x; };
+    const firstAfter = (arr, from, to) => arr.find(o => o.d >= from && o.d <= to) || null;
+    const addDays = (ds, n) => new Date(Date.parse(ds + 'T00:00:00Z') + n * 864e5).toISOString().slice(0, 10);
+    const lastObs = series[series.length - 1].d;
+    const f = loadFedState();
+    const have = new Set((f.history || []).map(h => h.date));
+    const meetings = [...new Set([...(FOMC_SCHEDULE_2026 || []).map(m => m.date), ...(f.history || []).map(h => h.date)])].sort();
+    let added = 0;
+    for (const md of meetings) {
+      if (have.has(md) || md >= lastObs) continue;
+      const before = at(series, d => d <= md);
+      const after = firstAfter(series, addDays(md, 1), addDays(md, 7));
+      if (!before || !after) continue;
+      const bps = Math.round((after.v - before.v) * 100 / 25) * 25;
+      let rangeHigh, rangeLow;
+      if (usingTarget) { rangeHigh = after.v; const l = firstAfter(lo, addDays(md, 1), addDays(md, 7)); rangeLow = l ? l.v : after.v - 0.25; }
+      else { rangeLow = Math.floor(after.v * 4 + 1e-9) / 4; rangeHigh = rangeLow + 0.25; }
+      f.history.push({ date: md, move: bps < 0 ? 'cut' : bps > 0 ? 'hike' : 'hold', bps: Math.abs(bps), rangeLow: +rangeLow.toFixed(2), rangeHigh: +rangeHigh.toFixed(2),
+                       note: usingTarget ? 'from FRED target range' : 'from FRED effective rate (DFF)', source: usingTarget ? 'DFEDTARU' : 'DFF' });
+      added++;
+    }
+    f.history.sort((a, b) => a.date < b.date ? -1 : 1);
+    const latest = f.history[f.history.length - 1];
+    if (latest && (!f.currentRange || !f.currentRange.asOf || latest.date >= f.currentRange.asOf)) {
+      f.currentRange = { low: latest.rangeLow, high: latest.rangeHigh, asOf: latest.date };
+    }
+    if (added) saveFedState(f);
+    _fedSyncAt = Date.now();
+    return added > 0;
+  } finally { _fedSyncing = false; }
+}
+if (typeof window !== 'undefined') window.syncFedDecisionsFromFred = syncFedDecisionsFromFred;
+
+// ---- Home · Connections & API keys (z90) --------------------------------------
+// Every credential the app runs on, in one place, with set/missing status:
+// GitHub token (XTRAPP sync, Save to Repo, options requests), data sources and
+// API keys, and the three Supabase projects. Also still reachable from the
+// Stock Book "Data Sources" button.
+function renderConnectionsPanel() {
+  const host = document.getElementById('home-connections');
+  if (!host) return;
+  const has = k => { try { return !!(localStorage.getItem(k) || '').trim(); } catch { return false; } };
+  const dot = ok => `<span style="color:${ok ? 'var(--pos)' : 'var(--red)'};font-weight:700">${ok ? '●' : '○'}</span>`;
+  const row = (ok, label, detail, btns) => `<div style="display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;padding:7px 0;border-bottom:1px solid var(--rule)">
+      ${dot(ok)}<span style="flex:1 1 160px"><strong style="font-weight:600">${label}</strong><br><span style="color:var(--ink-faint);font-size:10px">${detail}</span></span>
+      <span style="display:flex;gap:6px;flex-wrap:wrap">${btns}</span></div>`;
+  const btn = (txt, js) => `<button class="btn btn-ghost" style="padding:4px 10px;font-size:10px" onclick="${js}">${txt}</button>`;
+  const keys = [['FMP', FMP_KEY_STORAGE], ['Finnhub', FINNHUB_KEY_STORAGE], ['Alpha Vantage', AV_KEY_STORAGE], ['Twelve Data', TWELVE_KEY_STORAGE],
+                ['Polygon', POLYGON_KEY_STORAGE], ['FCS', FCS_KEY_STORAGE], ['FRED', FRED_KEY_STORAGE]];
+  const keyList = keys.map(([n, k]) => `${has(k) ? '✓' : '✗'} ${n}`).join(' · ');
+  const nKeys = keys.filter(([, k]) => has(k)).length;
+  const portOk = has('valuatio.portSupabase.url') && has('valuatio.portSupabase.anon');
+  const anaOk = has('valuatio.analyticsSupabase.url') && has('valuatio.analyticsSupabase.anon');
+  const botOk = has(SUPABASE_URL_STORAGE) && has(SUPABASE_ANON_STORAGE);
+  const ghOk = has('valuatio.github.token');
+  host.innerHTML = `<div class="home-section-title">Connections &amp; API keys</div>
+    <div style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">
+      ${row(ghOk, 'GitHub token (fine-grained)', 'XTRAPP sync · Save to Repo · options requests — needs Contents: Read and write on XTRAPP and TRAPP2-PORT (plus Actions: write on TRAPP2-OPTIONS for on-demand chains)',
+            btn(ghOk ? 'Replace' : 'Add token', 'setGitHubToken()') + (ghOk ? btn('Check access', "checkXtrappAccess().then(r=>{if(typeof flashStatus==='function')flashStatus((r.ok?'✓ ':'⚠ ')+r.why,r.ok?'success':'error')})") : ''))}
+      ${row(has(SHEET_URL_STORAGE), 'Data sources', 'Stock Book data URLs (the four books\' master.csv) and source preference', btn('Open Data Sources', '_homeOpenSources()'))}
+      ${row(nKeys >= 3, `API keys · ${nKeys}/${keys.length} set`, keyList, btn('Edit keys', '_homeOpenSources()'))}
+      ${row(botOk, 'Supabase · Bot', 'TRAPP2-BOT project (bot trades + equity)', btn('Edit', '_homeOpenSources()'))}
+      ${row(portOk, 'Supabase · Portfolio', 'PORT + ANALYTICS project (portfolio_positions)', btn('Edit', "(()=>{const u=prompt('Portfolio Supabase project URL',localStorage.getItem('valuatio.portSupabase.url')||'');if(u==null)return;const a=prompt('Publishable / anon key',localStorage.getItem('valuatio.portSupabase.anon')||'');if(a==null)return;setPortSupabaseConfig(u.trim(),a.trim());renderConnectionsPanel();})()"))}
+      ${row(anaOk, 'Supabase · Analytics', 'PORT + ANALYTICS project (research grades, analytics_kv)', btn('Edit', "(()=>{const u=prompt('Analytics Supabase project URL',localStorage.getItem('valuatio.analyticsSupabase.url')||'');if(u==null)return;const a=prompt('Publishable / anon key',localStorage.getItem('valuatio.analyticsSupabase.anon')||'');if(a==null)return;setAnalyticsSupabaseConfig(u.trim(),a.trim());renderConnectionsPanel();})()"))}
+      <div style="color:var(--ink-faint);font-size:9.5px;margin-top:6px">Keys stay in this browser (localStorage); each device needs its own. ○ = missing.</div>
+    </div>`;
+}
+function _homeOpenSources() {
+  // close the drawer first so the modal isn't underneath it
+  const d = document.getElementById('home-drawer'), bd = document.getElementById('home-drawer-backdrop');
+  if (d) d.style.display = 'none';
+  if (bd) bd.style.display = 'none';
+  openSourcesModal();
+}
+if (typeof window !== 'undefined') { window.renderConnectionsPanel = renderConnectionsPanel; window._homeOpenSources = _homeOpenSources; }
+
 function renderFedTab() {
   const body = document.getElementById('fed-body');
   if (!body) return;
+  // Fill in any meetings the seed doesn't know about, then re-render once.
+  syncFedDecisionsFromFred().then(changed => { if (changed) renderFedTab(); }).catch(() => {});
   const f = loadFedState();
   const exp = fedRateExpectation();
   const today = new Date().toISOString().slice(0, 10);
@@ -9720,12 +9817,23 @@ function resolveOptionsBase() {
   return GH_RAW + '/TRAPP2/main/data/options/';
 }
 
+// z90: chains moved to their own repo (TRAPP2-OPTIONS, 150+ tickers). Read it
+// first; the legacy TRAPP2/data/options copy is the fallback during the switch.
+function optionsBases() {
+  const dedicated = GH_RAW + '/TRAPP2-OPTIONS/main/data/options/';
+  const legacy = resolveOptionsBase();
+  return dedicated === legacy ? [dedicated] : [dedicated, legacy];
+}
 async function loadOptionsManifest() {
   if (_optionsManifest) return _optionsManifest;
-  try {
-    const r = await fetch(resolveOptionsBase() + 'manifest.json', { cache: 'no-store' });
-    if (r.ok) { _optionsManifest = await r.json(); }
-  } catch {}
+  const tickers = new Set(); let asOf = null;
+  for (const base of optionsBases()) {
+    try {
+      const r = await fetch(base + 'manifest.json', { cache: 'no-store' });
+      if (r.ok) { const m = await r.json(); (m.tickers || []).forEach(t => tickers.add(t)); asOf = asOf || m.asOf; }
+    } catch {}
+  }
+  _optionsManifest = tickers.size ? { asOf, tickers: [...tickers].sort(), count: tickers.size } : null;
   return _optionsManifest;
 }
 
@@ -9900,8 +10008,12 @@ async function loadOptionsForTicker(ticker, force) {
   const cached = _optionsCache[tk];
   if (!force && cached && Date.now() - cached.t < OPTIONS_TTL_MS) return cached.data;
   try {
-    const r = await fetch(resolveOptionsBase() + encodeURIComponent(tk) + '.json', { cache: 'no-store' });
-    if (!r.ok) { _optionsCache[tk] = { data: null, t: Date.now() }; return null; }
+    let r = null;
+    for (const base of optionsBases()) {
+      try { r = await fetch(base + encodeURIComponent(tk) + '.json', { cache: 'no-store' }); } catch { r = null; }
+      if (r && r.ok) break;
+    }
+    if (!r || !r.ok) { _optionsCache[tk] = { data: null, t: Date.now() }; return null; }
     const data = await r.json();
     // Belt-and-suspenders: drop any expiry that has gone past DTE 0 since the
     // file was written (e.g. file is a day stale and a Friday passed).
@@ -42914,11 +43026,12 @@ async function setGitHubToken() {
   flashStatus('GitHub token stored (this browser only) — repo saves are now one-tap', 'success');
 }
 if (typeof window !== 'undefined') window.setGitHubToken = setGitHubToken;
-async function pushXtrappToGitHub() {
+async function pushXtrappToGitHub(opts = {}) {
   const payload = _buildXtrappPayload();
   const json = JSON.stringify(payload, null, 2);
   const token = localStorage.getItem(GH_TOKEN_KEY);
   if (!token) {
+    if (opts.auto) { _xtSync.lastError = 'no GitHub token on this device'; return false; }
     // Tokenless path: clipboard + GitHub web editor.
     try { await navigator.clipboard.writeText(json); } catch {}
     window.open(XTRAPP_FILE_EDIT, '_blank', 'noopener');
@@ -42944,12 +43057,20 @@ async function pushXtrappToGitHub() {
       throw new Error('HTTP ' + put.status + (err.message ? ' — ' + err.message : ''));
     }
     try { localStorage.setItem('valuatio.xtrapp.lastPushAt', new Date().toISOString()); } catch {}
-    if (typeof flashStatus === 'function') flashStatus('✓ Pushed to XTRAPP — fixes, posts, bets, articles all committed', 'success');
+    _xtSync.lastError = null;
+    _xtSetDirty(false);
+    if (typeof flashStatus === 'function' && !opts.auto) flashStatus('✓ Pushed to XTRAPP — fixes, posts, bets, articles all committed', 'success');
+    _renderXtrappSyncBadge();
+    return true;
   } catch (e) {
     console.error('[xtrapp-push]', e);
+    _xtSync.lastError = (/HTTP 40[13]/.test(e.message) ? e.message + ' — the token cannot write to the XTRAPP repo' : e.message);
+    _renderXtrappSyncBadge();
+    if (opts.auto) return false;                 // automatic pushes never open windows
     if (typeof flashStatus === 'function') flashStatus('Push failed (' + e.message + ') — falling back to clipboard + web editor', 'error');
     try { await navigator.clipboard.writeText(json); } catch {}
     window.open(XTRAPP_FILE_EDIT, '_blank', 'noopener');
+    return false;
   }
 }
 if (typeof window !== 'undefined') { window.pushXtrappToGitHub = pushXtrappToGitHub; window.setGitHubToken = setGitHubToken; window.exportXtrappData = exportXtrappData; window.fetchXtrappData = fetchXtrappData; }
@@ -42967,20 +43088,98 @@ function _xtrappPayloadHash(json) {
   return json.length + ':' + h;
 }
 async function _xtrappAutoPush(trigger) {
+  if (_xtSync.pushing) return;
   try {
-    if (!localStorage.getItem(GH_TOKEN_KEY)) return;
-    const json = JSON.stringify(_buildXtrappPayload());
-    const hash = _xtrappPayloadHash(json);
-    if (hash === localStorage.getItem(_XTRAPP_HASH_KEY)) return;   // nothing new
-    await pushXtrappToGitHub();
-    localStorage.setItem(_XTRAPP_HASH_KEY, hash);
-    console.log(`[xtrapp] auto-pushed (${trigger})`);
-  } catch (e) { console.warn('[xtrapp] auto-push failed:', e.message); }
+    if (!localStorage.getItem(GH_TOKEN_KEY)) { _xtSync.lastError = 'no GitHub token on this device'; _renderXtrappSyncBadge(); return; }
+    const pl = _buildXtrappPayload();
+    delete pl.updatedAt;                                   // a timestamp alone is not a change
+    const hash = _xtrappPayloadHash(JSON.stringify(pl));
+    if (hash === localStorage.getItem(_XTRAPP_HASH_KEY) && !_xtSync.dirty) return;   // nothing new
+    _xtSync.pushing = true; _renderXtrappSyncBadge();
+    const ok = await pushXtrappToGitHub({ auto: true });
+    if (ok) { localStorage.setItem(_XTRAPP_HASH_KEY, hash); console.log(`[xtrapp] auto-pushed (${trigger})`); }
+  } catch (e) { console.warn('[xtrapp] auto-push failed:', e.message); _xtSync.lastError = e.message; }
+  finally { _xtSync.pushing = false; _renderXtrappSyncBadge(); }
 }
 setInterval(() => _xtrappAutoPush('15min'), 15 * 60 * 1000);
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') _xtrappAutoPush('tab-hidden');
 });
+
+// ============================================================================
+//   XTRAPP = THE SYSTEM OVERRIDE (z90)
+//   Every human correction (review fix, override, grade, lexicon, leadership,
+//   deletion, bot weights) marks XTRAPP "dirty" and is pushed ~15 s after the
+//   last edit - not only every 15 min / on tab-hide (phones often freeze a
+//   hidden tab before the push finishes). The Review tab shows the sync state;
+//   a failed automatic push never opens windows, it shows why and keeps the
+//   changes queued. Pipelines read XTRAPP and apply it over pulled data:
+//   overrides -> master.json (human_corrections.py), human grades -> research
+//   grades, article fixes -> news corpus (fetch_news.py, z90).
+// ============================================================================
+const _xtSync = { dirty: false, pushing: false, lastError: null, timer: null, mergeDepth: 0 };
+function _xtSetDirty(on) {
+  _xtSync.dirty = !!on;
+  try {
+    if (on) { if (!localStorage.getItem('valuatio.xtrapp.dirtySince')) localStorage.setItem('valuatio.xtrapp.dirtySince', new Date().toISOString()); }
+    else localStorage.removeItem('valuatio.xtrapp.dirtySince');
+  } catch {}
+}
+function markXtrappDirty(reason) {
+  if (_xtSync.mergeDepth > 0) return;           // loading/merging from the repo is not an edit
+  _xtSync.reasons = (_xtSync.reasons || []).concat(reason).slice(-20);
+  _xtSetDirty(true);
+  clearTimeout(_xtSync.timer);
+  _xtSync.timer = setTimeout(() => _xtrappAutoPush('edit:' + reason), 15000);
+  _renderXtrappSyncBadge();
+}
+// Wrap every store a human correction writes to.
+// (Bot weights and the review queue change on their own - machine learning and
+// incoming news - so they ride the 15-min sync instead of triggering pushes.)
+for (const _n of ['saveArticleFixes', 'saveOverrides', 'saveHumanGrades', 'saveLexicon', 'saveLeadershipOverrides',
+                  'saveXtrappTombstones']) {
+  const _orig = (typeof window !== 'undefined') ? window[_n] : null;
+  if (typeof _orig !== 'function') continue;
+  window[_n] = function (...args) { const r = _orig.apply(this, args); try { markXtrappDirty(_n); } catch {} return r; };
+}
+async function checkXtrappAccess() {
+  const token = localStorage.getItem(GH_TOKEN_KEY);
+  if (!token) return { ok: false, why: 'No GitHub token on this device (Review → Add token).' };
+  try {
+    const r = await fetch(XTRAPP_FILE_API.replace(/\/contents\/.*$/, ''), { headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json' } });
+    if (r.status === 401) return { ok: false, why: 'Token rejected (expired or revoked).' };
+    if (r.status === 404) return { ok: false, why: 'XTRAPP repo not visible to this token (wrong account, or the token is limited to other repos).' };
+    const j = await r.json();
+    if (j.permissions && j.permissions.push) return { ok: true, why: `Token can write to ${j.full_name}.` };
+    return { ok: false, why: `Token can read ${j.full_name || 'XTRAPP'} but not write. Give it "Contents: Read and write" on XTRAPP.` };
+  } catch (e) { return { ok: false, why: 'Network error: ' + e.message }; }
+}
+function _renderXtrappSyncBadge() {
+  if (typeof document === 'undefined') return;
+  const host = document.getElementById('xtrapp-sync-badge');
+  if (!host) return;
+  const token = !!localStorage.getItem(GH_TOKEN_KEY);
+  const last = localStorage.getItem('valuatio.xtrapp.lastPushAt');
+  const ago = last ? (() => { const m = Math.round((Date.now() - Date.parse(last)) / 60000); return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} d ago`; })() : 'never';
+  let state, col;
+  if (!token) { state = 'No GitHub token on this device — corrections stay here and are NOT the system override yet'; col = 'var(--red)'; }
+  else if (_xtSync.pushing) { state = 'Pushing corrections to XTRAPP…'; col = 'var(--amber)'; }
+  else if (_xtSync.lastError) { state = `Push failed: ${_xtSync.lastError}. Corrections are queued.`; col = 'var(--red)'; }
+  else if (_xtSync.dirty) { state = 'Unsynced corrections — pushing in a few seconds'; col = 'var(--amber)'; }
+  else if (!last) { state = 'Nothing queued · no push from this device yet'; col = 'var(--ink-faint)'; }
+  else { state = `All corrections in XTRAPP · last push ${ago}`; col = 'var(--pos)'; }
+  host.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;font-family:var(--mono);font-size:10.5px;padding:8px 12px;border:1px solid var(--rule);border-left:3px solid ${col};border-radius:4px;margin:10px 0;background:var(--bg-elev)">
+    <span style="color:${col};font-weight:700">XTRAPP SYNC</span><span style="color:var(--ink-dim)">${state}</span>
+    <span style="margin-left:auto;display:flex;gap:6px">
+      ${token ? `<button class="btn btn-ghost" style="padding:3px 9px;font-size:10px" onclick="_xtSetDirty(true);_xtrappAutoPush('manual')">Push now</button>
+                 <button class="btn btn-ghost" style="padding:3px 9px;font-size:10px" onclick="checkXtrappAccess().then(r=>{if(typeof flashStatus==='function')flashStatus((r.ok?'✓ ':'⚠ ')+r.why,r.ok?'success':'error')})">Check access</button>`
+               : `<button class="btn" style="padding:3px 9px;font-size:10px" onclick="setGitHubToken()">Add token</button>`}
+    </span></div>`;
+}
+if (typeof window !== 'undefined') Object.assign(window, { markXtrappDirty, checkXtrappAccess, _renderXtrappSyncBadge, _xtSetDirty, _xtrappAutoPush });
+try { if (localStorage.getItem('valuatio.xtrapp.dirtySince')) _xtSync.dirty = true; } catch {}
+setInterval(_renderXtrappSyncBadge, 30000);
+setTimeout(() => { _renderXtrappSyncBadge(); if (_xtSync.dirty) _xtrappAutoPush('startup-queued'); }, 5000);
 
 // ============================================================
 //   XTRAPP MERGE RULES — human corrections (z75)
@@ -43132,7 +43331,12 @@ function _xtDropDeadOverrides(all, tomb) {
   return { kept, dropped };
 }
 
-async function fetchXtrappData() {
+async function fetchXtrappData(...args) {
+  _xtSync.mergeDepth++;
+  try { return await _fetchXtrappDataInner(...args); }
+  finally { _xtSync.mergeDepth--; }
+}
+async function _fetchXtrappDataInner() {
   try {
     const j = await fetchJsonMaybeGz(XTRAPP_BASE + 'xtrapp_data.json');
     if (!j) { console.warn('[xtrapp] xtrapp_data.json not found (plain or .gz)'); return null; }
@@ -53079,6 +53283,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('home-btn')?.addEventListener('click', () => {
     document.getElementById('home-drawer').style.display = '';
     document.getElementById('home-drawer-backdrop').style.display = '';
+    try { renderConnectionsPanel(); } catch (e) { console.warn('[home] connections', e); }
     renderHomeStats();
     renderStorageStats();
     // Ensure backend grades are loaded so the "needs backend addition" list is
@@ -53600,9 +53805,12 @@ function renderGlobalTradeLogistics() {
       <div class="gt-logistics-title">${escapeHtml(c.ticker)}${c.row?.name ? ` · ${escapeHtml(c.row.name)}` : ''}</div>
       <div class="gt-logistics-value">${c.px != null ? '$' + c.px.toFixed(2) : '—'}${c.pct != null ? ` <span style="font-size:13px;color:${c.tone==='bull'?'var(--pos)':c.tone==='bear'?'var(--neg)':'var(--ink-faint)'}">${c.pct >= 0 ? '+' : ''}${c.pct.toFixed(2)}%</span>` : ''}</div>
       <div class="gt-logistics-sub">${escapeHtml(c.signal)}</div>
+      <div class="vc-spark" data-tk="${escapeHtml(c.ticker)}" data-days="92" style="margin:6px 0 2px;min-height:44px"></div>
       <div class="gt-logistics-proxy">${escapeHtml(c.desc)}</div>
     </div>
   `).join('');
+  // z90: 3-month mini price chart on every proxy card (charts.js)
+  try { if (window.VChart && window.VChart.mountSparks) window.VChart.mountSparks(grid); } catch {}
 }
 
 function renderGlobalTradePulse() {
