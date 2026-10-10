@@ -6858,6 +6858,8 @@
   }
 
 </style>
+<!-- layout corrections (mobile + desktop) - z88 -->
+<link rel="stylesheet" href="layout.css?v=20260615z88">
 </head>
 <body>
 
@@ -7057,6 +7059,11 @@
         <option value="dismissed">Dismissed</option>
         <option value="reported">Reported</option>
         <option value="all">All</option>
+      </select>
+      <select class="news-filter" id="news-filter-ticker" title="Show articles with a ticker, or general news without one">
+        <option value="all" selected>Any ticker</option>
+        <option value="tagged">With a ticker</option>
+        <option value="untagged">No ticker</option>
       </select>
       <select class="news-filter" id="news-filter-priority">
         <option value="all" selected>All caps</option>
@@ -8887,8 +8894,10 @@
       'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
   }
 </script>
-<script src="app.js?v=20260615z81"></script>
+<script src="app.js?v=20260615z88"></script>
 <!-- Patterns & Templates (TA tool + overview pattern read) - z87 WIP; standalone, loads after app.js -->
 <script src="patterns.js?v=20260615z87"></script>
+<!-- UX: tickers clickable everywhere -> Valuation (z88) -->
+<script src="ux.js?v=20260615z88"></script>
 </body>
 </html>
