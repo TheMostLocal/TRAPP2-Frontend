@@ -260,5 +260,31 @@
     host.querySelectorAll('[data-vci]').forEach(b => b.onclick = () => { GG.interval = b.dataset.vci; render(); });
   }
 
-  window.VChart = { fetchDaily, fetchTapeDay, drawStockChart, windowed, resample, indexDaily, indexIntraday, mountGoodGlobeChart, _gg: GG };
+  // ---------------- mini charts (Global Trade logistics cards) ----------------
+  // <div class="vc-spark" data-tk="BDRY" data-days="92"> -> a small line chart of
+  // the last N days of closes with first / last labels and the period change.
+  async function mountSparks(root) {
+    const els = [...(root || document).querySelectorAll('.vc-spark[data-tk]')];
+    await Promise.all(els.map(async el => {
+      const t = el.dataset.tk, days = +el.dataset.days || 92;
+      const h = await fetchDaily(t);
+      if (!el.isConnected) return;
+      if (!h || h.length < 5) { el.innerHTML = '<div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint)">no price history</div>'; return; }
+      const cut = new Date(new Date(h[h.length - 1].d + 'T00:00:00Z').getTime() - days * 864e5).toISOString().slice(0, 10);
+      const pts = h.filter(b => b.d >= cut);
+      const W = Math.max(160, Math.round(el.clientWidth || 260)), H = 44;
+      const vals = pts.map(b => b.c), lo = Math.min(...vals), hi = Math.max(...vals), rng = (hi - lo) || hi * 0.01 || 1;
+      const X = i => (i / (pts.length - 1)) * W, Y = v => 3 + (hi - v) / rng * (H - 6);
+      const up = vals[vals.length - 1] >= vals[0], col = up ? 'var(--pos,#5b8a72)' : 'var(--neg,#c25a4a)';
+      const ch = (vals[vals.length - 1] / vals[0] - 1) * 100;
+      const line = pts.map((b, i) => (i ? 'L' : 'M') + X(i).toFixed(1) + ',' + Y(b.c).toFixed(1)).join('');
+      el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="max-width:100%;height:auto;display:block" role="img" aria-label="${esc(t)} 3-month price">
+          <path d="${line} L${W},${H} L0,${H} Z" fill="${col}" opacity="0.10"/>
+          <path d="${line}" fill="none" stroke="${col}" stroke-width="1.6" stroke-linejoin="round"/></svg>
+        <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:2px">
+          <span>${esc(pts[0].d)}</span><span style="color:${col}">${ch >= 0 ? '+' : ''}${ch.toFixed(1)}% · ${days > 80 ? '3M' : days + 'd'}</span><span>${esc(pts[pts.length - 1].d)}</span></div>`;
+    }));
+  }
+
+  window.VChart = { fetchDaily, fetchTapeDay, drawStockChart, windowed, resample, indexDaily, indexIntraday, mountGoodGlobeChart, mountSparks, _gg: GG };
 })();
