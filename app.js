@@ -43630,8 +43630,14 @@ function botRetrain() {
     // direction sign: long bets reward positive-signed signals on wins;
     // short bets reward negative-signed signals on wins.
     const dirSign = bet.direction === 'short' ? -1 : 1;
+    // z93: never let a win credit a regime call that wasn't trusted or turned out
+    // wrong ("right trade, wrong regime" teaches the wrong lesson). Regime-based
+    // signals learn only from bets whose regime call was dialed in AND correct.
+    const _rc = bet.regimeContext || null;
+    const _regimeUntrusted = (_rc && _rc.dialedIn === false) || bet.regimeCallCorrect === false;
     for (const [key, signed] of Object.entries(bet.components)) {
       if (!isFinite(signed) || signed === 0) continue;
+      if (_regimeUntrusted && (key === 'regimeGrade' || key === 'regime' || key === 'quad')) continue;
       // Did this signal agree with the bet's direction?
       const agreed = Math.sign(signed) === dirSign;
       // Winners: amplify agreeing signals, damp disagreeing. Losers: inverse.
