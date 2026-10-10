@@ -63,6 +63,55 @@
     const html = cardHtml(rc);
     const old = document.getElementById('regime-cert-card');
     if (old) old.outerHTML = html; else panel.insertAdjacentHTML('afterbegin', html);
+    renderBondCard();
+  }
+
+  // ---- Bond trend · TLT (z94) ----------------------------------------------
+  // "It's the trend that matters, not the absolute value": TLT's 20/50-day
+  // trend + the 60-day stock/bond correlation, shown as context. Tested on
+  // 2006-2026, the trend alone did not forecast larger equity drawdowns; the
+  // link is regime-dependent (bonds hedged stocks until ~2021, co-move since).
+  let _bondBusy = false;
+  async function renderBondCard() {
+    if (_bondBusy || !document.getElementById('regime-cert-card') || !window.VChart) return;
+    _bondBusy = true;
+    try { await _renderBondCard(); } finally { _bondBusy = false; }
+  }
+  async function _renderBondCard() {
+    const [tlt, spy] = await Promise.all([window.VChart.fetchDaily('TLT'), window.VChart.fetchDaily('SPY')]);
+    if (!tlt || tlt.length < 61) return;
+    const c = tlt.map(b => b.c), ma = n => c.slice(-n).reduce((a, b) => a + b, 0) / n;
+    const m20 = ma(20), m50 = ma(50), slope = c[c.length - 1] / c[c.length - 11] - 1;
+    const trend = (m20 < m50 && slope < 0) ? 'down' : (m20 > m50 && slope > 0) ? 'up' : 'mixed';
+    let corr = null;
+    if (spy && spy.length > 61) {
+      const sp = new Map(spy.map(b => [b.d, b.c])), pairs = [];
+      for (let i = tlt.length - 61; i < tlt.length; i++) { const a = sp.get(tlt[i].d), b = sp.get(tlt[i - 1].d); if (a && b) pairs.push([tlt[i].c / tlt[i - 1].c - 1, a / b - 1]); }
+      if (pairs.length > 40) { const n = pairs.length, mx = pairs.reduce((s, p) => s + p[0], 0) / n, my = pairs.reduce((s, p) => s + p[1], 0) / n;
+        let sxy = 0, sxx = 0, syy = 0; for (const [x, y] of pairs) { sxy += (x - mx) * (y - my); sxx += (x - mx) ** 2; syy += (y - my) ** 2; }
+        corr = sxx && syy ? sxy / Math.sqrt(sxx * syy) : null; }
+    }
+    const col = trend === 'down' ? 'var(--red)' : trend === 'up' ? 'var(--pos)' : 'var(--amber)';
+    const read = trend === 'down'
+      ? (corr != null && corr > 0.1 ? 'TLT falling (long yields rising) while stocks and bonds move TOGETHER — rate pressure can hit both.' : 'TLT falling (long yields rising); bonds are still hedging stocks.')
+      : trend === 'up' ? 'TLT rising (long yields falling) — less competition for equities from risk-free yield.' : 'TLT trend mixed.';
+    const html = `<section id="bond-trend-card" class="company-card" style="margin:0 0 16px;border-left:3px solid ${col}">
+      <div style="display:flex;flex-wrap:wrap;gap:6px 14px;align-items:baseline">
+        <div style="font-family:var(--mono);font-size:10px;letter-spacing:.12em;color:var(--ink-dim)">BOND TREND · TLT (CONTEXT)</div>
+        <div style="font-family:var(--mono);font-size:15px;color:${col};font-weight:700">${trend.toUpperCase()}</div>
+        <div style="margin-left:auto;font-family:var(--mono);font-size:9.5px;color:var(--ink-faint)">${esc(tlt[tlt.length - 1].d)}</div></div>
+      <div style="font-family:var(--mono);font-size:10.5px;color:var(--ink-dim);margin:6px 0">${esc(read)}</div>
+      <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 14px;font-family:var(--mono);font-size:10.5px">
+        <span>TLT <strong style="color:var(--ink)">$${c[c.length - 1].toFixed(2)}</strong></span><span>10-day <strong style="color:${slope < 0 ? 'var(--red)' : 'var(--pos)'}">${slope >= 0 ? '+' : ''}${(slope * 100).toFixed(2)}%</strong></span>
+        <span>MA20 ${m20.toFixed(2)}</span><span>MA50 ${m50.toFixed(2)}</span>
+        <span style="grid-column:1/-1">Stock/bond correlation (60d): <strong style="color:var(--ink)">${corr == null ? '—' : corr.toFixed(2)}</strong> ${corr == null ? '' : corr > 0.1 ? '(co-moving)' : corr < -0.1 ? '(bonds hedge stocks)' : '(no link)'}</span></div>
+      <div id="bond-trend-chart" style="margin-top:8px"></div>
+      <div style="font-family:var(--mono);font-size:9.5px;color:var(--ink-faint);margin-top:6px;line-height:1.5">Tested 2006–2026: a TLT downtrend alone did not forecast larger 20-day equity drawdowns; the stock/bond link flipped from hedge (2007–2020) to co-moving (2022+). Recorded on every bot trade as context, not traded on, until the trade record shows an edge.</div>
+    </section>`;
+    const old = document.getElementById('bond-trend-card');
+    const anchor = document.getElementById('regime-cert-card');          // re-query: the card may have been re-rendered
+    if (old) old.outerHTML = html; else if (anchor && anchor.isConnected) anchor.insertAdjacentHTML('afterend', html); else return;
+    window.VChart.drawStockChart(document.getElementById('bond-trend-chart'), tlt.slice(-130).map(b => ({ t: b.d, v: b.c })), { height: 130, label: 'TLT 6 months' });
   }
   async function tagHeader() {
     const tag = document.getElementById('s-regime-tag');
