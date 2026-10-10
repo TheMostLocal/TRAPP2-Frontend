@@ -10608,6 +10608,7 @@ function renderQuadHistory() {
   };
   let prevQuad = null;
   let regionStart = 0;
+  const _quadLabelSpans = [];   // x-extents of labels already drawn (no overlaps)
   data.forEach((d, i) => {
     const xc = x(i);
     const xn = i < data.length - 1 ? x(i + 1) : xc + (plotW / data.length);
@@ -10618,7 +10619,7 @@ function renderQuadHistory() {
     // When the quad changes, label the previous region at top
     if (prevQuad !== null && d.quad !== prevQuad && i - regionStart >= 2) {
       const cx = (x(regionStart) + x(i - 1)) / 2;
-      labelQuadRegion(ctx, cx, padT, prevQuad);
+      labelQuadRegion(ctx, cx, padT, prevQuad, x(i) - x(regionStart), _quadLabelSpans);
       regionStart = i;
     }
     if (prevQuad !== d.quad) regionStart = i;
@@ -10627,7 +10628,7 @@ function renderQuadHistory() {
   // Label the final region too
   if (data.length - regionStart >= 2) {
     const cx = (x(regionStart) + x(data.length - 1)) / 2;
-    labelQuadRegion(ctx, cx, padT, prevQuad);
+    labelQuadRegion(ctx, cx, padT, prevQuad, x(data.length - 1) - x(regionStart) + (plotW / data.length), _quadLabelSpans);
   }
   // Thin separators where the quad changes, so band boundaries read clearly.
   ctx.save();
@@ -10703,8 +10704,12 @@ function renderQuadHistory() {
   ctx.fillText('— Inflation RoC', padL + 110, padT + 14);
 }
 
-// Draw a "Q1", "Q2" etc. label for a quad-shaded region
-function labelQuadRegion(ctx, cx, top, quad) {
+// Draw a "Q1", "Q2" etc. label for a quad-shaded region.
+// z88: labels used to be drawn at full length ("Q2 Reflation") over every region,
+// so on a phone-width canvas they piled on top of each other. Now: the full name
+// only if it fits the region's width, else the short "Q2", else nothing; and never
+// over a label already drawn (spans tracks the occupied x-ranges).
+function labelQuadRegion(ctx, cx, top, quad, regionW = Infinity, spans = null) {
   const raw = QUADS[quad]?.color || '#888';
   let col = raw;
   if (raw.startsWith('var(')) {
@@ -10714,7 +10719,21 @@ function labelQuadRegion(ctx, cx, top, quad) {
   ctx.fillStyle = col;
   ctx.font = 'bold 11px JetBrains Mono';
   ctx.textAlign = 'center';
-  ctx.fillText('Q' + quad + ' ' + (QUADS[quad]?.name || ''), cx, top - 8);
+  const full = 'Q' + quad + ' ' + (QUADS[quad]?.name || '');
+  const short = 'Q' + quad;
+  const pad = 6;
+  let label = null;
+  for (const cand of [full, short]) {
+    const w = ctx.measureText(cand).width;
+    if (w + pad > regionW && cand !== short) continue;        // full name doesn't fit this region
+    const a = cx - w / 2 - pad / 2, b = cx + w / 2 + pad / 2;
+    if (spans && spans.some(([l, r]) => a < r && b > l)) continue; // would overlap a drawn label
+    if (cand === short && w + 2 > regionW && spans && spans.length) continue;
+    label = cand;
+    if (spans) spans.push([a, b]);
+    break;
+  }
+  if (label) ctx.fillText(label, cx, top - 8);
 }
 
 // ============================================================
@@ -25538,6 +25557,16 @@ function applyPortfolioImport(parsed, opts = {}) {
     // version wins on conflict (it's the freshest committed copy). Dedupe also by
     // ticker+position for legacy rows that lack a stable id.
     const merge = opts.replace ? false : true;
+    // z88: never restore a position that was sold/removed here (tombstone) or
+    // that the ledger shows as fully sold - that is how sold SNK kept coming
+    // back after every refresh and could be sold a second time.
+    try {
+      const txAll = (snapshot && Array.isArray(snapshot.transactions))
+        ? loadTransactions().concat(snapshot.transactions.filter(t => t && !t.void)) : loadTransactions();
+      const before = positions.length;
+      positions = positions.filter(e => !shouldSkipRestoredEntry(e, txAll));
+      if (positions.length < before) console.warn(`[portfolio] import: skipped ${before - positions.length} sold/removed position(s)`);
+    } catch (e) { console.warn('[portfolio] import integrity check failed', e); }
     if (merge && typeof loadPortfolio === 'function') {
       const local = loadPortfolio() || [];
       const byId = new Map();
@@ -25551,7 +25580,7 @@ function applyPortfolioImport(parsed, opts = {}) {
   // If it's a full snapshot, also restore transactions / cash / GoodGlobe.
   if (snapshot) {
     if (Array.isArray(snapshot.transactions)) {
-      const local = (typeof loadTransactions === 'function') ? loadTransactions() : [];
+      const local = (typeof loadAllTransactions === 'function') ? loadAllTransactions() : [];
       const seen = new Set(local.map(t => t.id));
       const merged = local.slice();
       for (const t of snapshot.transactions) { if (t && !seen.has(t.id)) { merged.push(t); seen.add(t.id); } }
@@ -25583,6 +25612,7 @@ function applyPortfolioImport(parsed, opts = {}) {
   // its real entry (fills GLD/NVDA/AAPL that the repo index was missing). Runs
   // after the merges so it sees the full merged portfolio. Idempotent + dedupes.
   try { if (typeof backfillGoodGlobeIndexFromPortfolio === 'function') backfillGoodGlobeIndexFromPortfolio(); } catch {}
+  try { portfolioIntegrityPass('import'); } catch {}
   return Array.isArray(positions) ? positions.length : 0;
 }
 if (typeof window !== 'undefined') window.applyPortfolioImport = applyPortfolioImport;
@@ -25642,17 +25672,27 @@ if (typeof window !== 'undefined') {
 const TRANSACTIONS_STORAGE = 'valuatio.transactions.v1';
 const CASH_POSITION_STORAGE = 'valuatio.cashPosition.v1';
 
-function loadTransactions() {
+// Every ledger row, including VOIDED ones (z88). Use this for anything that
+// writes the ledger back (append, dedupe, merges) so a void is never lost, and
+// for the ledger screen that shows voided rows.
+function loadAllTransactions() {
   try {
-    return JSON.parse(localStorage.getItem(TRANSACTIONS_STORAGE) || '[]');
+    const v = JSON.parse(localStorage.getItem(TRANSACTIONS_STORAGE) || '[]');
+    return Array.isArray(v) ? v : [];
   } catch { return []; }
+}
+// The ledger as every calculation should see it: voided rows excluded. A void
+// is an annotated correction (the row stays in storage with void:true, who/why/
+// when), never a deletion - the ledger stays append-only.
+function loadTransactions() {
+  return loadAllTransactions().filter(t => t && !t.void);
 }
 function saveTransactions(arr) {
   try { localStorage.setItem(TRANSACTIONS_STORAGE, JSON.stringify(arr)); } catch {}
 }
 function appendTransaction(tx) {
   // tx shape: { id, ts, type: 'sell'|'buy', ticker, qty, price, fee, proceeds, entryId }
-  const arr = loadTransactions();
+  const arr = loadAllTransactions();
   const nowMs = Date.now();
   const tsMs = tx.ts ? new Date(tx.ts).getTime() : nowMs;
   // DEDUP GUARD: reject a transaction that matches a recent one on type + ticker
@@ -25706,7 +25746,7 @@ function getCashPosition() {
 // (like the doubled SNK buy/sell) self-heal.
 function dedupeTransactions() {
   let arr = [];
-  try { arr = loadTransactions(); } catch { return 0; }
+  try { arr = loadAllTransactions(); } catch { return 0; }
   if (!Array.isArray(arr) || arr.length < 2) return 0;
   // Sort oldest-first so we keep the first occurrence.
   const sorted = arr.slice().sort((a, b) => new Date(a.ts || 0) - new Date(b.ts || 0));
@@ -25927,6 +25967,9 @@ function removeFromPortfolio(idOrTicker, opts = {}) {
   const removed = all.filter(e => e.id === idOrTicker || e.ticker === idOrTicker);
   const arr = all.filter(e => e.id !== idOrTicker && e.ticker !== idOrTicker);
   savePortfolio(arr);
+  // z88: remember the removal so a restore (repo / Supabase / backup) can't
+  // bring the position back.
+  for (const e of removed) if (e && e.id) _recordPortfolioTombstone(e.id);
 
   for (const entry of removed) {
     const isActive = ACTIVE_POSITIONS.includes(entry.position);
@@ -25971,6 +26014,136 @@ function removeFromPortfolio(idOrTicker, opts = {}) {
 function findPortfolioEntry(id) {
   return loadPortfolio().find(e => e.id === id) || null;
 }
+
+// ============================================================================
+//   PORTFOLIO INTEGRITY (z88) — the ledger is the book of record
+//   * tombstones: a removed/sold position id is remembered (365 days) so no
+//     restore path (repo import, Supabase restore, old backup) can resurrect it
+//   * ledger-closed: a position the ledger shows as fully sold is never
+//     restored and, if it reappears, is taken out again (no cash moves)
+//   * oversell check: a SELL that took the ledger's holding below zero is
+//     flagged; the user can VOID it, which reverses its cash and keeps the row
+// ============================================================================
+const PORTFOLIO_TOMBSTONES_KEY = 'valuatio.portfolio.tombstones.v1';
+function loadPortfolioTombstones() {
+  try { const v = JSON.parse(localStorage.getItem(PORTFOLIO_TOMBSTONES_KEY) || '{}'); return (v && typeof v === 'object') ? v : {}; }
+  catch { return {}; }
+}
+function _recordPortfolioTombstone(id) {
+  try {
+    const t = loadPortfolioTombstones();
+    t[id] = Date.now();
+    const cutoff = Date.now() - 365 * 864e5;
+    for (const [k, v] of Object.entries(t)) if (!(+v > cutoff)) delete t[k];
+    localStorage.setItem(PORTFOLIO_TOMBSTONES_KEY, JSON.stringify(t));
+  } catch {}
+}
+// Long-side holding of a ticker according to the ledger. `tracked` = the ledger
+// covers this ticker from its first trade (first row is a buy); positions that
+// pre-date the ledger are left alone.
+function ledgerPositionForTicker(ticker, txns) {
+  const T = String(ticker || '').toUpperCase();
+  const rows = (txns || []).filter(t => t && !t.void && (t.ticker || '').toUpperCase() === T && (t.type === 'buy' || t.type === 'sell'))
+    .sort((a, b) => String(a.ts || '').localeCompare(String(b.ts || '')));
+  let bought = 0, sold = 0, lastSellTs = null;
+  for (const t of rows) {
+    if (t.type === 'buy') bought += +t.qty || 0;
+    else { sold += +t.qty || 0; lastSellTs = t.ts || lastSellTs; }
+  }
+  const tracked = rows.length > 0 && rows[0].type === 'buy';
+  return { tracked, bought, sold, held: Math.max(0, +(bought - sold).toFixed(6)), lastSellTs };
+}
+function isEntryClosedByLedger(e, txns) {
+  if (!e || !ACTIVE_POSITIONS.includes(e.position) || String(e.position).toLowerCase() === 'short') return false;
+  const qty = +e.qty || 0;
+  if (e.id) {
+    const soldThis = (txns || []).filter(t => t && !t.void && t.type === 'sell' && t.entryId === e.id).reduce((s, t) => s + (+t.qty || 0), 0);
+    if (soldThis > 0 && soldThis >= qty - 1e-6) return true;              // this exact lot was sold out
+  }
+  const L = ledgerPositionForTicker(e.ticker, txns);
+  if (L.tracked && L.held <= 1e-6 && L.lastSellTs) {
+    const added = e.addedAt || e.createdAt || null;
+    if (!added || String(added) <= String(L.lastSellTs)) return true;      // opened before the ticker was sold out
+  }
+  return false;
+}
+function shouldSkipRestoredEntry(e, txns) {
+  if (!e) return false;
+  if (e.id && loadPortfolioTombstones()[e.id]) return true;
+  return isEntryClosedByLedger(e, txns);
+}
+// Oversells: SELL rows that took a ledger-tracked holding below zero.
+function findLedgerOversells(txns) {
+  const all = (txns || loadTransactions()).filter(t => t && !t.void);
+  const byT = {};
+  for (const t of all) if (t.type === 'buy' || t.type === 'sell') (byT[(t.ticker || '').toUpperCase()] = byT[(t.ticker || '').toUpperCase()] || []).push(t);
+  const out = [];
+  for (const [T, rows] of Object.entries(byT)) {
+    rows.sort((a, b) => String(a.ts || '').localeCompare(String(b.ts || '')));
+    if (rows[0].type !== 'buy') continue;              // ledger doesn't cover this ticker's history
+    let held = 0;
+    for (const t of rows) {
+      if (t.type === 'buy') { held += +t.qty || 0; continue; }
+      const q = +t.qty || 0;
+      if (q > held + 1e-6) out.push({ tx: t, ticker: T, heldBefore: +held.toFixed(6), excess: +(q - held).toFixed(6) });
+      held = Math.max(0, held - q);
+    }
+  }
+  return out;
+}
+// Void a ledger row: annotate (never delete) and reverse its cash effect.
+function voidTransaction(txId, reason) {
+  const all = loadAllTransactions();
+  const t = all.find(x => x.id === txId);
+  if (!t || t.void) return false;
+  const proceeds = (t.proceeds != null) ? +t.proceeds : (+t.qty || 0) * (+t.price || 0) - (+t.fee || 0);
+  t.void = true;
+  t.voidedAt = new Date().toISOString();
+  t.voidReason = reason || 'ledger correction';
+  t.cashReversed = t.type === 'sell' ? -proceeds : 0;
+  saveTransactions(all);
+  if (t.type === 'sell' && isFinite(proceeds) && typeof addToCashPosition === 'function') addToCashPosition(-proceeds);
+  if (typeof flashStatus === 'function') flashStatus(`Voided ${t.type.toUpperCase()} ${t.ticker} ${t.qty} — ${fmt$(Math.abs(proceeds))} reversed from cash`, 'success');
+  try { if (typeof renderStockBook === 'function') renderStockBook(); } catch {}
+  return true;
+}
+if (typeof window !== 'undefined') { window.voidTransaction = voidTransaction; window.findLedgerOversells = findLedgerOversells; }
+function _ledgerCheckBannerHtml() {
+  const over = findLedgerOversells();
+  const voided = loadAllTransactions().filter(t => t && t.void);
+  if (!over.length && !voided.length) return '';
+  const d = ts => { try { return new Date(ts).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }); } catch { return ts || ''; } };
+  const rows = over.map(o => {
+    const t = o.tx, proceeds = (t.proceeds != null) ? +t.proceeds : (+t.qty || 0) * (+t.price || 0) - (+t.fee || 0);
+    return `<div style="display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;margin-top:6px">
+      <span><strong>${escapeHtml(o.ticker)}</strong> — SELL ${t.qty} on ${d(t.ts)} @ ${fmt$(+t.price || 0)}, but the ledger held ${o.heldBefore} (over by ${o.excess}).</span>
+      <button class="btn btn-ghost" style="padding:4px 10px;font-size:10px" onclick="if(confirm('Void this SELL and reverse ${fmt$(proceeds)} from cash? The row stays in the ledger, marked VOID.')){voidTransaction('${t.id}','oversell: sold ${o.excess} more than the ledger held');}">Void sale · reverse ${fmt$(proceeds)}</button>
+    </div>`;
+  }).join('');
+  const vrows = voided.map(t => `<div style="margin-top:4px;color:var(--ink-faint)"><s>${escapeHtml((t.type || '').toUpperCase())} ${escapeHtml(t.ticker || '')} ${t.qty} @ ${fmt$(+t.price || 0)} · ${d(t.ts)}</s> — VOID ${d(t.voidedAt)} (${escapeHtml(t.voidReason || '')}${t.cashReversed ? ', cash ' + fmt$(t.cashReversed) : ''})</div>`).join('');
+  return `<div style="padding:10px 14px;background:var(--bg-elev);font-family:var(--mono);font-size:10.5px;color:var(--ink-dim);line-height:1.6;border-left:2px solid ${over.length ? 'var(--red)' : 'var(--ink-faint)'};margin-bottom:14px">
+    <strong style="color:${over.length ? 'var(--red)' : 'var(--ink-dim)'}">LEDGER CHECK</strong>${over.length ? ` · ${over.length} sale${over.length > 1 ? 's exceed' : ' exceeds'} what the ledger held` : ''}${rows}${vrows ? `<div style="margin-top:8px">Voided rows (kept for audit, excluded from all totals):</div>${vrows}` : ''}
+  </div>`;
+}
+// Take resurrected, already-sold positions back out (no cash moves) and note it.
+function portfolioIntegrityPass(source) {
+  let arr = []; try { arr = loadPortfolio() || []; } catch { return 0; }
+  const txns = loadTransactions();
+  const tomb = loadPortfolioTombstones();
+  const bad = arr.filter(e => (e.id && tomb[e.id]) || isEntryClosedByLedger(e, txns));
+  if (!bad.length) return 0;
+  savePortfolio(arr.filter(e => !bad.includes(e)));
+  for (const e of bad) {
+    if (e.id) _recordPortfolioTombstone(e.id);
+    try { if (e.id && typeof portSupabaseDelete === 'function') portSupabaseDelete(e.id); } catch {}
+  }
+  const names = bad.map(e => `${e.ticker} ${e.qty || ''}`.trim()).join(', ');
+  console.warn(`[portfolio] integrity (${source || 'startup'}): removed already-sold position(s): ${names}`);
+  if (typeof flashStatus === 'function') flashStatus(`Removed ${names} — already sold per the transaction ledger (was restored from an old copy)`, 'success');
+  return bad.length;
+}
+if (typeof window !== 'undefined') window.portfolioIntegrityPass = portfolioIntegrityPass;
+setTimeout(() => { try { portfolioIntegrityPass('startup'); } catch (e) { console.warn('[portfolio] integrity pass failed', e); } }, 4000);
 function updatePortfolioEntry(id, patch) {
   const arr = loadPortfolio();
   const i = arr.findIndex(e => e.id === id);
@@ -27932,8 +28105,9 @@ function renderTransactionsLedger(content, summary, subTabs) {
       </div>
     </div>
     <div style="padding:10px 14px;background:var(--bg-elev);font-family:var(--mono);font-size:10px;color:var(--ink-faint);line-height:1.7;border-left:2px solid var(--amber);margin-bottom:14px">
-      Immutable transaction ledger — no edits or deletions allowed. <strong style="color:var(--ink-dim)">Click any SELL row to expand the full receipt</strong> with cost basis, dates, P/L, and notes. <strong style="color:var(--ink-dim)">Unrealized P/L</strong> shows mark-to-market on open BUY/SHORT/BUY-TO-OPEN/SELL-TO-OPEN rows using the latest live price.
+      Immutable transaction ledger — no edits or deletions allowed (a proven error is VOIDED, never deleted — see the ledger check above). <strong style="color:var(--ink-dim)">Click any SELL row to expand the full receipt</strong> with cost basis, dates, P/L, and notes. <strong style="color:var(--ink-dim)">Unrealized P/L</strong> shows mark-to-market on open BUY/SHORT/BUY-TO-OPEN/SELL-TO-OPEN rows using the latest live price.
     </div>
+    ${(typeof _ledgerCheckBannerHtml === 'function') ? _ledgerCheckBannerHtml() : ''}
     <div class="sb-table-wrap">
       <table class="sb-table portfolio-table">
         <thead>
@@ -28106,6 +28280,14 @@ function openSellModal(entryId) {
         await appAlert(`You only hold ${heldSameTicker} shares of ${entry.ticker}. Can't sell ${qty}.\n\n(Selling more than you own would be a short — open that as a separate short position instead.)`, { title: 'Not enough shares' });
         return;
       }
+      // z88: the TRANSACTION LEDGER is the book of record. If it tracks this
+      // ticker (first trade is a buy) and shows fewer shares than this sale,
+      // the position on screen is stale (e.g. restored from an old copy).
+      const L = ledgerPositionForTicker(entry.ticker, loadTransactions());
+      if (L.tracked && qty > L.held + 0.0001) {
+        await appAlert(`The transaction ledger shows ${L.held} ${entry.ticker} shares held (bought ${L.bought}, sold ${L.sold}). Can't sell ${qty}.\n\nThis position looks restored from an old copy — remove it instead of selling.`, { title: 'Not enough shares in the ledger' });
+        return;
+      }
     } catch {}
     if (price <= 0) {
       await appAlert('Sell price must be > 0', { title: 'Invalid price' });
@@ -28158,7 +28340,10 @@ function openSellModal(entryId) {
     if (remainingQty > 0.0001) {
       updatePortfolioEntry(entry.id, { qty: remainingQty });
     } else {
-      removeFromPortfolio(entry.id);
+      // z88: the sale above already booked the proceeds. Without noCashReturn the
+      // removal credited the position's market value to cash A SECOND TIME and
+      // logged a second SELL (the doubled SNK sale of 2026-06-22).
+      removeFromPortfolio(entry.id, { noCashReturn: true, reason: 'sold' });
     }
     const modal = document.getElementById('portfolio-sell-modal');
     if (modal) modal.remove();
@@ -33773,6 +33958,13 @@ function applyArticleFix(article) {
   const fix = getArticleFix(article);
   if (!fix) return false;
   if (fix.verdict === 'bad') { article._suppressed = true; return true; }
+  if (fix.verdict === 'noticker') {
+    // Human said: general news, no company (z88). Stays untagged on every refresh.
+    article.ticker = '';
+    article.tickers = [];
+    article._noTicker = true;
+    article._needsTickerReview = false;
+  }
   if ((fix.verdict === 'fixed' || fix.verdict === 'confirmed') && Array.isArray(fix.tickers)) {
     article.ticker = fix.tickers[0] || article.ticker;   // main ticker
     article.tickers = fix.tickers.slice();               // + additional tickers
@@ -34139,6 +34331,7 @@ function openArticleEditor(key) {
       </div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:14px">
         <button class="btn" id="ae-save" style="font-size:11px;background:var(--pos)">Save fix (durable)</button>
+        <button class="btn btn-ghost" id="ae-noticker" style="font-size:11px" title="General news — not about any one company. Stays untagged; filter with 'No ticker'">∅ No ticker</button>
         <button class="btn" id="ae-bad" style="font-size:11px;background:var(--neg)">✕ Bad article (hide)</button>
         <button class="btn btn-ghost" id="ae-cancel" style="font-size:11px">Cancel</button>
       </div>
@@ -34165,9 +34358,25 @@ function openArticleEditor(key) {
     if (typeof renderNewsFeed === 'function') { try { renderNewsFeed(); } catch {} }
     if (typeof flashStatus === 'function') flashStatus('Article hidden — durable', 'success');
   });
+  const _saveNoTicker = () => {
+    setArticleFix(article, 'noticker', [], {
+      headline: (wrap.querySelector('#ae-headline').value || '').trim() || null,
+      summary: (wrap.querySelector('#ae-summary').value || '').trim() || null,
+      sentiment: chosenSent, impact: chosenImp,
+      stats: (wrap.querySelector('#ae-stats')?.value || '').trim() || null,
+      editedAt: new Date().toISOString(),
+    });
+    applyArticleFix(article);
+    wrap.remove();
+    if (typeof flashStatus === 'function') flashStatus('Saved as general news (no ticker)', 'success');
+    try { renderNewsFeed(); } catch {}
+  };
+  wrap.querySelector('#ae-noticker')?.addEventListener('click', _saveNoTicker);
   wrap.querySelector('#ae-save').addEventListener('click', () => {
     const mainT = (wrap.querySelector('#ae-main').value || '').trim().toUpperCase();
-    if (!mainT) { if (typeof flashStatus === 'function') flashStatus('Main ticker required (or use Bad article to hide)', 'error'); return; }
+    const extrasRaw = (wrap.querySelector('#ae-extra').value || '').trim();
+    if (!mainT && !extrasRaw) { _saveNoTicker(); return; }      // emptied = general news
+    if (!mainT) { if (typeof flashStatus === 'function') flashStatus('Main ticker required (or ∅ No ticker for general news)', 'error'); return; }
     const extras = (wrap.querySelector('#ae-extra').value || '').toUpperCase().split(/[,\s]+/).filter(Boolean).filter(t => t !== mainT);
     const tickers = [mainT, ...extras];
     const headline = (wrap.querySelector('#ae-headline').value || '').trim();
@@ -34549,6 +34758,41 @@ function _startupNewsPrime() {
 // ============================================================
 
 // Common ticker → company name map (extend via stockbook canonical at runtime)
+// ---- Company-name matching for news attribution (z88) -----------------------
+// Was a plain lowercase substring test, so "ATI" matched "nATIonal" (the White
+// House medals article got retagged NVDA -> ATI) and "target" matched every
+// "price target". Now: whole words only; single-word names must appear
+// Capitalized as written (Target, Apple, Visa ...); and "price target" /
+// "target price"-style finance phrases never count as the company.
+const _aliasReCache = new Map();
+const _FIN_PHRASE_RE = /\b(?:price|stock|share|analyst|earnings|revenue|sales|profit|margin|inflation|growth|return|upside|downside|valuation|raise[sd]?|cut[s]?|lower[sed]*|boost[sed]*)\s+targets?\b|\btargets?\s+(?:price|prices|of|range|for|at|to|on|above|below)\b|\btarget(?:ed|ing)\b/i;
+function _aliasRe(alias) {
+  let re = _aliasReCache.get(alias);
+  if (!re) {
+    re = new RegExp('(?<![A-Za-z0-9])' + alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![A-Za-z0-9])', 'gi');
+    _aliasReCache.set(alias, re);
+  }
+  re.lastIndex = 0;
+  return re;
+}
+function _aliasHit(alias, text) {
+  if (!alias || !text) return false;
+  const single = !/\s/.test(alias);
+  const re = _aliasRe(alias);
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const hit = m[0];
+    if (single && !/[A-Z]/.test(hit[0])) continue;              // "apple pie", "target" (common word)
+    if (single) {
+      const around = text.slice(Math.max(0, m.index - 30), m.index + hit.length + 30);
+      if (_FIN_PHRASE_RE.test(around) && /^target$/i.test(hit)) continue;   // "price target" is not Target Corp
+    }
+    return true;
+  }
+  return false;
+}
+if (typeof window !== 'undefined') window._aliasHit = _aliasHit;
+
 function _buildCompanyAliasMap() {
   const aliases = {};
   for (const row of (state.stockbook?.rows || [])) {
@@ -34594,7 +34838,7 @@ function extractEntities(text) {
   const aliases = _buildCompanyAliasMap();
   const lower = t.toLowerCase();
   for (const [alias, tic] of Object.entries(aliases)) {
-    if (lower.includes(alias)) out.tickers.add(tic);
+    if (alias.length >= 3 && _aliasHit(alias, t)) out.tickers.add(tic);
   }
 
   // Dollar amounts: $1.4B, $250M, $42.50, $1,234,567
@@ -35309,6 +35553,8 @@ function validateAndFixTicker(article) {
   const headline = article.headline.toLowerCase();
   const summaryPreview = (article.summary || '').slice(0, 200).toLowerCase();
   const textToScan = headline + ' ' + summaryPreview;
+  const headlineRaw = String(article.headline || '');
+  const summaryRaw = String(article.summary || '').slice(0, 200);
 
   // Get the company name for the currently-assigned ticker
   const assignedRow = (state.stockbook?.rows || []).find(r => r.ticker === article.ticker);
@@ -35321,8 +35567,8 @@ function validateAndFixTicker(article) {
   for (const [alias, tic] of Object.entries(aliases)) {
     if (alias.length < 3) continue;  // skip very short matches like "Co"
     let score = 0;
-    if (headline.includes(alias)) score += 3;
-    if (summaryPreview.includes(alias)) score += 1;
+    if (_aliasHit(alias, headlineRaw)) score += 3;
+    if (_aliasHit(alias, summaryRaw)) score += 1;
     // Multi-word bonus ONLY when the alias actually matched — previously this
     // was unconditional, so every multi-word company name scored 1 on every
     // article, creating phantom matches and spurious re-tags.
@@ -35378,7 +35624,7 @@ function validateAndFixTicker(article) {
     article._tickerConfidence = 'matched';
     return article;
   }
-  if (assignedScore === 0 && assignedName && textToScan.includes(assignedName)) {
+  if (assignedScore === 0 && assignedName && _aliasHit(assignedName, headlineRaw + ' ' + summaryRaw)) {
     // Edge case: the alias map missed the assigned ticker but its name IS in the text.
     article._tickerConfidence = 'matched';
     return article;
@@ -35893,6 +36139,11 @@ function renderNewsFeed() {
     });
   }
 
+  // 4b. Ticker presence filter (z88): all / with a ticker / no ticker
+  const tf = state.news.filterTicker || 'all';
+  if (tf === 'tagged') items = items.filter(a => a.ticker && String(a.ticker).trim());
+  else if (tf === 'untagged') items = items.filter(a => !(a.ticker && String(a.ticker).trim()));
+
   // 5. Read/dismissed/reported filter
   const articleStates = loadArticleStates();
   const view = state.news.filterView || 'unread';
@@ -36039,13 +36290,20 @@ function renderNewsFeed() {
     const entities = extractEntities((article.headline || '') + ' ' + (article.summary || ''));
     const entityChips = [];
     if (entities) {
-      const otherTickers = entities.tickers.filter(t => t !== article.ticker).slice(0, 5);
-      if (otherTickers.length > 0) {
-        entityChips.push(`<span style="font-family:var(--mono);font-size:9px;color:var(--ink-faint)">ALSO MENTIONED:</span>`);
+      // z88: a human edit (✎ fix) decides the "also mentioned" list; the text
+      // extractor only fills it in for unedited articles. Previously the chips
+      // ignored the editor's "additional tickers", so edits never showed.
+      const _fx = (typeof getArticleFix === 'function') ? getArticleFix(article) : null;
+      const _human = _fx && ['fixed', 'confirmed', 'noticker'].includes(_fx.verdict);
+      const otherTickers = _human ? (_fx.tickers || []).slice(1, 9)
+                                  : entities.tickers.filter(t => t !== article.ticker).slice(0, 5);
+      if (otherTickers.length > 0 || _human) {
+        entityChips.push(`<span style="font-family:var(--mono);font-size:9px;color:var(--ink-faint)">ALSO MENTIONED${_human ? ' (edited)' : ''}:</span>`);
         otherTickers.forEach(t => {
-          entityChips.push(`<span class="news-entity-chip" onclick="executeCommand('${escapeHtml(t)}')" style="cursor:pointer;padding:1px 6px;background:rgba(212,162,76,0.1);border:1px solid var(--rule);border-radius:2px;font-family:var(--mono);font-size:10px;color:var(--amber);font-weight:700">${escapeHtml(t)}</span>`);
+          entityChips.push(`<span class="news-entity-chip" onclick="openTickerInValuation('${escapeHtml(t)}')" style="cursor:pointer;padding:1px 6px;background:rgba(212,162,76,0.1);border:1px solid var(--rule);border-radius:2px;font-family:var(--mono);font-size:10px;color:var(--amber);font-weight:700">${escapeHtml(t)}</span>`);
         });
       }
+      entityChips.push(`<span class="news-entity-chip" onclick="openArticleEditor('${escapeHtml(articleKey(article))}')" style="cursor:pointer;padding:3px 8px;border:1px dashed var(--rule);border-radius:3px;font-family:var(--mono);font-size:10px;color:var(--ink-dim)" title="Change the main ticker, the tickers mentioned, or mark it general news">✎ edit tickers</span>`);
       if (entities.dollarAmounts.length > 0) {
         const top = entities.dollarAmounts[0];
         entityChips.push(`<span style="font-family:var(--mono);font-size:10px;color:var(--ink-dim)">${escapeHtml(top.raw)}</span>`);
@@ -36093,7 +36351,7 @@ function renderNewsFeed() {
       <article class="news-item${isMyNews ? ' is-mynews' : ''}" data-article-key="${articleId}">
         <div class="news-item-priority ${article.priority}"></div>
         <div class="news-item-header">
-          <span class="news-item-ticker">${article.ticker}</span>
+          <span class="news-item-ticker">${article.ticker ? escapeHtml(article.ticker) : `<span style="color:var(--ink-faint)" title="${article._noTicker ? 'General news (no ticker) — set by you' : 'No ticker yet — tap ✎ fix to assign one or mark it general news'}">${article._noTicker ? 'GENERAL' : 'NO TICKER'}</span>`}</span>
           <span class="news-item-mcap" title="Market cap: ${fmt$(article.marketCap)}">${article.priorityLabel} · ${fmt$H(article.marketCap)}</span>
           ${reassignBadge}
           ${breakingBadge}
@@ -36304,6 +36562,11 @@ function onNewsTabActive() {
     document.getElementById('news-refresh-btn')?.addEventListener('click', () => loadPortfolioNews(true));
     document.getElementById('news-filter-priority')?.addEventListener('change', e => {
       state.news.filterPriority = e.target.value;
+      state.news.page = 1;
+      renderNewsFeed();
+    });
+    document.getElementById('news-filter-ticker')?.addEventListener('change', e => {
+      state.news.filterTicker = e.target.value;
       state.news.page = 1;
       renderNewsFeed();
     });
@@ -44073,7 +44336,10 @@ function mergePortfolioRecords(records) {
   if (!Array.isArray(records) || !records.length) return 0;
   let added = 0;
   let portfolio = []; try { portfolio = loadPortfolio(); } catch {}
-  let txns = []; try { txns = loadTransactions(); } catch {}
+  let txns = []; try { txns = loadAllTransactions(); } catch {}
+  // Ledger as of this merge (local + incoming), for the "already sold" check.
+  const txForCheck = txns.filter(t => !t.void).concat(records.filter(r => r && r._kind === 'transaction' && !r.void));
+  let skippedSold = 0;
   // Prefer the STABLE id as the dedup key (falling back to ticker|position only
   // for legacy rows without one). Keying on ticker|position caused duplicates
   // when a position's role changed (e.g. Tracking→Watching) — the same holding
@@ -44085,10 +44351,19 @@ function mergePortfolioRecords(records) {
   const haveTxn = new Set(txns.map(t => t.id || `${t.ticker}|${t.date}|${t.shares}|${t.price}`));
   for (const rec of records) {
     if (!rec || !rec._kind) {
-      if (rec && rec.ticker) { const k = entryKey(rec); if (!haveEntries.has(k)) { portfolio.push(rec); haveEntries.add(k); added++; } }
+      if (rec && rec.ticker) {
+        if (shouldSkipRestoredEntry(rec, txForCheck)) { skippedSold++; continue; }
+        const k = entryKey(rec); if (!haveEntries.has(k)) { portfolio.push(rec); haveEntries.add(k); added++; }
+      }
       continue;
     }
     if (rec._kind === 'entry') {
+      if (shouldSkipRestoredEntry(rec, txForCheck)) {
+        // Sold/removed here - don't resurrect; also delete the stale mirror row.
+        skippedSold++;
+        try { if (rec.id && typeof portSupabaseDelete === 'function') portSupabaseDelete(rec.id); } catch {}
+        continue;
+      }
       const k = entryKey(rec);
       // Skip if we already have this exact id. Also skip a legacy id-less repo
       // row whose ticker is already represented locally (avoids a duplicate of a
@@ -44123,6 +44398,8 @@ function mergePortfolioRecords(records) {
   }
   try { if (typeof savePortfolio === 'function') savePortfolio(portfolio); } catch {}
   try { if (typeof saveTransactions === 'function') saveTransactions(txns); } catch {}
+  if (skippedSold) console.warn(`[portfolio] restore: ${skippedSold} sold/removed position(s) not resurrected`);
+  try { portfolioIntegrityPass('restore'); } catch {}
   if (added && typeof renderPortfolioTab === 'function') { try { renderPortfolioTab(); } catch {} }
   return added;
 }
