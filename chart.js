@@ -178,7 +178,7 @@
     const line = points.map((p, i) => (i ? 'L' : 'M') + X(i).toFixed(1) + ',' + Y(p.v).toFixed(1)).join('');
     const grid = [0, 1, 2, 3].map(k => { const v = lo + (hi - lo) * (k + 0.5) / 4, y = Y(v);
       return `<line x1="0" x2="${W - padR}" y1="${y}" y2="${y}" stroke="var(--rule,#2d2d33)" stroke-width="0.6" vector-effect="non-scaling-stroke"/>` +
-             `<text x="${W - padR + 6}" y="${y + 3.5}" font-size="10" fill="var(--ink-faint,#6e6a5f)" font-family="var(--mono,monospace)">${opts.money === false ? v.toFixed(2) : fmtMoney(v)}</text>`; }).join('');
+             `<text x="${W - padR + 6}" y="${y + 3.5}" font-size="10" fill="var(--ink-faint,#6e6a5f)" font-family="var(--mono,monospace)">${opts.money === false ? (Math.abs(v) >= 100 ? Math.round(v).toLocaleString() : v.toFixed(2)) : fmtMoney(v)}</text>`; }).join('');
     const intraday = String(points[0].t).includes('T');
     const lab = t => intraday ? new Date(t).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
                               : new Date(t + 'T12:00:00Z').toLocaleDateString(undefined, points.length > 300 ? { year: '2-digit', month: 'short' } : { month: 'short', day: 'numeric' });
