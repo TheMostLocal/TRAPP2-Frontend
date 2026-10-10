@@ -49,6 +49,9 @@
   button[onclick^="openArticleEditor"], .news-entity-chip { min-height: 30px; display: inline-flex; align-items: center; }
   button[onclick^="openArticleEditor"] { padding: 4px 10px !important; font-size: 11px !important; }
 
+  /* ---- Fed tab · QE/QT monitor: two KPI columns on a phone */
+  #fedmon .fm-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+
   /* ---- Research · grades table: long company names no longer run into the
      grade column; the table scrolls sideways inside its wrapper instead. */
   .sb-table td, .sb-table th { overflow-wrap: anywhere; }
