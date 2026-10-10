@@ -567,7 +567,10 @@
     const tpl = P.stats && P.stats.templates && P.stats.templates[top.key];
     const now = P.stats && P.stats.regimeNow ? P.stats.regimeNow.trend : null;
     const rg = tpl && tpl.byRegime && tpl.byRegime.trend && tpl.byRegime.trend[now];
-    const useRg = !!(rg && rg.usable && rg.successRate != null);
+    // z93: only lean on the market-regime split when the regime call is dialed in
+    let _rcOk = false;
+    try { const rc = window.RegimeCertainty ? await window.RegimeCertainty.load() : null; _rcOk = !!(rc && rc.dialedIn); } catch (e) {}
+    const useRg = !!(_rcOk && rg && rg.usable && rg.successRate != null);
     const st = useRg ? rg : (tpl && tpl.backtest);
     const why = (top.fromCall ? `Confidence = a system call (${top.status}) ~${top.bars} bars ago x recency. `
                               : `Confidence = ${top.ok ? 'all' : top.passes + ' of ' + top.of} rules met x recency (last swing ~${top.bars} bars ago). `) +
