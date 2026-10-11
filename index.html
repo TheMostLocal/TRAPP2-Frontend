@@ -7032,6 +7032,10 @@
     <span class="tab-num">09</span>
     <span class="tab-label">Global Trade</span>
   </button>
+  <button class="tab-btn" data-tab="data" title="Data explorer · every dataset in one place · tables, charts, heat maps and 3D surfaces (IV surface, yield curve)">
+    <span class="tab-num">10</span>
+    <span class="tab-label">Data</span>
+  </button>
 </nav>
 
 <!-- ===== NEWS FEED ===== -->
@@ -8297,6 +8301,11 @@
      are tagged LIVE; FRED/World Bank/IMF data is tagged MONTHLY or
      QUARTERLY depending on cadence; data >90 days old is tagged STALE.
      ============================================================ -->
+<!-- DATA tab (z95): multi-view data explorer — datatab.js renders into #data-tab-body -->
+<div class="tab-panel" data-panel="data">
+  <div id="data-tab-body" style="padding:8px 0 40px"></div>
+</div>
+
 <div class="tab-panel" data-panel="globaltrade">
 
   <div class="news-header">
@@ -8911,5 +8920,7 @@
 <script src="fedmon.js?v=20260615z92"></script>
 <!-- Regime certainty: is the regime call dialed in? - z93 -->
 <script src="regimecert.js?v=20260615z94"></script>
+<!-- Data tab: dataset explorer + 3D surfaces - z95 -->
+<script src="datatab.js?v=20260615z95"></script>
 </body>
 </html>
