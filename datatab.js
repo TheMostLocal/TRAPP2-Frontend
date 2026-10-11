@@ -44,12 +44,17 @@
   const rgb = (c, a = 1) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
 
   // ------------------------------------------------------------- 3D surface --
-  function Surface3D(canvas, ds, onPick) {
-    const st = { yaw: -0.62, pitch: 0.52, D: 4.2, picked: null };
+  function Surface3D(canvas, ds, onPick, cam) {
+    // camera state is shared with the caller so it survives re-renders (scrubbing)
+    const st = cam || { yaw: -0.62, pitch: 0.52, D: 4.2, picked: null };
     const nx = ds.xs.length, ny = ds.ys.length;
     const vals = ds.z.flat().filter(v => v != null && isFinite(v));
-    const zmin = Math.min(...vals), zmax = Math.max(...vals);
-    const zlo = Math.floor(zmin / ds.zStep) * ds.zStep, zhi = Math.ceil(zmax / ds.zStep) * ds.zStep || zlo + ds.zStep;
+    // A fixed range (ds.zRange) keeps height + colour comparable across time snapshots.
+    const zmin = ds.zRange ? ds.zRange[0] : Math.min(...vals), zmax = ds.zRange ? ds.zRange[1] : Math.max(...vals);
+    // "nice" tick step so the value axis carries at most ~6 labels
+    const zStep = [0.1, 0.2, 0.25, 0.5, 1, 2, 2.5, 5, 10, 20, 25, 50, 100].find(st => (zmax - zmin) / st <= 6) || ds.zStep;
+    ds = Object.assign({}, ds, { zStep, zFmt: (zStep % 1) ? (v => v.toFixed(zStep < 0.5 ? 2 : 1)) : ds.zFmt });
+    const zlo = Math.floor(zmin / zStep) * zStep, zhi = Math.ceil(zmax / zStep) * zStep || zlo + zStep;
     // world coordinates: x,y in [-1,1], z in [0, H]
     const H = 1.05;
     const X = i => -1 + 2 * (ds.xScale === 'value' ? (ds.xs[i] - ds.xs[0]) / (ds.xs[nx - 1] - ds.xs[0] || 1) : i / Math.max(1, nx - 1));
@@ -210,6 +215,62 @@
       zFmt: v => v.toFixed(0), cell: v => v == null ? '—' : v.toFixed(1) + '%' };
   }
 
+  // ---- constant maturity (mirror of TRAPP2-OPTIONS update_surface_history) ----
+  const CM_M = [0.80, 0.85, 0.90, 0.95, 1.00, 1.05, 1.10, 1.15, 1.20];
+  const CM_T = [7, 14, 30, 60, 90, 180, 365, 730];
+  const tenorLabel = d => d < 30 ? `${d}d` : d < 365 ? `${Math.round(d / 30)}M` : `${Math.round(d / 365)}Y`;
+  function smileAt(pts, m) {
+    if (!pts.length || m < pts[0][0] || m > pts[pts.length - 1][0]) return null;
+    for (let k = 1; k < pts.length; k++) if (m <= pts[k][0]) { const [m0, v0] = pts[k - 1], [m1, v1] = pts[k]; return v0 + (v1 - v0) * (m1 === m0 ? 0 : (m - m0) / (m1 - m0)); }
+    return null;
+  }
+  function cmFromChain(d) {
+    const S = +d.spot; if (!S) return null;
+    const exps = [];
+    for (const e of [...(d.expiries || [])].sort((a, b) => (a.dte || 0) - (b.dte || 0))) {
+      if (!((e.dte || 0) >= 1)) continue;
+      const pts = [...(e.puts || []).filter(o => o.strike < S), ...(e.calls || []).filter(o => o.strike >= S)]
+        .filter(o => +o.iv > 0.01 && +o.iv < 5).map(o => [o.strike / S, +o.iv]).sort((a, b) => a[0] - b[0]);
+      if (pts.length >= 3) exps.push([e.dte, pts]);
+    }
+    if (exps.length < 2) return null;
+    return CM_T.map(T => CM_M.map(m => {
+      for (let k = 1; k < exps.length; k++) {
+        const [t0, p0] = exps[k - 1], [t1, p1] = exps[k];
+        if (t0 <= T && T <= t1) {
+          const a = smileAt(p0, m), b = smileAt(p1, m);
+          if (a == null || b == null) return null;
+          const w = a * a * t0 + (b * b * t1 - a * a * t0) * (t1 === t0 ? 0 : (T - t0) / (t1 - t0));   // total variance
+          return w > 0 ? +(Math.sqrt(w / T) * 100).toFixed(2) : null;
+        }
+      }
+      return null;
+    }));
+  }
+  async function cmSurface(ticker) {
+    let hist = null;
+    try { hist = await getJSON(`${RAW()}/TRAPP2-OPTIONS/main/data/surfaces/${encodeURIComponent(ticker)}.json`); } catch (e) {}
+    let snaps = (hist && Array.isArray(hist.snapshots)) ? hist.snapshots.filter(x => x && x.iv) : [];
+    if (!snaps.length) {
+      let data = null;
+      try { if (typeof loadOptionsForTicker === 'function') data = await loadOptionsForTicker(ticker); } catch (e) {}
+      const g = data ? cmFromChain(data) : null;
+      if (!g) return { error: `No options chain for ${ticker} yet — request it from Valuation → Options.` };
+      snaps = [{ date: String(data.asOf || '').slice(0, 10) || 'today', spot: data.spot, iv: g }];
+    }
+    // one height/colour scale across ALL snapshots, so scrubbing shows real change
+    const allv = snaps.flatMap(x => x.iv.flat()).filter(v => v != null && isFinite(v));
+    const zRange = allv.length ? [Math.min(...allv), Math.max(...allv)] : null;
+    const mk = k => {
+      const sn = snaps[k];
+      return { title: `${ticker} implied-volatility surface · constant maturity`, snapIndex: k, snaps,
+        sub: `${sn.date} · spot $${(+sn.spot || 0).toFixed(2)} · tenors 7d–2Y interpolated in total variance · ${snaps.length > 1 ? snaps.length + ' daily snapshots' : 'history builds daily from the options workflow'}`,
+        xs: CM_M, ys: CM_T, z: sn.iv, zRange: snaps.length > 1 ? zRange : null, xScale: 'value', xLabel: 'Moneyness', yLabel: 'Tenor', zLabel: 'IV %', zStep: 5,
+        xTick: v => `${Math.round(v * 100)}%`, yTick: tenorLabel, zFmt: v => v.toFixed(0), cell: v => v == null ? '—' : v.toFixed(1) + '%' };
+    };
+    return { cm: true, make: mk, count: snaps.length };
+  }
+
   const MATS = [['DGS1MO', '1M'], ['DGS3MO', '3M'], ['DGS6MO', '6M'], ['DGS1', '1Y'], ['DGS2', '2Y'], ['DGS3', '3Y'], ['DGS5', '5Y'], ['DGS7', '7Y'], ['DGS10', '10Y'], ['DGS20', '20Y'], ['DGS30', '30Y']];
   async function yieldSurface(months) {
     const base = `${RAW()}/TRAPP2-1/main/data/macro/`;
@@ -248,19 +309,56 @@
 
   // ------------------------------------------------------------------ views --
   function heatHtml(ds) {
-    const vals = ds.z.flat().filter(v => v != null), lo = Math.min(...vals), hi = Math.max(...vals);
+    const vals = ds.z.flat().filter(v => v != null);
+    const lo = ds.zRange ? ds.zRange[0] : Math.min(...vals), hi = ds.zRange ? ds.zRange[1] : Math.max(...vals);
     return `<div style="overflow-x:auto"><table style="border-collapse:collapse;font-family:var(--mono);font-size:10px;min-width:max-content">
       <thead><tr><th style="padding:4px 8px;text-align:left;color:var(--ink-faint)">${esc(ds.yLabel)} \\ ${esc(ds.xLabel)}</th>${ds.xs.map(x => `<th style="padding:4px 6px;color:var(--ink-dim)">${esc(ds.xTick(x))}</th>`).join('')}</tr></thead>
       <tbody>${ds.ys.map((y, j) => `<tr><td style="padding:3px 8px;color:var(--ink-dim);white-space:nowrap">${esc(ds.yTick(y))}</td>${ds.xs.map((x, i) => { const v = ds.z[j][i];
         if (v == null) return '<td style="padding:3px 6px;text-align:center;color:var(--ink-faint)">·</td>';
         const c = colorAt((v - lo) / (hi - lo || 1)); return `<td style="padding:3px 6px;text-align:center;background:${rgb(c, 0.85)};color:#111">${esc(ds.cell(v))}</td>`; }).join('')}</tr>`).join('')}</tbody></table></div>`;
   }
+  // Slices: one line per row (smile per expiry / tenor) + ATM term structure.
+  function slicesHtml(ds) {
+    const W = 600, Hh = 220, pl = 40, pr = 10, pt = 10, pb = 24;
+    const vals = ds.z.flat().filter(v => v != null); if (!vals.length) return '';
+    const lo = Math.floor(Math.min(...vals)), hi = Math.ceil(Math.max(...vals));
+    const sx = i => pl + i / Math.max(1, ds.xs.length - 1) * (W - pl - pr);
+    const sy = v => pt + (hi - v) / (hi - lo || 1) * (Hh - pt - pb);
+    const grid = [0, 0.25, 0.5, 0.75, 1].map(f => { const v = lo + (hi - lo) * f, y = sy(v); return `<line x1="${pl}" x2="${W - pr}" y1="${y}" y2="${y}" stroke="rgba(255,255,255,.1)"/><text x="${pl - 4}" y="${y + 3}" font-size="9" text-anchor="end" fill="#8a8578" font-family="monospace">${v.toFixed(0)}</text>`; }).join('');
+    const xt = ds.xs.map((x, i) => `<text x="${sx(i)}" y="${Hh - 6}" font-size="9" text-anchor="middle" fill="#8a8578" font-family="monospace">${esc(ds.xTick(x))}</text>`).join('');
+    const lines = ds.ys.map((y, j) => {
+      const c = rgb(colorAt(ds.ys.length > 1 ? j / (ds.ys.length - 1) : 0));
+      let d = '', pen = false;
+      ds.z[j].forEach((v, i) => { if (v == null) { pen = false; return; } d += (pen ? 'L' : 'M') + sx(i).toFixed(1) + ',' + sy(v).toFixed(1); pen = true; });
+      return d ? `<path d="${d}" fill="none" stroke="${c}" stroke-width="1.6"><title>${esc(ds.yTick(y))}</title></path>` : '';
+    }).join('');
+    const legend = ds.ys.map((y, j) => `<span style="color:${rgb(colorAt(ds.ys.length > 1 ? j / (ds.ys.length - 1) : 0))}">■ ${esc(ds.yTick(y))}</span>`).join(' ');
+    // ATM term structure (the column closest to 100%)
+    const ai = ds.xs.reduce((b, x, i) => Math.abs(+x - 1) < Math.abs(+ds.xs[b] - 1) ? i : b, 0);
+    const atm = ds.ys.map((y, j) => [j, ds.z[j][ai]]).filter(p => p[1] != null);
+    const tx = j => pl + j / Math.max(1, ds.ys.length - 1) * (W - pl - pr);
+    const tline = atm.map(([j, v], k) => (k ? 'L' : 'M') + tx(j).toFixed(1) + ',' + sy(v).toFixed(1)).join('');
+    const tt = ds.ys.map((y, j) => `<text x="${tx(j)}" y="${Hh - 6}" font-size="9" text-anchor="middle" fill="#8a8578" font-family="monospace">${esc(ds.yTick(y))}</text>`).join('');
+    const isNum = typeof ds.xs[0] === 'number';
+    return `<div style="font-family:var(--mono);font-size:9px;color:var(--ink-dim);margin:6px 0 2px">${esc(ds.zLabel)} ACROSS ${esc(ds.xLabel.toUpperCase())} — one line per ${esc(ds.yLabel.toLowerCase())}</div>
+      <svg viewBox="0 0 ${W} ${Hh}" style="width:100%;height:auto;display:block">${grid}${xt}${lines}</svg>
+      <div style="font-family:var(--mono);font-size:9px;line-height:1.6">${legend}</div>
+      ${isNum ? `<div style="font-family:var(--mono);font-size:9px;color:var(--ink-dim);margin:12px 0 2px">${esc(ds.zLabel)} AT ${esc(ds.xTick(ds.xs[ai]))} ACROSS ${esc(ds.yLabel.toUpperCase())} (term structure)</div>
+      <svg viewBox="0 0 ${W} ${Hh}" style="width:100%;height:auto;display:block">${grid}${tt}<path d="${tline}" fill="none" stroke="var(--amber,#e0b04c)" stroke-width="2"/></svg>` : ''}`;
+  }
+  function legendHtml(ds) {
+    const vals = ds.z.flat().filter(v => v != null);
+    const lo = ds.zRange ? ds.zRange[0] : Math.min(...vals), hi = ds.zRange ? ds.zRange[1] : Math.max(...vals);
+    const stops = STOPS.map(([t, c]) => `${rgb(c)} ${Math.round(t * 100)}%`).join(',');
+    return `<div style="display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:9.5px;color:var(--ink-dim);margin-top:6px">
+      <span>${esc(ds.cell(lo))}</span><span style="flex:1;height:8px;border-radius:4px;background:linear-gradient(90deg,${stops})"></span><span>${esc(ds.cell(hi))}</span></div>`;
+  }
   function tableHtml(ds) {
     return `<div style="overflow-x:auto"><table class="sb-table" style="font-size:10.5px;min-width:max-content"><thead><tr><th>${esc(ds.yLabel)}</th>${ds.xs.map(x => `<th>${esc(ds.xTick(x))}</th>`).join('')}</tr></thead>
       <tbody>${ds.ys.map((y, j) => `<tr><td>${esc(y)}</td>${ds.z[j].map(v => `<td>${esc(ds.cell(v))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
   }
 
-  const S = { dataset: 'iv', view: '3d', ticker: null, months: 36, surf: null, cache: {} };
+  const S = { dataset: 'iv', view: '3d', ticker: null, months: 36, surf: null, cache: {}, ivMode: 'cm', snap: null };
   async function render() {
     const host = document.getElementById('data-tab-body');
     if (!host) return;
@@ -271,7 +369,8 @@
     host.innerHTML = `<div class="section-title" style="margin-bottom:6px">Data <small>datasets · tables · heat maps · 3D surfaces · WIP</small></div>
       <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0">
         ${seg('dataset', [['iv', 'IV surface'], ['yield', 'Yield curve'], ['catalog', 'Catalog']])}
-        ${S.dataset !== 'catalog' ? seg('view', [['3d', '3D'], ['heat', 'Heat map'], ['table', 'Table']]) : ''}
+        ${S.dataset !== 'catalog' ? seg('view', [['3d', '3D'], ['heat', 'Heat map'], ['slices', 'Slices'], ['table', 'Table']]) : ''}
+        ${S.dataset === 'iv' ? seg('ivMode', [['cm', 'Constant maturity'], ['exp', 'By expiry']]) : ''}
         ${S.dataset === 'iv' ? `<input id="dt-ticker" value="${esc(S.ticker)}" style="width:80px;background:var(--bg-elev);border:1px solid var(--rule);color:var(--ink);padding:5px 6px;border-radius:4px;font-family:var(--mono);font-size:11px;text-transform:uppercase"><button class="btn" id="dt-go" style="padding:5px 10px;font-size:10px">Load</button>` : ''}
         ${S.dataset === 'yield' ? seg('months', [[12, '1Y'], [36, '3Y'], [60, '5Y'], [120, '10Y']]) : ''}
       </div>
@@ -282,23 +381,41 @@
     host.querySelectorAll('[data-dt-dataset]').forEach(b => b.onclick = () => { S.dataset = b.dataset.dtDataset; render(); });
     host.querySelectorAll('[data-dt-view]').forEach(b => b.onclick = () => { S.view = b.dataset.dtView; render(); });
     host.querySelectorAll('[data-dt-months]').forEach(b => b.onclick = () => { S.months = +b.dataset.dtMonths; render(); });
+    host.querySelectorAll('[data-dt-ivMode], [data-dt-ivmode]').forEach(b => b.onclick = () => { S.ivMode = b.dataset.dtIvmode || b.dataset.dtIvMode; S.snap = null; render(); });
     const go = $('#dt-go'); if (go) { go.onclick = () => { S.ticker = ($('#dt-ticker').value || '').trim().toUpperCase() || S.ticker; render(); }; $('#dt-ticker').onkeydown = e => { if (e.key === 'Enter') go.click(); }; }
     const view = $('#dt-view');
     if (S.dataset === 'catalog') return renderCatalog(view);
     view.innerHTML = '<div style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);padding:20px 0">Loading…</div>';
-    const key = S.dataset === 'iv' ? 'iv:' + S.ticker : 'yield:' + S.months;
-    const ds = S.cache[key] || (S.cache[key] = await (S.dataset === 'iv' ? ivSurface(S.ticker) : yieldSurface(S.months)));
+    const key = S.dataset === 'iv' ? `iv:${S.ivMode}:${S.ticker}` : 'yield:' + S.months;
+    const loader = S.dataset === 'iv' ? (S.ivMode === 'cm' ? cmSurface(S.ticker) : ivSurface(S.ticker)) : yieldSurface(S.months);
+    const got = S.cache[key] || (S.cache[key] = await loader);
     if (!document.getElementById('dt-view')) return;
-    if (ds.error) { delete S.cache[key]; view.innerHTML = `<div style="font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);padding:16px 0">${esc(ds.error)}</div>`; return; }
+    if (got.error) { delete S.cache[key]; view.innerHTML = `<div style="font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);padding:16px 0">${esc(got.error)}</div>`; return; }
+    // constant-maturity history: a date scrubber over the daily snapshots
+    let ds = got, scrub = '';
+    if (got.cm) {
+      const k = S.snap == null ? got.count - 1 : Math.max(0, Math.min(got.count - 1, S.snap));
+      ds = got.make(k);
+      if (got.count > 1) scrub = `<div style="display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10px;margin:4px 0 8px">
+          <span style="color:var(--ink-faint)">${esc(ds.snaps[0].date)}</span>
+          <input type="range" id="dt-scrub" min="0" max="${got.count - 1}" value="${k}" style="flex:1">
+          <span style="color:var(--ink-faint)">${esc(ds.snaps[got.count - 1].date)}</span></div>`;
+    }
     $('#dt-title').textContent = ds.title; $('#dt-sub').innerHTML = ds.sub;
-    if (S.view === 'heat') { view.innerHTML = heatHtml(ds); return; }
-    if (S.view === 'table') { view.innerHTML = tableHtml(ds); return; }
+    const bindScrub = () => { const r = $('#dt-scrub'); if (r) r.oninput = () => { S.snap = +r.value; render(); }; };
+    if (S.view === 'heat') { view.innerHTML = scrub + heatHtml(ds) + legendHtml(ds); bindScrub(); return; }
+    if (S.view === 'table') { view.innerHTML = scrub + tableHtml(ds); bindScrub(); return; }
+    if (S.view === 'slices') { view.innerHTML = scrub + slicesHtml(ds); bindScrub(); return; }
     view.innerHTML = `<div style="position:relative;background:linear-gradient(#2a2a2a,#121212);border:1px solid var(--rule);border-radius:6px">
         <canvas id="dt-canvas" style="width:100%;height:${window.innerWidth < 600 ? 340 : 460}px;display:block"></canvas>
         <button class="btn btn-ghost" id="dt-reset" style="position:absolute;right:8px;top:8px;padding:3px 8px;font-size:9px">Reset view</button></div>
+      ${legendHtml(ds)}
       <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:4px">Drag / swipe to rotate · tap a point for its value · colour = value (green low → red high)</div>`;
+    if (scrub) { view.insertAdjacentHTML('afterbegin', scrub); bindScrub(); }
     const ro = $('#dt-readout');
-    S.surf = Surface3D($('#dt-canvas'), ds, (x, y, v) => { ro.innerHTML = `${esc(ds.xLabel)} <strong>${esc(ds.xTick(x))}</strong> · ${esc(ds.yLabel)} <strong>${esc(ds.yTick(y))}</strong> · ${esc(ds.zLabel)} <strong style="color:var(--ink)">${esc(ds.cell(v))}</strong>`; });
+    S.camera = S.camera || { yaw: -0.62, pitch: 0.52, D: 4.2, picked: null };
+    S.camera.picked = null;
+    S.surf = Surface3D($('#dt-canvas'), ds, (x, y, v) => { ro.innerHTML = `${esc(ds.xLabel)} <strong>${esc(ds.xTick(x))}</strong> · ${esc(ds.yLabel)} <strong>${esc(ds.yTick(y))}</strong> · ${esc(ds.zLabel)} <strong style="color:var(--ink)">${esc(ds.cell(v))}</strong>`; }, S.camera);
     $('#dt-reset').onclick = () => S.surf.reset();
   }
   async function renderCatalog(view) {
