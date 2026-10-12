@@ -43948,6 +43948,8 @@ function _mergeBotTrainingData(data, sourceLabel) {
           updated++;
         }
         if (t.origin && !loc.origin) loc.origin = t.origin;
+        if (t.regimeContext && !loc.regimeContext) loc.regimeContext = t.regimeContext;
+        if (typeof t.regimeCallCorrect === 'boolean' && loc.regimeCallCorrect !== t.regimeCallCorrect) loc.regimeCallCorrect = t.regimeCallCorrect;
       }
       continue;
     }
@@ -43989,6 +43991,8 @@ function _mergeBotTrainingData(data, sourceLabel) {
         soldStillStrong: t.soldStillStrong || false, exitMomentum: t.exitMomentum,
         rolledForMomentum: t.rolledForMomentum || 0,
         decisionReceipt: t.decisionReceipt || null,
+        // z101: regime context at entry + the later verdict on that call, and who opened it
+        regimeContext: t.regimeContext || null, regimeCallCorrect: t.regimeCallCorrect, origin: t.origin || 'runner',
         signalsThatHelped: t.signalsThatHelped, signalsThatHurt: t.signalsThatHurt,
         couldHaveWorked: t.couldHaveWorked,
         components: t.components || (t.topDrivers || []).reduce((o, d) => { o[d.signal] = d.lean; return o; }, {}),
