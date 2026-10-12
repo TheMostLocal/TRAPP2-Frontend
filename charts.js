@@ -193,6 +193,9 @@
         <path d="${line}" fill="none" stroke="${col}" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>
         <line class="vc-x" x1="0" x2="0" y1="${padT}" y2="${H - padB}" stroke="var(--ink-dim,#b8b1a4)" stroke-dasharray="3,3" vector-effect="non-scaling-stroke" opacity="0"/>
         <circle class="vc-dot" r="3.5" fill="${col}" opacity="0"/>
+        ${(opts.markers || []).map(m => { const i = points.findIndex(p => p.t >= m.t); if (i < 0) return '';
+          const x = X(i), y = Y(points[i].v), up = m.kind === 'in';
+          return `<g><title>${esc(m.label)}</title><path d="M${x},${up ? y + 7 : y - 7} l-5,${up ? 8 : -8} h10 z" fill="${up ? 'var(--pos,#5b8a72)' : 'var(--amber,#e0b04c)'}" stroke="#000" stroke-width="0.6"/></g>`; }).join('')}
         ${xt}
       </svg>
       <div class="vc-hit" style="position:absolute;left:0;top:0;bottom:${padB}px;right:${(padR / W) * 100}%;cursor:crosshair;touch-action:pan-y"></div>
@@ -286,5 +289,100 @@
     }));
   }
 
-  window.VChart = { fetchDaily, fetchTapeDay, drawStockChart, windowed, resample, indexDaily, indexIntraday, mountGoodGlobeChart, mountSparks, _gg: GG };
+  // ---------------- Account value (portfolio, z97) ----------------
+  // Total account value per day = cash + every holding marked at that day's
+  // actual close, rebuilt from the transaction ledger:
+  //   cash(d)     = opening capital + cash effect of every non-void row <= d
+  //                 (buys, sells, shorts, options, deposits, withdrawals, adjustments)
+  //   holdings(d) = shares from buy/sell/short rows <= d, x close(d) x USD factor
+  // Positions that pre-date the ledger enter at their added date and cost.
+  // Deposits / withdrawals are drawn as markers, and the headline return is
+  // TIME-WEIGHTED (flows removed), so taking cash out never looks like a loss.
+  // Opening capital = the reconciliation value if you've entered one, else the
+  // amount that makes today's cash match the stored balance.
+  const ACC = { range: 'ALL' };
+  async function accountSeries() {
+    const txAll = (typeof loadTransactions === 'function') ? loadTransactions() : [];
+    const entries = (typeof loadPortfolio === 'function') ? (loadPortfolio() || []) : [];
+    const effect = t => (typeof txCashEffect === 'function') ? txCashEffect(t) : 0;
+    const tx = txAll.map(t => ({ ...t, d: String(t.ts || '').slice(0, 10) })).filter(t => t.d).sort((a, b) => a.d < b.d ? -1 : 1);
+    // positions that pre-date the ledger: a virtual buy at addedAt
+    const ACTIVE = ['Long', 'Short'];
+    const covered = new Set(tx.filter(t => t.type === 'buy' || t.type === 'short').map(t => String(t.ticker || '').toUpperCase()));
+    for (const e of entries) {
+      const T = String(e.ticker || '').toUpperCase();
+      if (!ACTIVE.includes(e.position) || covered.has(T) || !(+e.qty > 0) || !(+e.costBasis > 0)) continue;
+      const d = String(e.addedAt || e.createdAt || '').slice(0, 10); if (!d) continue;
+      tx.push({ d, type: e.position === 'Short' ? 'short' : 'buy', ticker: T, qty: +e.qty, price: +e.costBasis, fee: 0, _virtual: true,
+                cost: e.position === 'Short' ? undefined : +e.qty * +e.costBasis, proceeds: e.position === 'Short' ? +e.qty * +e.costBasis : undefined });
+    }
+    tx.sort((a, b) => a.d < b.d ? -1 : 1);
+    if (!tx.length) return null;
+    const stored = (typeof getCashPosition === 'function') ? +getCashPosition() || 0 : 0;
+    const flowAll = tx.reduce((s, t) => s + effect(t), 0);
+    const op = (typeof loadCashOpening === 'function') ? loadCashOpening() : null;
+    const opening = op ? +op.amount : stored - flowAll;
+    const tickers = [...new Set(tx.filter(t => ['buy', 'sell', 'short'].includes(t.type) && t.ticker).map(t => String(t.ticker).toUpperCase()))];
+    await Promise.all(tickers.map(t => fetchDaily(t)));
+    const fx = {}; for (const t of tickers) fx[t] = (typeof _botUsdFactor === 'function') ? _botUsdFactor(t) : 1;
+    const start = tx[0].d, end = new Date().toISOString().slice(0, 10);
+    const ptr = {}, lastC = {}, qty = {};
+    let cash = opening, k = 0;
+    const points = [], flows = [];
+    for (let ts = Date.parse(start + 'T00:00:00Z'); ts <= Date.parse(end + 'T00:00:00Z'); ts += 864e5) {
+      const day = new Date(ts), dow = day.getUTCDay(), ds = day.toISOString().slice(0, 10);
+      let flowToday = 0;
+      while (k < tx.length && tx[k].d <= ds) {
+        const t = tx[k++], T = String(t.ticker || '').toUpperCase();
+        cash += effect(t);
+        if (t.type === 'buy') qty[T] = (qty[T] || 0) + (+t.qty || 0);
+        else if (t.type === 'sell') qty[T] = (qty[T] || 0) - (+t.qty || 0);
+        else if (t.type === 'short') qty[T] = (qty[T] || 0) - (+t.qty || 0);
+        else if (t.type === 'deposit' || t.type === 'withdrawal') { flowToday += +t.amount || 0; flows.push({ t: ds, amount: +t.amount || 0 }); }
+      }
+      if (dow === 0 || dow === 6) continue;
+      let mv = 0;
+      for (const T of Object.keys(qty)) {
+        if (!qty[T]) continue;
+        const h = _daily[T] || []; let i = ptr[T] || 0;
+        while (i < h.length && h[i].d <= ds) { lastC[T] = h[i].c; i++; } ptr[T] = i;
+        if (lastC[T] != null) mv += qty[T] * lastC[T] * (fx[T] || 1);
+      }
+      points.push({ t: ds, v: +(cash + mv).toFixed(2), flow: flowToday });
+    }
+    // time-weighted return: chain daily returns with that day's external flow removed
+    let twr = 1;
+    for (let i = 1; i < points.length; i++) { const prev = points[i - 1].v; if (prev > 0) twr *= (points[i].v - points[i].flow) / prev; }
+    return { points, flows, opening, openingSource: op ? 'reconciliation' : 'implied by stored cash', twrPct: (twr - 1) * 100, virtual: tx.filter(t => t._virtual).length };
+  }
+  async function mountAccountChart() {
+    const host = document.getElementById('acct-value-mount'); if (!host) return;
+    host.innerHTML = '<div style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);padding:16px 0">Rebuilding account value from the ledger…</div>';
+    const s = await accountSeries();
+    if (!document.getElementById('acct-value-mount')) return;
+    if (!s || s.points.length < 2) { host.innerHTML = '<div style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);padding:16px 0">No ledger activity yet.</div>'; return; }
+    const draw = () => {
+      const r = { '1M': 31, '3M': 92, '1Y': 366, 'ALL': 'all' }[ACC.range];
+      const pts = windowed(s.points, r);
+      const last = pts[pts.length - 1], first = pts[0];
+      const flowsIn = s.flows.filter(f => f.t >= first.t);
+      const netFlow = flowsIn.reduce((a, f) => a + f.amount, 0);
+      const pnl = last.v - first.v - netFlow;
+      host.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:6px 16px;align-items:baseline;font-family:var(--mono)">
+          <span style="font-size:20px;color:var(--ink)">$${last.v.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+          <span style="font-size:11px;color:${pnl >= 0 ? 'var(--pos)' : 'var(--neg)'}">${pnl >= 0 ? '+' : '−'}$${Math.abs(pnl).toLocaleString(undefined, { maximumFractionDigits: 0 })} market P/L ${ACC.range === 'ALL' ? 'since start' : ACC.range}</span>
+          ${ACC.range === 'ALL' ? `<span style="font-size:11px;color:var(--ink-dim)">time-weighted ${s.twrPct >= 0 ? '+' : ''}${s.twrPct.toFixed(2)}%</span>` : ''}
+          <span style="margin-left:auto" class="seg-control">${['1M', '3M', '1Y', 'ALL'].map(k => `<button class="seg-btn ${ACC.range === k ? 'active' : ''}" data-acr="${k}" style="font-size:10px">${k}</button>`).join('')}</span></div>
+        <div class="acct-chart" style="margin-top:6px"></div>
+        <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:4px;line-height:1.5">
+          Cash + holdings at each day's close, rebuilt from the transaction ledger · ▲ deposit ▼ withdrawal (${flowsIn.length} in range, net ${netFlow >= 0 ? '+' : '−'}$${Math.abs(netFlow).toLocaleString(undefined, { maximumFractionDigits: 0 })}) — flows are excluded from P/L and return ·
+          opening capital $${Math.round(s.opening).toLocaleString()} (${esc(s.openingSource)})${s.virtual ? ` · ${s.virtual} position(s) older than the ledger enter at their added date and cost` : ''}</div>`;
+      drawStockChart(host.querySelector('.acct-chart'), pts, { height: 170, label: 'Account value',
+        markers: flowsIn.map(f => ({ t: f.t, kind: f.amount >= 0 ? 'in' : 'out', label: `${f.t}: ${f.amount >= 0 ? 'deposit' : 'withdrawal'} $${Math.abs(f.amount).toLocaleString()}` })) });
+      host.querySelectorAll('[data-acr]').forEach(b => b.onclick = () => { ACC.range = b.dataset.acr; draw(); });
+    };
+    draw();
+  }
+
+  window.VChart = { fetchDaily, fetchTapeDay, drawStockChart, windowed, resample, indexDaily, indexIntraday, mountGoodGlobeChart, mountSparks, accountSeries, mountAccountChart, _gg: GG };
 })();
