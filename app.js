@@ -26921,7 +26921,14 @@ function _renderPortfolioChartImpl(enriched, range) {
         let loadedAny = false;
         for (const t of missingHist) {
           try {
-            const h = await getPriceHistory(t).catch(() => null);
+            let h = await getPriceHistory(t).catch(() => null);
+            // z98: fall back to the books' own daily history files (same source as
+            // the Account Value chart) - "Not enough data points" came from holdings
+            // whose live-API history fetch failed.
+            if ((!h || h.length < 2) && window.VChart && window.VChart.fetchDaily) {
+              const d = await window.VChart.fetchDaily(t).catch(() => null);
+              if (d && d.length >= 2) h = d.map(b => ({ date: b.d, close: b.c, price: b.c }));
+            }
             if (h && h.length >= 2) {
               const cache = loadPriceHistCache();
               cache[t] = { t: Date.now(), data: h };
@@ -27018,7 +27025,14 @@ function _renderPortfolioChartImpl(enriched, range) {
         let loadedAny = false;
         for (const t of need) {
           try {
-            const h = await getPriceHistory(t).catch(() => null);
+            let h = await getPriceHistory(t).catch(() => null);
+            // z98: fall back to the books' own daily history files (same source as
+            // the Account Value chart) - "Not enough data points" came from holdings
+            // whose live-API history fetch failed.
+            if ((!h || h.length < 2) && window.VChart && window.VChart.fetchDaily) {
+              const d = await window.VChart.fetchDaily(t).catch(() => null);
+              if (d && d.length >= 2) h = d.map(b => ({ date: b.d, close: b.c, price: b.c }));
+            }
             if (h && h.length >= 2) {
               // Persist into the price-hist cache so getHist() (sync) finds it next render
               const cache = loadPriceHistCache();
@@ -43961,7 +43975,16 @@ function _mergeBotTrainingData(data, sourceLabel) {
     }
   }
   if (data.learnedWeights && typeof saveBotWeights === 'function') saveBotWeights(data.learnedWeights);
-  if (typeof data.bankroll === 'number') bot.bankroll = data.bankroll;
+  // z98: the repo's bankroll belongs to the RUNNER's own ledger. Overwriting the
+  // local bankroll with it while MERGING trade lists (local + repo) is how the
+  // bankroll drifted away from the trades it should sum. Keep the runner value
+  // for reference; take it only when the local state has no bets of its own.
+  if (typeof data.bankroll === 'number') bot.runnerBankroll = data.bankroll;
+  // The bankroll IS "start + capital added + realized P/L" - so derive it from
+  // the merged trade ledger instead of copying a number that belongs to a
+  // different trade set. (Trims were the bulk of the old gap: their realized
+  // P/L wasn't in bet.pnl.)
+  bot.bankroll = botLedgerBankroll(bot);
   saveBotState(bot);
   console.log(`[bot] imported ${added} new trades from ${sourceLabel || 'source'} (now ${bot.bets.length} total)`);
   if (typeof flashStatus === 'function') flashStatus(`Imported ${added} new trade${added !== 1 ? 's' : ''} from ${sourceLabel || 'file'} (appended — ${bot.bets.length} total)`, 'success');
@@ -48856,6 +48879,16 @@ function _botUsdFactor(tic) {
   } catch {}
   return 1;
 }
+// start + capital injections + closed P/L + partial-sell (trim) realizations.
+function botLedgerBankroll(bot) {
+  const bets = (bot && bot.bets) || [];
+  const closed = bets.filter(b => b.status === 'closed').reduce((s, b) => s + (+b.pnl || 0), 0);
+  const trims = bets.reduce((s, b) => s + (b.partialSells || []).reduce((s2, ps) => s2 + (+ps.realized || 0), 0), 0);
+  const capital = ((bot && bot.transactions) || []).filter(t => t.type === 'deposit' || t.type === 'withdrawal').reduce((s, t) => s + (+t.amount || 0), 0);
+  return +(BOT_STARTING_BANKROLL + capital + closed + trims).toFixed(2);
+}
+if (typeof window !== 'undefined') window.botLedgerBankroll = botLedgerBankroll;
+
 function botReconstructEquityCurve(bot) {
   try {
     const bets = (bot && Array.isArray(bot.bets)) ? bot.bets : [];
@@ -48881,8 +48914,14 @@ function botReconstructEquityCurve(bot) {
       if (dow === 0 || dow === 6) continue;                          // markets closed
       const ds = cur.toISOString().slice(0, 10);
       let realized = 0, openMark = 0;
+      // z98: capital the user added/withdrew (bot.transactions deposit/withdrawal)
+      for (const t of (bot.transactions || [])) if ((t.type === 'deposit' || t.type === 'withdrawal') && String(t.ts || '').slice(0, 10) <= ds) realized += (+t.amount || 0);
       for (const b of bets) {
         if (!b.entryDate || b.entryDate > ds) continue;
+        // z98: partial sells (trims) realize P/L into the bankroll and shrink
+        // bet.pnl to the remaining fraction - count them on their own dates, or
+        // the ledger undercounts every trimmed position.
+        for (const ps of (b.partialSells || [])) if (ps && ps.date && ps.date <= ds) realized += (+ps.realized || 0);
         const closed = b.status === 'closed' && b.exitDate && b.exitDate <= ds;
         if (closed) { realized += (+b.pnl || 0); continue; }
         if (!(b.status === 'open' || (b.exitDate && b.exitDate > ds))) continue;
@@ -49137,9 +49176,12 @@ function _botDailySeries() {
   // that has drifted from the trade journal; the gap is shown under the chart.
   try {
     if (_reconDates) {
-      const realized = (bot.bets || []).filter(b => b.status === 'closed').reduce((s2, b) => s2 + (+b.pnl || 0), 0);
-      const ledgerLive = +(BOT_STARTING_BANKROLL + realized + openUnreal).toFixed(2);
-      window._botLedgerGap = { bankrollBook: liveVal, ledger: ledgerLive, gap: +(liveVal - ledgerLive).toFixed(2) };
+      const closedPnl = (bot.bets || []).filter(b => b.status === 'closed').reduce((s2, b) => s2 + (+b.pnl || 0), 0);
+      const partials = (bot.bets || []).reduce((s2, b) => s2 + (b.partialSells || []).reduce((s3, ps) => s3 + (+ps.realized || 0), 0), 0);
+      const capital = (bot.transactions || []).filter(t => t.type === 'deposit' || t.type === 'withdrawal').reduce((s2, t) => s2 + (+t.amount || 0), 0);
+      const ledgerLive = +(BOT_STARTING_BANKROLL + capital + closedPnl + partials + openUnreal).toFixed(2);
+      window._botLedgerGap = { bankrollBook: liveVal, ledger: ledgerLive, gap: +(liveVal - ledgerLive).toFixed(2),
+                               parts: { start: BOT_STARTING_BANKROLL, capital: +capital.toFixed(2), closedPnl: +closedPnl.toFixed(2), partials: +partials.toFixed(2), openUnreal: +openUnreal.toFixed(2) } };
       liveVal = ledgerLive;
     } else { window._botLedgerGap = null; }
   } catch {}
@@ -49753,7 +49795,8 @@ function renderBetsTab() {
       </div>
       ${(() => { const g = (typeof window !== 'undefined') ? window._botLedgerGap : null;
         if (!g || Math.abs(g.gap) < 1) return '';
-        return `<div style="font-family:var(--mono);font-size:9.5px;color:var(--ink-faint);margin:4px 0 6px;line-height:1.5">LEDGER CHECK · bankroll-based value ${fmt$(g.bankrollBook)} vs trade ledger ${fmt$(g.ledger)} — <span style="color:var(--red)">${g.gap >= 0 ? '+' : '−'}${fmt$(Math.abs(g.gap))} not explained by recorded trades</span>. The chart follows the ledger (real closes).</div>`; })()}
+        const pp = g.parts || {};
+        return `<div style="font-family:var(--mono);font-size:9.5px;color:var(--ink-faint);margin:4px 0 6px;line-height:1.5">LEDGER CHECK · bankroll-based value ${fmt$(g.bankrollBook)} vs trade ledger ${fmt$(g.ledger)} — <span style="color:var(--red)">${g.gap >= 0 ? '+' : '−'}${fmt$(Math.abs(g.gap))} not explained by recorded trades</span>. Ledger = start ${fmt$(pp.start || 0)} + capital ${fmt$(pp.capital || 0)} + closed P/L ${fmt$(pp.closedPnl || 0)} + trims ${fmt$(pp.partials || 0)} + open ${fmt$(pp.openUnreal || 0)}. The chart follows the ledger (real closes).</div>`; })()}
       <div class="bot-eq-plot"><canvas id="bot-eq-canvas"
         data-baseval="$${_lastV.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}"
         data-basecol="${_upWin ? '#00c805' : '#ff5000'}"
