@@ -3789,8 +3789,13 @@ document.addEventListener('DOMContentLoaded', () => {
   // backend-pulled news corpus (live API calls become the supplement).
   if (typeof loadBackendResearch === 'function') loadBackendResearch().catch(() => {});
   if (typeof loadRepoNews === 'function') setTimeout(() => loadRepoNews().catch(() => {}), 4000);
-  // Auto-run the bot's daily scan once per day on startup (after stockbook loads)
+  // Auto-run the bot's daily scan once per day on startup (after stockbook loads).
+  // z100: OFF by default - the scheduled runner (TRAPP2-BOT) is the bot that runs
+  // every day; the app keeps the manual "Run" button, and everything it does is
+  // sent to the runner. Set localStorage 'valuatio.bot.appAutoRun' = '1' to
+  // bring the in-browser daily auto-run back.
   setTimeout(() => {
+    if (localStorage.getItem('valuatio.bot.appAutoRun') !== '1') return;
     if (typeof botDailyRun === 'function' && typeof state !== 'undefined' && state.stockbook?.rows?.length) {
       botDailyRun(false).then(() => {
         if (typeof renderTodaysBetsBanner === 'function') renderTodaysBetsBanner();
@@ -43925,8 +43930,27 @@ function _mergeBotTrainingData(data, sourceLabel) {
   const idOf = (t) => t.id || `${t.ticker}|${t.entryDate}|${t.exitDate || 'open'}|${t.entryPrice ?? ''}|${t.pnl ?? ''}`;
   const localById = new Map((bot.bets || []).map(b => [idOf(b), b]));
   let added = 0;
+  let updated = 0;
   for (const t of (data.trades || [])) {
     const key = idOf(t);
+    // z100: a trade we already have - take the RUNNER's version when it has
+    // moved on (closed there, or trimmed there). That's how a close or trim the
+    // runner made (or applied for the app) reaches this browser.
+    if (localById.has(key)) {
+      const loc = localById.get(key);
+      if (loc && typeof loc === 'object') {
+        const runnerClosed = t.status === 'closed' && loc.status !== 'closed';
+        const runnerTrimmed = (t.trims || []).length > (loc.trims || []).length;
+        if (runnerClosed || runnerTrimmed) {
+          for (const k of ['status', 'exitDate', 'exitPrice', 'exitReason', 'pnl', 'realizedPL', 'won', 'returnPct',
+                           'trims', 'realizedTrim', 'shares', 'notional', 'sharesAtExit']) if (t[k] !== undefined) loc[k] = t[k];
+          loc._runnerSynced = new Date().toISOString();
+          updated++;
+        }
+        if (t.origin && !loc.origin) loc.origin = t.origin;
+      }
+      continue;
+    }
     if (!localById.has(key)) {
       // Reconstruct position size. Prefer the exported size; if an older file
       // lacks it, derive shares from notional/entryPrice (and notional from
@@ -43986,7 +44010,7 @@ function _mergeBotTrainingData(data, sourceLabel) {
   // P/L wasn't in bet.pnl.)
   bot.bankroll = botLedgerBankroll(bot);
   saveBotState(bot);
-  console.log(`[bot] imported ${added} new trades from ${sourceLabel || 'source'} (now ${bot.bets.length} total)`);
+  console.log(`[bot] imported ${added} new trades from ${sourceLabel || 'source'}${updated ? `, updated ${updated} from the runner` : ''} (now ${bot.bets.length} total)`);
   if (typeof flashStatus === 'function') flashStatus(`Imported ${added} new trade${added !== 1 ? 's' : ''} from ${sourceLabel || 'file'} (appended — ${bot.bets.length} total)`, 'success');
   // If Supabase is configured, push the newly-imported trades up too — the sync
   // already dedups against what's in the DB, so this only inserts trades that
@@ -47070,7 +47094,19 @@ async function botScoreTicker(ticker) {
 }
 
 // ---- Daily run: score the universe, pick the best 3-4, place permanent bets ----
+function _botAppManages() {
+  try { return localStorage.getItem('valuatio.bot.appAutoRun') === '1' || (typeof window !== 'undefined' && window.__botManualRun === true); }
+  catch { return false; }
+}
 async function botDailyRun(force = false) {
+  // a forced run is the manual Run button: the app may open / close / trim
+  if (force && typeof window !== 'undefined') {
+    window.__botManualRun = true;
+    try { return await _botDailyRunBody(force); } finally { window.__botManualRun = false; }
+  }
+  return _botDailyRunBody(force);
+}
+async function _botDailyRunBody(force = false) {
   console.log('[bot] ▶ scan starting (force=' + force + ')');
   const bot = loadBotState();
   const today = new Date().toISOString().slice(0, 10);
@@ -47492,6 +47528,7 @@ async function _botDailyRunInner(bot, today, rows, force = false) {
       : +(markEntry * (1 - effDist * 2)).toFixed(2);
 
     bot.bets.push({
+      origin: 'app',                 // z100: opened by the app (sent to the runner)
       id: `${p.ticker}-${today}-${Date.now()}-${i}`,
       ticker: p.ticker,
       name: p.name,
@@ -47839,7 +47876,7 @@ function botPartialSell(bet, fraction, today, reason) {
   bet.pnl = +((bet.pnl || 0) * keep).toFixed(2);
   bet.allocationPct = +((bet.allocationPct || 0) * keep).toFixed(2);
   bet.partialSells = bet.partialSells || [];
-  bet.partialSells.push({ date: today, fraction: +fraction.toFixed(3), realized, reason: reason || 'trim' });
+  bet.partialSells.push({ date: today, fraction: +fraction.toFixed(3), realized, reason: reason || 'trim', origin: 'app' });
   if (keep <= 0.001) { bet.status = 'closed'; bet.exitDate = today; bet.exitReason = reason || 'trimmed-out'; }
   return realized;
 }
@@ -48068,8 +48105,13 @@ function botMarkToMarket() {
       if (!exitReason && bet.instrument === 'option' && bet.optionExpiry && today >= bet.optionExpiry) {
         exitReason = 'option-expiry';
       }
+      // z100: the scheduled runner manages exits. The app closes positions only
+      // during a run YOU start (Run button) or if in-app auto-run is turned on;
+      // otherwise it just marks to market and leaves the exit to the runner.
+      if (exitReason && !_botAppManages()) { bet._exitSignal = { reason: exitReason, date: today, price: px }; exitReason = null; }
       if (exitReason) {
         bet.status = 'closed';
+        bet.closedBy = 'app';          // z100: closed by the app (sent to the runner)
         bet.exitDate = today;
         bet.exitPrice = px;
         bet.exitReason = exitReason;
@@ -48879,11 +48921,25 @@ function _botUsdFactor(tic) {
   } catch {}
   return 1;
 }
+// ---- one ledger for app + runner (z100) ----
+// Trims: the runner records trims[] (realizedTrim folded into pnl at close);
+// the app's older trims are partialSells[] (kept out of pnl). Prefer the
+// runner's record when both exist (the runner applied the app's trim).
+function _betTrimEvents(b) {
+  const tr = Array.isArray(b.trims) && b.trims.length ? b.trims : (b.partialSells || []);
+  return tr.filter(x => x && x.date).map(x => ({ date: String(x.date).slice(0, 10), realized: +x.realized || 0 }));
+}
+// Realized at the exit itself (trims excluded - they're counted on their dates).
+function _betExitRealized(b) {
+  const pnl = +b.pnl || 0;
+  return (b.realizedTrim != null && Array.isArray(b.trims) && b.trims.length) ? pnl - (+b.realizedTrim || 0) : pnl;
+}
+if (typeof window !== 'undefined') { window._betTrimEvents = _betTrimEvents; window._betExitRealized = _betExitRealized; }
 // start + capital injections + closed P/L + partial-sell (trim) realizations.
 function botLedgerBankroll(bot) {
   const bets = (bot && bot.bets) || [];
-  const closed = bets.filter(b => b.status === 'closed').reduce((s, b) => s + (+b.pnl || 0), 0);
-  const trims = bets.reduce((s, b) => s + (b.partialSells || []).reduce((s2, ps) => s2 + (+ps.realized || 0), 0), 0);
+  const closed = bets.filter(b => b.status === 'closed').reduce((s, b) => s + _betExitRealized(b), 0);
+  const trims = bets.reduce((s, b) => s + _betTrimEvents(b).reduce((s2, ps) => s2 + ps.realized, 0), 0);
   const capital = ((bot && bot.transactions) || []).filter(t => t.type === 'deposit' || t.type === 'withdrawal').reduce((s, t) => s + (+t.amount || 0), 0);
   return +(BOT_STARTING_BANKROLL + capital + closed + trims).toFixed(2);
 }
@@ -48921,9 +48977,9 @@ function botReconstructEquityCurve(bot) {
         // z98: partial sells (trims) realize P/L into the bankroll and shrink
         // bet.pnl to the remaining fraction - count them on their own dates, or
         // the ledger undercounts every trimmed position.
-        for (const ps of (b.partialSells || [])) if (ps && ps.date && ps.date <= ds) realized += (+ps.realized || 0);
+        for (const ps of _betTrimEvents(b)) if (ps.date <= ds) realized += ps.realized;
         const closed = b.status === 'closed' && b.exitDate && b.exitDate <= ds;
-        if (closed) { realized += (+b.pnl || 0); continue; }
+        if (closed) { realized += _betExitRealized(b); continue; }
         if (!(b.status === 'open' || (b.exitDate && b.exitDate > ds))) continue;
         const tic = String(b.ticker || '').toUpperCase();
         const c = closeOn(tic, ds);
@@ -49176,8 +49232,8 @@ function _botDailySeries() {
   // that has drifted from the trade journal; the gap is shown under the chart.
   try {
     if (_reconDates) {
-      const closedPnl = (bot.bets || []).filter(b => b.status === 'closed').reduce((s2, b) => s2 + (+b.pnl || 0), 0);
-      const partials = (bot.bets || []).reduce((s2, b) => s2 + (b.partialSells || []).reduce((s3, ps) => s3 + (+ps.realized || 0), 0), 0);
+      const closedPnl = (bot.bets || []).filter(b => b.status === 'closed').reduce((s2, b) => s2 + _betExitRealized(b), 0);
+      const partials = (bot.bets || []).reduce((s2, b) => s2 + _betTrimEvents(b).reduce((s3, ps) => s3 + ps.realized, 0), 0);
       const capital = (bot.transactions || []).filter(t => t.type === 'deposit' || t.type === 'withdrawal').reduce((s2, t) => s2 + (+t.amount || 0), 0);
       const ledgerLive = +(BOT_STARTING_BANKROLL + capital + closedPnl + partials + openUnreal).toFixed(2);
       window._botLedgerGap = { bankrollBook: liveVal, ledger: ledgerLive, gap: +(liveVal - ledgerLive).toFixed(2),
