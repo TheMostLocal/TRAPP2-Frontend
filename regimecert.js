@@ -51,10 +51,32 @@
       ${bar('Quad agreement', c.quadAgreement?.score, '0.25', `nowcast Q${c.quadAgreement?.nowcast} vs official Q${c.quadAgreement?.official}`)}
       ${bar('Cross-check', c.crossCheck?.score, '0.20', `market family ${c.crossCheck?.family} vs quad growth axis`)}
       <ul style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);margin:8px 0 0 16px;padding:0;line-height:1.6">${(rc.why || []).map(w => `<li>${esc(w)}</li>`).join('')}</ul>
+      ${quadTrackHtml(rc)}
+      ${botSplitHtml()}
       <div style="font-family:var(--mono);font-size:9.5px;color:var(--ink-faint);margin-top:6px">Track record: ${tr.n ? `${tr.accuracyPct}% of ${tr.n} past calls were right ${tr.horizonSessions} sessions later vs ${tr.baseRateUpPct}% for "SPY just rises"${tr.capped ? ' — not beating the naive rate, certainty capped' : ''}` : 'no judged calls yet'}. Trades record the regime they were entered under; a win never credits a regime call that was untrusted or later proved wrong.</div>
     </section>`;
   }
 
+  // z101: the quad nowcast's own track record (judged against official GDP/CPI)
+  function quadTrackHtml(rc) {
+    const q = rc.quadTrack; if (!q) return '';
+    return `<div style="font-family:var(--mono);font-size:9.5px;color:var(--ink-faint);margin-top:6px">Quad nowcast: ${q.n
+      ? `right ${q.exactPct}% of ${q.n} judged month(s) (growth axis ${q.growthAxisPct}%, inflation axis ${q.inflationAxisPct}%)${q.capped ? ' — below 50%, certainty capped' : q.n < q.minN ? ` — needs ${q.minN} before it counts` : ''}`
+      : `${q.logged} daily call(s) logged; each is judged once official GDP/CPI cover its month`}.</div>`;
+  }
+  // z101: did the bot do better when the regime was trusted? (closed trades)
+  function botSplitHtml() {
+    let bets = [];
+    try { bets = ((typeof loadBotState === 'function' ? loadBotState() : {}).bets || []).filter(b => b.status === 'closed'); } catch (e) {}
+    const st = rows => { if (!rows.length) return null; const w = rows.filter(b => (+b.pnl || 0) > 0).length, tot = rows.reduce((s, b) => s + (+b.pnl || 0), 0);
+      return `${rows.length} · win ${Math.round(w / rows.length * 100)}% · avg ${tot / rows.length >= 0 ? '+' : '−'}$${Math.abs(tot / rows.length).toFixed(0)}`; };
+    const aw = st(bets.filter(b => b.regimeContext && b.regimeContext.dialedIn === true));
+    const ag = st(bets.filter(b => b.regimeContext && b.regimeContext.dialedIn === false));
+    const right = st(bets.filter(b => b.regimeCallCorrect === true)), wrong = st(bets.filter(b => b.regimeCallCorrect === false));
+    if (!aw && !ag && !right && !wrong) return `<div style="font-family:var(--mono);font-size:9.5px;color:var(--ink-faint);margin-top:6px">Bot results by regime trust: no closed trades with a recorded regime context yet (recorded from z93 on).</div>`;
+    return `<div style="font-family:var(--mono);font-size:9.5px;color:var(--ink-dim);margin-top:6px;line-height:1.6">Bot results (closed): regime-aware ${aw || '—'} · regime-agnostic ${ag || '—'}<br>
+      entry-day regime call right ${right || '—'} · wrong ${wrong || '—'}</div>`;
+  }
   async function renderRegimeCard() {
     const panel = document.querySelector('.tab-panel[data-panel="regime"]');
     if (!panel) return;
