@@ -26804,7 +26804,10 @@ function renderStockBookPortfolio(content) {
   const awPanelHtml = (['all', 'trading'].includes(state.portfolioSubTab || 'all') && typeof renderAllWeatherPanel === 'function')
     ? renderAllWeatherPanel() : '';
 
-  content.innerHTML = summary + chartHtml + subTabs + awPanelHtml + toolbar + `
+  // z97: account value (cash + positions) from the ledger + real closes (charts.js)
+  const acctHtml = (['all', 'trading'].includes(state.portfolioSubTab || 'all') && typeof window !== 'undefined' && window.VChart && window.VChart.mountAccountChart)
+    ? `<section class="portfolio-chart-section"><div class="portfolio-chart-head"><div class="portfolio-chart-title">Account Value · cash + positions</div></div><div id="acct-value-mount"></div></section>` : '';
+  content.innerHTML = summary + acctHtml + chartHtml + subTabs + awPanelHtml + toolbar + `
     <div class="sb-table-wrap">
       <table class="sb-table portfolio-table">
         <thead>
@@ -26839,6 +26842,7 @@ function renderStockBookPortfolio(content) {
   });
 
   // Wire range buttons + render the chart
+  if (acctHtml) { try { window.VChart.mountAccountChart(); } catch (e) { console.warn('[acct-chart]', e); } }
   if (chartHtml) {
     document.querySelectorAll('.portfolio-range-btn').forEach(btn => {
       btn.addEventListener('click', () => {
