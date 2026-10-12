@@ -194,8 +194,7 @@
     const xs = [0.80, 0.85, 0.90, 0.95, 1.00, 1.05, 1.10, 1.15, 1.20];
     const rows = [];
     for (const e of [...data.expiries].sort((a, b) => (a.dte || 0) - (b.dte || 0)).slice(0, 12)) {
-      const pts = [...(e.puts || []).filter(o => o.strike < S), ...(e.calls || []).filter(o => o.strike >= S)]
-        .filter(o => +o.iv > 0.01 && +o.iv < 5).map(o => [o.strike / S, o.iv * 100]).sort((a, b) => a[0] - b[0]);
+      const pts = smilePoints(e, S).map(([m, v]) => [m, v * 100]);
       if (pts.length < 3) continue;
       const row = xs.map(m => {
         if (m < pts[0][0] || m > pts[pts.length - 1][0]) return null;           // no extrapolation
@@ -208,7 +207,7 @@
       if (row.filter(v => v != null).length >= 3) rows.push({ y: e.expiry, row });
     }
     if (rows.length < 2) return { error: `${ticker}'s chain is too thin for a surface (need 2+ expiries with 3+ priced strikes).` };
-    return { title: `${ticker} implied-volatility surface`, sub: `spot $${S.toFixed(2)} · ${rows.length} expiries · OTM puts below spot, calls above · as of ${esc(String(data.asOf || '').slice(0, 16))}`,
+    return { title: `${ticker} implied-volatility surface`, sub: `spot $${S.toFixed(2)} · ${rows.length} expiries · OTM puts below spot, calls above, put/call average within ±2.5% · as of ${esc(String(data.asOf || '').slice(0, 16))}`,
       xs, ys: rows.map(r => r.y), z: rows.map(r => r.row), xScale: 'value',
       xLabel: 'Moneyness', yLabel: 'Term', zLabel: 'IV %', zStep: 5,
       xTick: v => `${Math.round(v * 100)}%`, yTick: v => new Date(v + 'T12:00:00Z').toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: '2-digit' }),
@@ -224,13 +223,26 @@
     for (let k = 1; k < pts.length; k++) if (m <= pts[k][0]) { const [m0, v0] = pts[k - 1], [m1, v1] = pts[k]; return v0 + (v1 - v0) * (m1 === m0 ? 0 : (m - m0) / (m1 - m0)); }
     return null;
   }
+  // OTM puts below spot, OTM calls above, put/call average within ±2.5% of spot
+  // (removes the step where the smile switches sides) - same rule as the pipeline.
+  function smilePoints(e, S) {
+    const ok = o => +o.iv > 0.01 && +o.iv < 5;
+    const P = new Map((e.puts || []).filter(ok).map(o => [o.strike, +o.iv])), C = new Map((e.calls || []).filter(ok).map(o => [o.strike, +o.iv]));
+    const out = [];
+    for (const K of [...new Set([...P.keys(), ...C.keys()])].sort((a, b) => a - b)) {
+      const m = K / S;
+      if (Math.abs(m - 1) <= 0.025 && P.has(K) && C.has(K)) out.push([m, (P.get(K) + C.get(K)) / 2]);
+      else if (K < S && P.has(K)) out.push([m, P.get(K)]);
+      else if (K >= S && C.has(K)) out.push([m, C.get(K)]);
+    }
+    return out;
+  }
   function cmFromChain(d) {
     const S = +d.spot; if (!S) return null;
     const exps = [];
     for (const e of [...(d.expiries || [])].sort((a, b) => (a.dte || 0) - (b.dte || 0))) {
       if (!((e.dte || 0) >= 1)) continue;
-      const pts = [...(e.puts || []).filter(o => o.strike < S), ...(e.calls || []).filter(o => o.strike >= S)]
-        .filter(o => +o.iv > 0.01 && +o.iv < 5).map(o => [o.strike / S, +o.iv]).sort((a, b) => a[0] - b[0]);
+      const pts = smilePoints(e, S);
       if (pts.length >= 3) exps.push([e.dte, pts]);
     }
     if (exps.length < 2) return null;
@@ -398,11 +410,26 @@
       ds = got.make(k);
       if (got.count > 1) scrub = `<div style="display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10px;margin:4px 0 8px">
           <span style="color:var(--ink-faint)">${esc(ds.snaps[0].date)}</span>
+          <button class="btn btn-ghost" id="dt-play" style="padding:2px 8px;font-size:10px" title="Play through the dates">${S.playing ? '❚❚' : '▶'}</button>
           <input type="range" id="dt-scrub" min="0" max="${got.count - 1}" value="${k}" style="flex:1">
           <span style="color:var(--ink-faint)">${esc(ds.snaps[got.count - 1].date)}</span></div>`;
     }
     $('#dt-title').textContent = ds.title; $('#dt-sub').innerHTML = ds.sub;
-    const bindScrub = () => { const r = $('#dt-scrub'); if (r) r.oninput = () => { S.snap = +r.value; render(); }; };
+    const bindScrub = () => {
+      const r = $('#dt-scrub'); if (r) r.oninput = () => { stopPlay(); S.snap = +r.value; render(); };
+      const pb = $('#dt-play'); if (pb) pb.onclick = () => {
+        if (S.playing) { stopPlay(); render(); return; }
+        S.playing = true; if ((S.snap == null ? got.count - 1 : S.snap) >= got.count - 1) S.snap = 0;
+        S.timer = setInterval(() => { if (!document.getElementById('dt-view')) return stopPlay();
+          const nxt = (S.snap == null ? got.count - 1 : S.snap) + 1;
+          if (nxt > got.count - 1) { stopPlay(); render(); return; }
+          S.snap = nxt; render(); }, 700);
+        render();
+      };
+    };
+    // CSV of whatever grid is on screen
+    $('#dt-sub').insertAdjacentHTML('beforeend', ` · <a href="#" id="dt-csv" style="color:var(--ink-faint)">CSV ↓</a>`);
+    $('#dt-csv').onclick = e => { e.preventDefault(); downloadCsv(ds); };
     if (S.view === 'heat') { view.innerHTML = scrub + heatHtml(ds) + legendHtml(ds); bindScrub(); return; }
     if (S.view === 'table') { view.innerHTML = scrub + tableHtml(ds); bindScrub(); return; }
     if (S.view === 'slices') { view.innerHTML = scrub + slicesHtml(ds); bindScrub(); return; }
@@ -417,6 +444,18 @@
     S.camera.picked = null;
     S.surf = Surface3D($('#dt-canvas'), ds, (x, y, v) => { ro.innerHTML = `${esc(ds.xLabel)} <strong>${esc(ds.xTick(x))}</strong> · ${esc(ds.yLabel)} <strong>${esc(ds.yTick(y))}</strong> · ${esc(ds.zLabel)} <strong style="color:var(--ink)">${esc(ds.cell(v))}</strong>`; }, S.camera);
     $('#dt-reset').onclick = () => S.surf.reset();
+  }
+  function stopPlay() { if (S.timer) clearInterval(S.timer); S.timer = null; S.playing = false; }
+  function downloadCsv(ds) {
+    const q = v => /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v);
+    const lines = [[`${ds.yLabel} / ${ds.xLabel}`, ...ds.xs.map(x => ds.xTick(x))].map(q).join(',')];
+    ds.ys.forEach((y, j) => lines.push([ds.yTick(y), ...ds.z[j].map(v => v == null ? '' : v)].map(q).join(',')));
+    const blob = new Blob([lines.join('\n') + '\n'], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = (ds.title || 'data').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_|_$/g, '') + '.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   }
   async function renderCatalog(view) {
     view.innerHTML = `<div style="overflow-x:auto"><table class="sb-table" style="font-size:10.5px;min-width:max-content"><thead><tr><th>Dataset</th><th>Where</th><th>Refresh</th><th>Last update</th><th></th></tr></thead><tbody>
