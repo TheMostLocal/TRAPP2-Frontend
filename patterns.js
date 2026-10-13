@@ -45,13 +45,14 @@
                          double_top: ['P1', 'T', 'P2'], double_bottom: ['B1', 'P', 'B2'],
                          cup_handle: ['Rim', 'Cup', 'Rim', 'Handle'], bull_flag: ['Base', 'Pole', 'Flag'],
                          bear_flag: ['Top', 'Pole', 'Flag'], asc_triangle: ['R1', 'S1', 'R2', 'S2'],
-                         desc_triangle: ['S1', 'R1', 'S2', 'R2'], breakout_52w: ['52W hi', 'Breakout'] };
+                         desc_triangle: ['S1', 'R1', 'S2', 'R2'], breakout_52w: ['52W hi', 'Breakout'],
+                         flat_base: ['Base', 'Low', 'High', 'Pivot'], high_tight_flag: ['Pole low', 'Pole high', 'Flag'] };
   // VCP has 2 or 3 contractions -> label by position (H1 L1 H2 L2 ...)
   const labelsFor = (tpl, pv) => PIVOT_LABELS[tpl] ||
     pv.map((p, k) => (p[2] === 'H' ? 'H' : 'L') + (Math.floor(k / 2) + 1));
   const GROUPS = [['Trend templates', ['minervini']],
                   ['Reversal patterns', ['hs_top', 'hs_bottom', 'double_top', 'double_bottom']],
-                  ['Continuation patterns', ['vcp', 'cup_handle', 'bull_flag', 'bear_flag', 'asc_triangle', 'desc_triangle']],
+                  ['Continuation patterns', ['vcp', 'cup_handle', 'flat_base', 'high_tight_flag', 'bull_flag', 'bear_flag', 'asc_triangle', 'desc_triangle']],
                   ['Breakouts', ['breakout_52w']]];
 
   async function getJSON(url) {
@@ -375,9 +376,15 @@
         `${cur ? ' style="color:var(--amber,#e0b04c)"' : ''}><span>&nbsp; ${cur ? '▸ ' : ''}${r}-trend market · n ${x.judged}</span>` +
         `<span>${x.successRate == null ? '—' : x.successRate + '%'} <span class="${(x.edgeVsBaselinePct || 0) > 0 ? 'ok' : 'no'}">${pct(x.edgeVsBaselinePct)}</span></span></div>`;
     }).join('');
+    // z103: breakout volume split (confirmation bar vs its 50-bar average)
+    const bv = (st && st.byVolume) || {};
+    const volRows = ['confirmed', 'unconfirmed'].filter(k => bv[k]).map(k => { const x = bv[k];
+      return `<div class="pat-row ${x.usable ? '' : 'dim'}"><span>&nbsp; ${k === 'confirmed' ? `volume ≥ ${(st.volConfirmAt || 1.4)}× avg` : 'lighter volume'} · n ${x.judged}</span>` +
+        `<span>${x.successRate == null ? '—' : x.successRate + '%'} <span class="${(x.edgeVsBaselinePct || 0) > 0 ? 'ok' : 'no'}">${pct(x.edgeVsBaselinePct)}</span></span></div>`; }).join('');
     host.innerHTML = `<h4>STATISTICAL RECORD — ${esc(TPLNAME(P.tpl).toUpperCase())}</h4>` +
       statLine(mine, esc(P.ticker)) + statLine(st && st.backtest, 'Universe · backtest') +
       (regimeRows ? `<div class="pat-row dim" style="margin-top:4px"><span>By market regime (SPY trend${now ? ', now ' + esc(now) : ''})</span><span>success · edge</span></div>` + regimeRows : '') +
+      (volRows ? `<div class="pat-row dim" style="margin-top:4px"><span>By breakout volume</span><span>success · edge</span></div>` + volRows : '') +
       statLine(st && st.live, 'Universe · live') +
       `<div class="pat-note">Success rate with 95% Wilson interval. ${P.tpl === 'minervini' ? 'Success = beat SPY over 63 trading days.' : 'Success = target reached after confirmation.'} Live record since ${esc((P.stats && P.stats.liveStart) || '—')}.</div>`;
   }
