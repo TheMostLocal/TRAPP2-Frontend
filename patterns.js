@@ -537,7 +537,8 @@
       const prev = out.find(o => o.key === sg.template);
       const meta = (P.current.templates || {})[sg.template] || {};
       const rulesOf = cur.cand && cur.cand[sg.template] ? cur.cand[sg.template].p.length : null;
-      const row = { key: sg.template, conf, passes: rulesOf, of: rulesOf, ok: true, bars, status: sg.status, fromCall: true };
+      const row = { key: sg.template, conf, passes: rulesOf, of: rulesOf, ok: true, bars, status: sg.status, fromCall: true,
+                    volConfirmed: sg.volConfirmed, volRatio: sg.volRatio };
       if (!prev) { if (conf > 0 && meta.kind !== 'template') out.push(row); }
       else if (conf > prev.conf || (conf === prev.conf && !prev.fromCall)) Object.assign(prev, row);
     }
@@ -578,17 +579,22 @@
     let _rcOk = false;
     try { const rc = window.RegimeCertainty ? await window.RegimeCertainty.load() : null; _rcOk = !!(rc && rc.dialedIn); } catch (e) {}
     const useRg = !!(_rcOk && rg && rg.usable && rg.successRate != null);
-    const st = useRg ? rg : (tpl && tpl.backtest);
+    // z104: a confirmed call with a known breakout volume uses the matching volume record
+    const vkey = top.volConfirmed === true ? 'confirmed' : top.volConfirmed === false ? 'unconfirmed' : null;
+    const vrec = vkey && tpl && tpl.byVolume && tpl.byVolume[vkey];
+    const useVol = !useRg && !!(vrec && vrec.usable && vrec.successRate != null);
+    const st = useRg ? rg : useVol ? vrec : (tpl && tpl.backtest);
+    const volTxt = top.volRatio != null ? `on ${(+top.volRatio).toFixed(1)}× volume` : '';
     const why = (top.fromCall ? `Confidence = a system call (${top.status}) ~${top.bars} bars ago x recency. `
                               : `Confidence = ${top.ok ? 'all' : top.passes + ' of ' + top.of} rules met x recency (last swing ~${top.bars} bars ago). `) +
-                `Historical: ${st && st.successRate != null ? st.successRate + '% reached target (n ' + st.judged + (useRg ? ', ' + now + '-trend markets only' : '') + ')' : 'n/a'}. ` +
+                `Historical: ${st && st.successRate != null ? st.successRate + '% reached target (n ' + st.judged + (useRg ? ', ' + now + '-trend markets only' : useVol ? (vkey === 'confirmed' ? ', volume-confirmed breakouts only' : ', light-volume breakouts only') : '') + ')' : 'n/a'}. ` +
                 (list[1] ? `Runner-up: ${TPLNAME(list[1].key)} ${list[1].conf}%.` : '');
     host.title = why;
     host.innerHTML = `<span class="k">PATTERN READ</span>` +
       `<span class="v">${esc(TPLNAME(top.key))} <span class="${up ? 'up' : 'dn'}">${up ? '▲' : '▼'}</span></span>` +
-      `<span>${esc(top.status)}</span>` +
+      `<span>${esc(top.status)}${volTxt ? ' ' + esc(volTxt) : ''}</span>` +
       `<span>confidence <span class="v">${top.conf}%</span></span>` +
-      (st && st.successRate != null ? `<span class="k">hist. ${st.successRate}% hit target${useRg ? ' in ' + esc(now) + '-trend markets' : ''}</span>` : '') +
+      (st && st.successRate != null ? `<span class="k">hist. ${st.successRate}% hit target${useRg ? ' in ' + esc(now) + '-trend markets' : useVol ? (vkey === 'confirmed' ? ' with volume' : ' on light volume') : ''}</span>` : '') +
       `<a data-k="${esc(top.key)}">details</a>`;
     const a = $('a', host);
     if (a) a.onclick = () => openInTA(top.key);
