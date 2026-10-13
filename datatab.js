@@ -54,7 +54,8 @@
     // "nice" tick step so the value axis carries at most ~6 labels
     const zStep = [0.1, 0.2, 0.25, 0.5, 1, 2, 2.5, 5, 10, 20, 25, 50, 100].find(st => (zmax - zmin) / st <= 6) || ds.zStep;
     ds = Object.assign({}, ds, { zStep, zFmt: (zStep % 1) ? (v => v.toFixed(zStep < 0.5 ? 2 : 1)) : ds.zFmt });
-    const zlo = Math.floor(zmin / zStep) * zStep, zhi = Math.ceil(zmax / zStep) * zStep || zlo + zStep;
+    // bars start at ZERO (an honest bar height); surfaces start at the data floor
+    const zlo = ds.bars ? 0 : Math.floor(zmin / zStep) * zStep, zhi = Math.ceil(zmax / zStep) * zStep || zlo + zStep;
     // world coordinates: x,y in [-1,1], z in [0, H]
     const H = 1.05;
     const X = i => -1 + 2 * (ds.xScale === 'value' ? (ds.xs[i] - ds.xs[0]) / (ds.xs[nx - 1] - ds.xs[0] || 1) : i / Math.max(1, nx - 1));
@@ -114,9 +115,34 @@
       const zt = [];
       for (let v = zlo; v <= zhi + 1e-9; v += ds.zStep) zt.push(v);
       for (const v of zt) { line(proj(xWall, -1, Z(v)), proj(xWall, 1, Z(v)), rule); line(proj(-1, yWall, Z(v)), proj(1, yWall, Z(v)), rule); }
+      // CATEGORICAL data (ds.bars): one prism per cell - a surface would imply
+      // values BETWEEN categories that don't exist. Boxes painted far-to-near,
+      // each box's faces far-to-near, top last.
+      if (ds.bars) {
+        const hx = 0.36 * 2 / Math.max(1, nx - 1), hy = Math.min(0.36 * 2 / Math.max(1, ny - 1), 0.32);
+        const boxes = [];
+        for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+          const v = ds.z[j][i]; if (v == null) continue;
+          const x = X(i), y = Y(j), h = Z(v), t = (v - zmin) / (zmax - zmin || 1);
+          boxes.push({ x, y, h, t, d: proj(x, y, h / 2).d });
+        }
+        boxes.sort((a, b) => b.d - a.d);
+        for (const bx of boxes) {
+          const c = colorAt(bx.t), sh = f => rgb(c.map(k => Math.round(k * f)), 0.95);
+          const P = (sx, sy, z) => proj(bx.x + sx * hx, bx.y + sy * hy, z);
+          const faces = [
+            { pts: [P(-1, -1, 0), P(1, -1, 0), P(1, -1, bx.h), P(-1, -1, bx.h)], f: 0.78 },
+            { pts: [P(-1, 1, 0), P(1, 1, 0), P(1, 1, bx.h), P(-1, 1, bx.h)], f: 0.78 },
+            { pts: [P(-1, -1, 0), P(-1, 1, 0), P(-1, 1, bx.h), P(-1, -1, bx.h)], f: 0.62 },
+            { pts: [P(1, -1, 0), P(1, 1, 0), P(1, 1, bx.h), P(1, -1, bx.h)], f: 0.62 },
+          ].map(fc => ({ ...fc, d: fc.pts.reduce((s2, q) => s2 + q.d, 0) / 4 })).sort((a, b) => b.d - a.d);
+          for (const fc of faces) poly(fc.pts, sh(fc.f), 'rgba(0,0,0,0.35)');
+          poly([P(-1, -1, bx.h), P(1, -1, bx.h), P(1, 1, bx.h), P(-1, 1, bx.h)], rgb(c, 0.97), 'rgba(0,0,0,0.35)');
+        }
+      }
       // mesh quads, far to near
       const quads = [];
-      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+      if (!ds.bars) for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
         const c = [[i, j], [i + 1, j], [i + 1, j + 1], [i, j + 1]];
         if (c.some(([a, b]) => ds.z[b][a] == null)) continue;
         const pts = c.map(([a, b]) => proj(X(a), Y(b), Z(ds.z[b][a])));
@@ -300,6 +326,29 @@
       zFmt: v => v.toFixed(1), cell: v => v == null ? '—' : v.toFixed(2) + '%' };
   }
 
+  // ---- Pattern success surface (z104): template × market trend / breakout volume ----
+  async function patternSurface(split) {
+    let st;
+    try { st = await getJSON(`${RAW()}/TRAPP2-ANALYTICS/main/data/patterns/stats.json`); } catch (e) { return { error: 'No pattern statistics yet (TRAPP2-ANALYTICS data/patterns/stats.json).' }; }
+    const T = st.templates || {};
+    const keys = Object.keys(T).filter(k => k !== 'minervini');
+    const rows = split === 'volume' ? [['confirmed', 'Volume ≥ ' + ((T[keys[0]] || {}).volConfirmAt || 1.4) + '×'], ['unconfirmed', 'Lighter volume']]
+                                    : [['up', 'Up-trend'], ['mixed', 'Mixed'], ['down', 'Down-trend']];
+    const cell = (k, r) => {
+      const t = T[k] || {};
+      const x = split === 'volume' ? (t.byVolume || {})[r] : ((t.byRegime || {}).trend || {})[r];
+      return x && x.judged >= 30 && x.successRate != null ? +x.successRate : null;     // too-thin cells stay empty
+    };
+    const z = rows.map(([r]) => keys.map(k => cell(k, r)));
+    const short = { hs_top: 'H&S top', hs_bottom: 'Inv H&S', double_top: 'Dbl top', double_bottom: 'Dbl bottom', vcp: 'VCP', cup_handle: 'Cup&H',
+                    bull_flag: 'Bull flag', bear_flag: 'Bear flag', asc_triangle: 'Asc tri', desc_triangle: 'Desc tri', breakout_52w: '52w BO',
+                    flat_base: 'Flat base', high_tight_flag: 'HTF' };
+    return { title: `Pattern success rate by ${split === 'volume' ? 'breakout volume' : 'market trend (SPY)'}`,
+      sub: `${esc(st.engine || '')} backtest · % of judged calls that reached target · cells with < 30 judged calls left empty · as of ${esc(String(st.asOf || '').slice(0, 10))}`,
+      bars: true, xs: keys, ys: rows.map(r => r[0]), z, xScale: 'index', xLabel: 'Template', yLabel: split === 'volume' ? 'Volume' : 'Trend', zLabel: 'Success %', zStep: 10,
+      xTick: k => short[k] || k, yTick: r => (rows.find(x => x[0] === r) || [r, r])[1], zFmt: v => v.toFixed(0), cell: v => v == null ? '—' : v.toFixed(1) + '%' };
+  }
+
   const CATALOG = [
     ['Stock Book (4 books)', 'TRAPP2 · -1 · -2 · -3 / data/master.json', 'intraday (15 min) + nightly', 'TRAPP2/main/data/master.json'],
     ['Daily price history (20y)', '<book>/data/history/<T>.json', 'nightly', 'TRAPP2/main/data/history/SPY.json'],
@@ -370,7 +419,7 @@
       <tbody>${ds.ys.map((y, j) => `<tr><td>${esc(y)}</td>${ds.z[j].map(v => `<td>${esc(ds.cell(v))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
   }
 
-  const S = { dataset: 'iv', view: '3d', ticker: null, months: 36, surf: null, cache: {}, ivMode: 'cm', snap: null };
+  const S = { dataset: 'iv', view: '3d', ticker: null, months: 36, surf: null, cache: {}, ivMode: 'cm', snap: null, psplit: 'volume' };
   async function render() {
     const host = document.getElementById('data-tab-body');
     if (!host) return;
@@ -380,7 +429,8 @@
     const seg = (key, opts) => `<span class="seg-control" style="font-size:10px">${opts.map(([v, l]) => `<button class="seg-btn ${S[key] === v ? 'active' : ''}" data-dt-${key}="${v}">${l}</button>`).join('')}</span>`;
     host.innerHTML = `<div class="section-title" style="margin-bottom:6px">Data <small>datasets · tables · heat maps · 3D surfaces · WIP</small></div>
       <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0">
-        ${seg('dataset', [['iv', 'IV surface'], ['yield', 'Yield curve'], ['catalog', 'Catalog']])}
+        ${seg('dataset', [['iv', 'IV surface'], ['yield', 'Yield curve'], ['patterns', 'Patterns'], ['catalog', 'Catalog']])}
+        ${S.dataset === 'patterns' ? seg('psplit', [['trend', 'by trend'], ['volume', 'by volume']]) : ''}
         ${S.dataset !== 'catalog' ? seg('view', [['3d', '3D'], ['heat', 'Heat map'], ['slices', 'Slices'], ['table', 'Table']]) : ''}
         ${S.dataset === 'iv' ? seg('ivMode', [['cm', 'Constant maturity'], ['exp', 'By expiry']]) : ''}
         ${S.dataset === 'iv' ? `<input id="dt-ticker" value="${esc(S.ticker)}" style="width:80px;background:var(--bg-elev);border:1px solid var(--rule);color:var(--ink);padding:5px 6px;border-radius:4px;font-family:var(--mono);font-size:11px;text-transform:uppercase"><button class="btn" id="dt-go" style="padding:5px 10px;font-size:10px">Load</button>` : ''}
@@ -393,13 +443,15 @@
     host.querySelectorAll('[data-dt-dataset]').forEach(b => b.onclick = () => { S.dataset = b.dataset.dtDataset; render(); });
     host.querySelectorAll('[data-dt-view]').forEach(b => b.onclick = () => { S.view = b.dataset.dtView; render(); });
     host.querySelectorAll('[data-dt-months]').forEach(b => b.onclick = () => { S.months = +b.dataset.dtMonths; render(); });
+    host.querySelectorAll('[data-dt-psplit]').forEach(b => b.onclick = () => { S.psplit = b.dataset.dtPsplit; render(); });
     host.querySelectorAll('[data-dt-ivMode], [data-dt-ivmode]').forEach(b => b.onclick = () => { S.ivMode = b.dataset.dtIvmode || b.dataset.dtIvMode; S.snap = null; render(); });
     const go = $('#dt-go'); if (go) { go.onclick = () => { S.ticker = ($('#dt-ticker').value || '').trim().toUpperCase() || S.ticker; render(); }; $('#dt-ticker').onkeydown = e => { if (e.key === 'Enter') go.click(); }; }
     const view = $('#dt-view');
     if (S.dataset === 'catalog') return renderCatalog(view);
     view.innerHTML = '<div style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);padding:20px 0">Loading…</div>';
-    const key = S.dataset === 'iv' ? `iv:${S.ivMode}:${S.ticker}` : 'yield:' + S.months;
-    const loader = S.dataset === 'iv' ? (S.ivMode === 'cm' ? cmSurface(S.ticker) : ivSurface(S.ticker)) : yieldSurface(S.months);
+    const key = S.dataset === 'iv' ? `iv:${S.ivMode}:${S.ticker}` : S.dataset === 'patterns' ? 'pat:' + S.psplit : 'yield:' + S.months;
+    const loader = S.dataset === 'iv' ? (S.ivMode === 'cm' ? cmSurface(S.ticker) : ivSurface(S.ticker))
+                 : S.dataset === 'patterns' ? patternSurface(S.psplit) : yieldSurface(S.months);
     const got = S.cache[key] || (S.cache[key] = await loader);
     if (!document.getElementById('dt-view')) return;
     if (got.error) { delete S.cache[key]; view.innerHTML = `<div style="font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);padding:16px 0">${esc(got.error)}</div>`; return; }
