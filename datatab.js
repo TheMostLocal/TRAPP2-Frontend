@@ -233,7 +233,7 @@
       if (row.filter(v => v != null).length >= 3) rows.push({ y: e.expiry, row });
     }
     if (rows.length < 2) return { error: `${ticker}'s chain is too thin for a surface (need 2+ expiries with 3+ priced strikes).` };
-    return { title: `${ticker} implied-volatility surface`, sub: `spot $${S.toFixed(2)} · ${rows.length} expiries · OTM puts below spot, calls above, put/call average within ±2.5% · as of ${esc(String(data.asOf || '').slice(0, 16))}`,
+    return { title: `${ticker} implied-volatility surface`, sub: `spot $${S.toFixed(2)} · ${rows.length} expiries · OTM puts below spot, calls above, put/call average within ±2.5%${(data.expiries || []).some(e => e.forward) ? ' · IV from mids on the parity-implied forward' : ''} · as of ${esc(String(data.asOf || '').slice(0, 16))}`,
       xs, ys: rows.map(r => r.y), z: rows.map(r => r.row), xScale: 'value',
       xLabel: 'Moneyness', yLabel: 'Term', zLabel: 'IV %', zStep: 5,
       xTick: v => `${Math.round(v * 100)}%`, yTick: v => new Date(v + 'T12:00:00Z').toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: '2-digit' }),
@@ -252,8 +252,10 @@
   // OTM puts below spot, OTM calls above, put/call average within ±2.5% of spot
   // (removes the step where the smile switches sides) - same rule as the pipeline.
   function smilePoints(e, S) {
-    const ok = o => +o.iv > 0.01 && +o.iv < 5;
-    const P = new Map((e.puts || []).filter(ok).map(o => [o.strike, +o.iv])), C = new Map((e.calls || []).filter(ok).map(o => [o.strike, +o.iv]));
+    // z107: prefer the parity-consistent mid IV (TRAPP2-OPTIONS ivMid), else Yahoo's iv
+    const ivOf = o => +(o.ivMid || o.iv);
+    const ok = o => ivOf(o) > 0.01 && ivOf(o) < 5;
+    const P = new Map((e.puts || []).filter(ok).map(o => [o.strike, ivOf(o)])), C = new Map((e.calls || []).filter(ok).map(o => [o.strike, ivOf(o)]));
     const out = [];
     for (const K of [...new Set([...P.keys(), ...C.keys()])].sort((a, b) => a - b)) {
       const m = K / S;
