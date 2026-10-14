@@ -103,6 +103,32 @@
       ${path ? `<div style="font-family:var(--mono);font-size:9.5px;color:var(--ink-faint);margin-top:6px">Median fed-funds path: ${esc(path)}</div>` : ''}`;
   }
 
+  // z105: latest FOMC statement - tone from a visible phrase lexicon + what changed
+  function statementHtml(m) {
+    const st = m.statement, src = m.sources?.statement || {};
+    if (!st) return '';
+    const tone = +st.tone || 0, col = tone > 0.15 ? 'var(--neg)' : tone < -0.15 ? 'var(--pos)' : 'var(--amber)';
+    const label = tone > 0.15 ? 'HAWKISH' : tone < -0.15 ? 'DOVISH' : 'BALANCED';
+    const chg = st.toneChange != null ? `${st.toneChange > 0 ? '+' : ''}${(+st.toneChange).toFixed(2)} vs ${esc(day(st.previous && st.previous.date))}` : '';
+    const pos = Math.round((tone + 1) / 2 * 100);
+    const list = (arr, c) => (arr || []).map(x => `<span style="display:inline-block;margin:2px 4px 2px 0;padding:1px 6px;border:1px solid ${c};border-radius:3px;color:${c}">${esc(x)}</span>`).join('');
+    const diff = st.diff ? `<div style="margin-top:8px;font-family:var(--mono);font-size:10px;line-height:1.55">
+        ${(st.diff.added || []).map(x => `<div style="color:var(--pos)">+ ${esc(x)}</div>`).join('')}
+        ${(st.diff.removed || []).map(x => `<div style="color:var(--neg);text-decoration:line-through;opacity:.8">− ${esc(x)}</div>`).join('')}</div>` : '';
+    const inner = `<div style="display:flex;flex-wrap:wrap;gap:6px 14px;align-items:baseline;font-family:var(--mono)">
+        <span style="font-size:15px;color:${col};font-weight:700">${label} ${tone > 0 ? '+' : ''}${tone.toFixed(2)}</span>
+        <span style="font-size:10px;color:var(--ink-dim)">${chg}</span>
+        ${st.decision ? `<span style="font-size:10px;color:var(--ink)">decision: ${esc(st.decision.verb)} → ${esc(st.decision.range)}</span>` : ''}
+        <a href="${esc(st.link)}" target="_blank" rel="noopener" style="margin-left:auto;font-size:9px;color:var(--ink-faint)">${esc(day(st.date))} statement ↗</a></div>
+      <div style="position:relative;height:8px;border-radius:4px;margin:8px 0 2px;background:linear-gradient(90deg,var(--pos),var(--amber),var(--neg))">
+        <span style="position:absolute;left:calc(${pos}% - 5px);top:-3px;width:10px;height:14px;border-radius:3px;background:var(--ink);box-shadow:0 0 0 2px var(--bg-elev)"></span></div>
+      <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:9px;color:var(--ink-faint)"><span>dovish −1</span><span>hawkish +1</span></div>
+      <div style="margin-top:6px;font-family:var(--mono);font-size:9.5px">${list(st.hawkish, 'var(--neg)')}${list(st.dovish, 'var(--pos)')}</div>
+      ${diff ? `<div style="font-family:var(--mono);font-size:9px;letter-spacing:.1em;color:var(--ink-dim);margin-top:8px">WHAT CHANGED VS THE PREVIOUS STATEMENT</div>${diff}` : ''}
+      <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:6px">Tone = (hawkish − dovish phrases) ÷ total, from a fixed phrase list (every hit shown). The edits between statements usually say more than the level.</div>`;
+    return card('FOMC STATEMENT · TONE &amp; CHANGES', '', inner, src.ok === false ? src.error : null);
+  }
+
   function speechesHtml(m) {
     const items = m.speeches || [], src = m.sources?.speeches || {};
     const rows = items.slice(0, 10).map(i => `<div style="display:flex;gap:10px;padding:5px 0;border-bottom:1px solid var(--rule);font-family:var(--mono);font-size:10.5px">
@@ -158,7 +184,7 @@
     }
     host.innerHTML = `<div style="font-family:var(--serif);font-size:24px;margin:22px 0 4px">QE / QT &amp; Fed reaction monitor</div>
       <div style="font-family:var(--mono);font-size:9.5px;color:var(--ink-faint)">updated ${esc(day(m.generatedAt))} · H.4.1 weekly (Thu) · statements 2:00pm ET on meeting days · minutes 3 weeks later</div>
-      ${balanceSheetHtml(m)}${commsHtml(m)}${speechesHtml(m)}${nyfedHtml(m)}`;
+      ${balanceSheetHtml(m)}${statementHtml(m)}${commsHtml(m)}${speechesHtml(m)}${nyfedHtml(m)}`;
     try {
       const b = m.balanceSheet;
       if (b && window.VChart) {
