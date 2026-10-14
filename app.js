@@ -10106,7 +10106,7 @@ async function renderOptionsTab(ticker) {
       return `<tr style="${itmBg};${atm ? 'outline:1px solid var(--amber)' : ''}">
         <td style="text-align:right;font-family:var(--mono);font-weight:700;font-size:11px">${_optFmt(o.strike)}</td>
         <td style="text-align:right;font-family:var(--mono);font-size:11px">$${_optFmt(o.mid || o.last)}</td>
-        <td style="text-align:right;font-family:var(--mono);font-size:10px;color:var(--ink-dim)">${o.iv ? (o.iv*100).toFixed(0)+'%' : '—'}</td>
+        <td style="text-align:right;font-family:var(--mono);font-size:10px;color:var(--ink-dim)" title="${o.ivMid ? 'IV from the mid on the parity-implied forward (Yahoo ' + (o.iv ? (o.iv*100).toFixed(0) + '%' : 'n/a') + ')' : 'Yahoo IV'}">${(o.ivMid || o.iv) ? ((o.ivMid || o.iv)*100).toFixed(0)+'%' : '—'}</td>
         <td style="text-align:right;font-family:var(--mono);font-size:10px;color:${_optGreekColor(o.delta)}">${_optFmt(o.delta)}</td>
         <td style="text-align:right;font-family:var(--mono);font-size:10px;color:var(--ink-dim)">${_optFmt(o.gamma, 3)}</td>
         <td style="text-align:right;font-family:var(--mono);font-size:10px;color:${_optGreekColor(o.theta)}">${_optFmt(o.theta, 3)}</td>
