@@ -126,7 +126,18 @@
       <div style="margin-top:6px;font-family:var(--mono);font-size:9.5px">${list(st.hawkish, 'var(--neg)')}${list(st.dovish, 'var(--pos)')}</div>
       ${diff ? `<div style="font-family:var(--mono);font-size:9px;letter-spacing:.1em;color:var(--ink-dim);margin-top:8px">WHAT CHANGED VS THE PREVIOUS STATEMENT</div>${diff}` : ''}
       <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:6px">Tone = (hawkish − dovish phrases) ÷ total, from a fixed phrase list (every hit shown). The edits between statements usually say more than the level.</div>`;
-    return card('FOMC STATEMENT · TONE &amp; CHANGES', '', inner, src.ok === false ? src.error : null);
+    return card('FOMC STATEMENT · TONE &amp; CHANGES', '', inner + minutesHtml(m), src.ok === false ? src.error : null);
+  }
+  // z110: latest minutes - tone + who held which view ("many / several / a few participants")
+  function minutesHtml(m) {
+    const mi = m.minutes; if (!mi) return '';
+    const t = +mi.tone || 0, col = t > 0.15 ? 'var(--neg)' : t < -0.15 ? 'var(--pos)' : 'var(--amber)';
+    const rows = (mi.participants || []).map(p => `<div style="margin:4px 0;line-height:1.5"><span style="color:${p.lean === 'hawkish' ? 'var(--neg)' : p.lean === 'dovish' ? 'var(--pos)' : 'var(--amber)'};text-transform:uppercase;font-size:9px">${esc(p.lean)}</span> <strong style="color:var(--ink)">${esc(p.who)}</strong> — ${esc(p.text.replace(new RegExp('^' + p.who.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*', 'i'), ''))}</div>`).join('');
+    return `<div style="border-top:1px solid var(--rule);margin-top:12px;padding-top:10px;font-family:var(--mono);font-size:10px">
+      <div style="display:flex;flex-wrap:wrap;gap:6px 12px;align-items:baseline"><span style="font-size:9px;letter-spacing:.1em;color:var(--ink-dim)">LATEST MINUTES</span>
+        <span style="color:${col};font-weight:700">${t > 0.15 ? 'HAWKISH' : t < -0.15 ? 'DOVISH' : 'BALANCED'} ${t > 0 ? '+' : ''}${t.toFixed(2)}</span>
+        <a href="${esc(mi.link)}" target="_blank" rel="noopener" style="margin-left:auto;font-size:9px;color:var(--ink-faint)">${esc(day(mi.date))} minutes ↗</a></div>
+      ${rows || '<div style="color:var(--ink-faint);margin-top:4px">No participant sentences with a clear lean.</div>'}</div>`;
   }
 
   function speechesHtml(m) {
