@@ -40906,7 +40906,7 @@ function renderResearchScreener(data) {
       return `<tr class="research-screen-row" data-ticker="${escapeHtml(t.ticker)}" style="cursor:pointer">
         <td style="font-family:var(--mono);font-size:11px;color:var(--ink-faint);text-align:right">${i + 1}</td>
         <td style="font-family:var(--mono);font-weight:700">${escapeHtml(t.ticker)}</td>
-        <td style="font-size:11px;color:var(--ink-dim);max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(t.name)}</td>
+        <td style="font-size:11px;color:var(--ink-dim)"><div style="max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</div></td>
         <td style="text-align:center"><span style="font-family:var(--mono);font-size:14px;font-weight:700;color:${researchGradeColor(blendGrade)}" title="Grade from the blended score of the selected categories">${blendGrade}</span></td>
         <td style="text-align:right;font-family:var(--mono);font-size:12px;font-weight:700">${x.score.toFixed(0)}<span style="color:var(--ink-faint);font-size:9px">/100</span></td>
         ${perCatCells}
@@ -41085,7 +41085,7 @@ function renderResearchScreener(data) {
     return `<tr class="research-screen-row" data-ticker="${escapeHtml(t.ticker)}" style="cursor:pointer">
       <td style="font-family:var(--mono);font-size:11px;color:var(--ink-faint);text-align:right">${idx + 1}</td>
       <td style="font-family:var(--mono);font-weight:700">${escapeHtml(t.ticker)}</td>
-      <td style="font-size:11px;color:var(--ink-dim);max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(t.name)}</td>
+      <td style="font-size:11px;color:var(--ink-dim)"><div style="max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</div></td>
       <td style="text-align:center"><span style="font-family:var(--mono);font-weight:700;color:${researchGradeColor(t.grade)}">${t.grade || '—'}</span></td>
       ${blend != null ? `<td style="text-align:right;font-family:var(--mono);font-size:11px;font-weight:700" title="Average percentile across selected metrics">${blend.toFixed(0)}</td>` : `<td style="text-align:right;font-family:var(--mono);font-size:11px">${t.gradeScore != null ? t.gradeScore.toFixed(0) : '—'}</td>`}
       ${metricCells}
@@ -41222,7 +41222,7 @@ function renderResearchGrades(data) {
       <td style="text-align:center;width:28px" onclick="event.stopPropagation()"><input type="checkbox" class="research-select" data-ticker="${escapeHtml(t.ticker)}" ${RESEARCH_SELECTED.has(t.ticker)?'checked':''} style="cursor:pointer"></td>
       <td style="font-family:var(--mono);font-size:11px;color:var(--ink-faint);text-align:right">${i+1}</td>
       <td style="font-family:var(--mono);font-weight:700">${escapeHtml(t.ticker)}${(typeof editedMarker === 'function') ? editedMarker(t.ticker, 'function') : ''}</td>
-      <td style="font-size:11px;color:var(--ink-dim);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(t.name)}</td>
+      <td style="font-size:11px;color:var(--ink-dim)"><div style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</div></td>
       <td style="text-align:center"><span style="font-family:var(--mono);font-size:15px;font-weight:700;color:${researchGradeColor(t.grade)}">${t.grade}</span></td>
       <td style="text-align:center">${verifyCell}</td>
       <td style="text-align:right;font-family:var(--mono);font-size:11px">${t.gradeScore.toFixed(0)}<span style="color:var(--ink-faint);font-size:9px">/100</span></td>
@@ -41248,7 +41248,7 @@ function renderResearchGrades(data) {
           <td style="text-align:center;width:28px" onclick="event.stopPropagation()"><input type="checkbox" class="research-select" data-ticker="${escapeHtml(t.ticker)}" ${RESEARCH_SELECTED.has(t.ticker)?'checked':''} style="cursor:pointer"></td>
           <td style="font-family:var(--mono);font-size:11px;color:var(--ink-faint);text-align:right">${i + 1}</td>
           <td style="font-family:var(--mono);font-weight:700">${escapeHtml(t.ticker)}</td>
-          <td style="font-size:11px;color:var(--ink-dim);max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(t.name)}</td>
+          <td style="font-size:11px;color:var(--ink-dim)"><div style="max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</div></td>
           <td><span style="padding:1px 6px;border:1px solid ${clsColor(t.assetClass)};color:${clsColor(t.assetClass)};border-radius:2px;font-family:var(--mono);font-size:8px;text-transform:uppercase;letter-spacing:0.05em">${escapeHtml(t.assetClass || 'non-equity')}</span></td>
           <td style="text-align:center"><span style="font-family:var(--mono);font-size:15px;font-weight:700;color:${researchGradeColor(t.grade)}">${t.grade}</span></td>
           <td style="text-align:right;font-family:var(--mono);font-size:11px">${t.gradeScore.toFixed(0)}<span style="color:var(--ink-faint);font-size:9px">/100</span></td>
@@ -49625,7 +49625,7 @@ function _botRiskCard() {
   const cell = (label, value, color, sub) => `
     <div style="min-width:0">
       <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);letter-spacing:0.1em;text-transform:uppercase">${label}</div>
-      <div style="font-family:var(--mono);font-size:16px;font-weight:700;color:${color};margin-top:3px;white-space:nowrap">${value}</div>
+      <div style="font-family:var(--mono);font-size:16px;font-weight:700;color:${color};margin-top:3px;overflow-wrap:anywhere">${value}</div>
       <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${sub || ''}</div>
     </div>`;
   const cells = [
