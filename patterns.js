@@ -381,10 +381,19 @@
     const volRows = ['confirmed', 'unconfirmed'].filter(k => bv[k]).map(k => { const x = bv[k];
       return `<div class="pat-row ${x.usable ? '' : 'dim'}"><span>&nbsp; ${k === 'confirmed' ? `volume ≥ ${(st.volConfirmAt || 1.4)}× avg` : 'lighter volume'} · n ${x.judged}</span>` +
         `<span>${x.successRate == null ? '—' : x.successRate + '%'} <span class="${(x.edgeVsBaselinePct || 0) > 0 ? 'ok' : 'no'}">${pct(x.edgeVsBaselinePct)}</span></span></div>`; }).join('');
+    // z109: macro quad split - labelled with the quad KNOWN at the time (official
+    // quad shifted by its publication lag), so it's usable without lookahead
+    const qd = (st && st.byRegime && st.byRegime.quad) || {};
+    const qNow = P.stats && P.stats.regimeNow && P.stats.regimeNow.quadKnown;
+    const QN = { 1: 'Q1 Goldilocks', 2: 'Q2 Reflation', 3: 'Q3 Stagflation', 4: 'Q4 Deflation' };
+    const quadRows = ['1', '2', '3', '4'].filter(k => qd[k]).map(k => { const x = qd[k];
+      return `<div class="pat-row ${x.usable ? '' : 'dim'}"><span>&nbsp; ${QN[k]}${String(qNow) === k ? ' ← now' : ''} · n ${x.judged}</span>` +
+        `<span>${x.successRate == null ? '—' : x.successRate + '%'} <span class="${(x.edgeVsBaselinePct || 0) > 0 ? 'ok' : 'no'}">${pct(x.edgeVsBaselinePct)}</span></span></div>`; }).join('');
     host.innerHTML = `<h4>STATISTICAL RECORD — ${esc(TPLNAME(P.tpl).toUpperCase())}</h4>` +
       statLine(mine, esc(P.ticker)) + statLine(st && st.backtest, 'Universe · backtest') +
       (regimeRows ? `<div class="pat-row dim" style="margin-top:4px"><span>By market regime (SPY trend${now ? ', now ' + esc(now) : ''})</span><span>success · edge</span></div>` + regimeRows : '') +
       (volRows ? `<div class="pat-row dim" style="margin-top:4px"><span>By breakout volume</span><span>success · edge</span></div>` + volRows : '') +
+      (quadRows ? `<div class="pat-row dim" style="margin-top:4px"><span>By macro quad (as known then, ${((P.stats && P.stats.regimeNow) || {}).quadLagMonths || 3}-mo lag)</span><span>success · edge</span></div>` + quadRows : '') +
       statLine(st && st.live, 'Universe · live') +
       `<div class="pat-note">Success rate with 95% Wilson interval. ${P.tpl === 'minervini' ? 'Success = beat SPY over 63 trading days.' : 'Success = target reached after confirmation.'} Live record since ${esc((P.stats && P.stats.liveStart) || '—')}.</div>`;
   }
