@@ -140,9 +140,24 @@
           poly([P(-1, -1, bx.h), P(1, -1, bx.h), P(1, 1, bx.h), P(-1, 1, bx.h)], rgb(c, 0.97), 'rgba(0,0,0,0.35)');
         }
       }
+      // CATEGORICAL x CONTINUOUS (ds.ribbons): one "fence" per category running
+      // along the continuous axis, from the zero line to the value - no surface
+      // is interpolated BETWEEN categories (e.g. between XLK and XLF).
+      if (ds.ribbons) {
+        const z0 = Z(Math.max(zlo, Math.min(zhi, 0)));
+        const fences = [];
+        for (let i = 0; i < nx; i++) for (let j = 0; j < ny - 1; j++) {
+          const a = ds.z[j][i], b2 = ds.z[j + 1][i];
+          if (a == null || b2 == null) continue;
+          const pts = [proj(X(i), Y(j), z0), proj(X(i), Y(j + 1), z0), proj(X(i), Y(j + 1), Z(b2)), proj(X(i), Y(j), Z(a))];
+          fences.push({ pts, d: pts.reduce((s2, q) => s2 + q.d, 0) / 4, t: ((a + b2) / 2 - zmin) / (zmax - zmin || 1), top: [pts[3], pts[2]] });
+        }
+        fences.sort((a, b) => b.d - a.d);
+        for (const f of fences) { poly(f.pts, rgb(colorAt(f.t), 0.55), null); line(f.top[0], f.top[1], rgb(colorAt(f.t), 1)); }
+      }
       // mesh quads, far to near
       const quads = [];
-      if (!ds.bars) for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+      if (!ds.bars && !ds.ribbons) for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
         const c = [[i, j], [i + 1, j], [i + 1, j + 1], [i, j + 1]];
         if (c.some(([a, b]) => ds.z[b][a] == null)) continue;
         const pts = c.map(([a, b]) => proj(X(a), Y(b), Z(ds.z[b][a])));
@@ -351,6 +366,45 @@
       xTick: k => short[k] || k, yTick: r => (rows.find(x => x[0] === r) || [r, r])[1], zFmt: v => v.toFixed(0), cell: v => v == null ? '—' : v.toFixed(1) + '%' };
   }
 
+  // ---- Correlation surface (z108): asset × month-end × rolling correlation with SPY ----
+  // Pearson correlation of DAILY returns over the trailing window (default 63
+  // sessions ≈ 3 months) ending at each month-end, for the 11 sector SPDRs plus
+  // long Treasuries (TLT), gold (GLD) and the dollar proxy (UUP). Shows how
+  // relationships move over time - e.g. the stock/bond correlation flip.
+  const CORR_ASSETS = ['XLK', 'XLC', 'XLY', 'XLF', 'XLI', 'XLB', 'XLE', 'XLV', 'XLP', 'XLU', 'XLRE', 'TLT', 'GLD', 'UUP'];
+  async function corrSurface(months, win) {
+    if (!window.VChart) return { error: 'charts.js not loaded' };
+    const [spy, ...rest] = await Promise.all(['SPY', ...CORR_ASSETS].map(t => window.VChart.fetchDaily(t)));
+    if (!spy || spy.length < win + 30) return { error: 'No SPY history in the books.' };
+    const sp = new Map(spy.map(b => [b.d, b.c]));
+    const assets = [], series = [];
+    CORR_ASSETS.forEach((t, k) => { const h = rest[k]; if (h && h.length > win + 30) { assets.push(t); series.push(h); } });
+    if (!assets.length) return { error: 'No asset histories found.' };
+    // month-end dates from SPY's calendar
+    const ends = [];
+    for (let i = spy.length - 1; i > 0 && ends.length < months; i--) if (spy[i].d.slice(0, 7) !== (spy[i + 1] || { d: '' }).d.slice(0, 7)) ends.push(i);
+    ends.reverse();
+    const maps = series.map(h => new Map(h.map(b => [b.d, b.c])));   // built once per asset
+    const corrAt = (m, iEnd) => {
+      const xs = [], ys = [];
+      for (let i = iEnd - win + 1; i <= iEnd; i++) {
+        const d0 = spy[i - 1].d, d1 = spy[i].d;
+        const a0 = m.get(d0), a1 = m.get(d1);
+        if (a0 && a1) { xs.push(a1 / a0 - 1); ys.push(spy[i].c / spy[i - 1].c - 1); }
+      }
+      if (xs.length < win * 0.8) return null;
+      const n = xs.length, mx = xs.reduce((a, b) => a + b, 0) / n, my = ys.reduce((a, b) => a + b, 0) / n;
+      let sxy = 0, sxx = 0, syy = 0;
+      for (let k = 0; k < n; k++) { sxy += (xs[k] - mx) * (ys[k] - my); sxx += (xs[k] - mx) ** 2; syy += (ys[k] - my) ** 2; }
+      return sxx && syy ? +(sxy / Math.sqrt(sxx * syy)).toFixed(3) : null;
+    };
+    const z = ends.map(iEnd => maps.map(m => corrAt(m, iEnd)));
+    return { title: `Rolling ${win}-day correlation with SPY`, sub: `${assets.length} assets · ${ends.length} month-ends · ${esc(spy[ends[0]].d)} → ${esc(spy[ends[ends.length - 1]].d)} · daily returns, Pearson`,
+      ribbons: true, xs: assets, ys: ends.map(i => spy[i].d), z, zRange: [-1, 1], xScale: 'index', xLabel: 'Asset', yLabel: 'Date', zLabel: 'Correlation', zStep: 0.5,
+      xTick: v => v, yTick: v => new Date(v + 'T12:00:00Z').toLocaleDateString(undefined, { month: 'short', year: '2-digit' }),
+      zFmt: v => v.toFixed(1), cell: v => v == null ? '—' : v.toFixed(2) };
+  }
+
   const CATALOG = [
     ['Stock Book (4 books)', 'TRAPP2 · -1 · -2 · -3 / data/master.json', 'intraday (15 min) + nightly', 'TRAPP2/main/data/master.json'],
     ['Daily price history (20y)', '<book>/data/history/<T>.json', 'nightly', 'TRAPP2/main/data/history/SPY.json'],
@@ -421,7 +475,7 @@
       <tbody>${ds.ys.map((y, j) => `<tr><td>${esc(y)}</td>${ds.z[j].map(v => `<td>${esc(ds.cell(v))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
   }
 
-  const S = { dataset: 'iv', view: '3d', ticker: null, months: 36, surf: null, cache: {}, ivMode: 'cm', snap: null, psplit: 'volume' };
+  const S = { dataset: 'iv', view: '3d', ticker: null, months: 36, surf: null, cache: {}, ivMode: 'cm', snap: null, psplit: 'volume', cwin: 63 };
   async function render() {
     const host = document.getElementById('data-tab-body');
     if (!host) return;
@@ -431,7 +485,8 @@
     const seg = (key, opts) => `<span class="seg-control" style="font-size:10px">${opts.map(([v, l]) => `<button class="seg-btn ${S[key] === v ? 'active' : ''}" data-dt-${key}="${v}">${l}</button>`).join('')}</span>`;
     host.innerHTML = `<div class="section-title" style="margin-bottom:6px">Data <small>datasets · tables · heat maps · 3D surfaces · WIP</small></div>
       <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0">
-        ${seg('dataset', [['iv', 'IV surface'], ['yield', 'Yield curve'], ['patterns', 'Patterns'], ['catalog', 'Catalog']])}
+        ${seg('dataset', [['iv', 'IV surface'], ['yield', 'Yield curve'], ['corr', 'Correlation'], ['patterns', 'Patterns'], ['catalog', 'Catalog']])}
+        ${S.dataset === 'corr' ? seg('cwin', [[21, '1M'], [63, '3M'], [126, '6M']]) + seg('months', [[12, '1Y'], [36, '3Y'], [60, '5Y'], [120, '10Y']]) : ''}
         ${S.dataset === 'patterns' ? seg('psplit', [['trend', 'by trend'], ['volume', 'by volume']]) : ''}
         ${S.dataset !== 'catalog' ? seg('view', [['3d', '3D'], ['heat', 'Heat map'], ['slices', 'Slices'], ['table', 'Table']]) : ''}
         ${S.dataset === 'iv' ? seg('ivMode', [['cm', 'Constant maturity'], ['exp', 'By expiry']]) : ''}
@@ -446,14 +501,17 @@
     host.querySelectorAll('[data-dt-view]').forEach(b => b.onclick = () => { S.view = b.dataset.dtView; render(); });
     host.querySelectorAll('[data-dt-months]').forEach(b => b.onclick = () => { S.months = +b.dataset.dtMonths; render(); });
     host.querySelectorAll('[data-dt-psplit]').forEach(b => b.onclick = () => { S.psplit = b.dataset.dtPsplit; render(); });
+    host.querySelectorAll('[data-dt-cwin]').forEach(b => b.onclick = () => { S.cwin = +b.dataset.dtCwin; render(); });
     host.querySelectorAll('[data-dt-ivMode], [data-dt-ivmode]').forEach(b => b.onclick = () => { S.ivMode = b.dataset.dtIvmode || b.dataset.dtIvMode; S.snap = null; render(); });
     const go = $('#dt-go'); if (go) { go.onclick = () => { S.ticker = ($('#dt-ticker').value || '').trim().toUpperCase() || S.ticker; render(); }; $('#dt-ticker').onkeydown = e => { if (e.key === 'Enter') go.click(); }; }
     const view = $('#dt-view');
     if (S.dataset === 'catalog') return renderCatalog(view);
     view.innerHTML = '<div style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);padding:20px 0">Loading…</div>';
-    const key = S.dataset === 'iv' ? `iv:${S.ivMode}:${S.ticker}` : S.dataset === 'patterns' ? 'pat:' + S.psplit : 'yield:' + S.months;
+    const key = S.dataset === 'iv' ? `iv:${S.ivMode}:${S.ticker}` : S.dataset === 'patterns' ? 'pat:' + S.psplit
+              : S.dataset === 'corr' ? `corr:${S.cwin}:${S.months}` : 'yield:' + S.months;
     const loader = S.dataset === 'iv' ? (S.ivMode === 'cm' ? cmSurface(S.ticker) : ivSurface(S.ticker))
-                 : S.dataset === 'patterns' ? patternSurface(S.psplit) : yieldSurface(S.months);
+                 : S.dataset === 'patterns' ? patternSurface(S.psplit)
+                 : S.dataset === 'corr' ? corrSurface(S.months, S.cwin) : yieldSurface(S.months);
     const got = S.cache[key] || (S.cache[key] = await loader);
     if (!document.getElementById('dt-view')) return;
     if (got.error) { delete S.cache[key]; view.innerHTML = `<div style="font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);padding:16px 0">${esc(got.error)}</div>`; return; }
