@@ -45,18 +45,19 @@
       const Trem = yrs(date, e.expiry), Tnow = yrs(now, e.expiry);
       for (const c of (e[side] || [])) {
         const cost = (+c.ask > 0) ? +c.ask : ((+c.mid > 0) ? +c.mid : +c.last);
-        if (!(cost > 0.01) || !(+c.iv > 0)) continue;
-        const val = bs(type, target, +c.strike, Trem, r, +c.iv);
+        const civ = +(c.ivMid || c.iv);          // z107: parity-consistent mid IV when available
+        if (!(cost > 0.01) || !(civ > 0)) continue;
+        const val = bs(type, target, +c.strike, Trem, r, civ);
         const be = type === 'call' ? +c.strike + cost : +c.strike - cost;
         out.push({ expiry: e.expiry, strike: +c.strike, type, cost, val, ret: val / cost - 1, be,
-                   pBe: pBeyond(S, be, Tnow, r, +c.iv, type === 'call'), oi: +c.openInterest || 0, iv: +c.iv });
+                   pBe: pBeyond(S, be, Tnow, r, civ, type === 'call'), oi: +c.openInterest || 0, iv: civ });
       }
     }
     out.sort((a, b) => b.ret - a.ret);
     // odds the stock is past the target by the date (nearest-to-ATM IV)
     const near = (data.expiries || [])[0];
     const atm = near ? [...(near.calls || []), ...(near.puts || [])].sort((a, b) => Math.abs(a.strike - S) - Math.abs(b.strike - S))[0] : null;
-    const pTarget = atm ? pBeyond(S, target, yrs(now, date), r, +atm.iv, target >= S) : null;
+    const pTarget = atm ? pBeyond(S, target, yrs(now, date), r, +(atm.ivMid || atm.iv), target >= S) : null;
     return { list: out.slice(0, 8), side, pTarget, S };
   }
 
