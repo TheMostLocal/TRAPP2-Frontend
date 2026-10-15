@@ -80,11 +80,26 @@
     if (typeof window.saveBotState !== 'function' || window.saveBotState._z100) return false;
     const origSave = window.saveBotState;
     const w = function (bot) {
+      // z112: stamp updatedAt on trades THIS device opened / closed / trimmed, so
+      // the shared merge rule (Supabase + runner) knows they're the newer copy.
+      // Imports from the runner / Supabase are merges, not changes - no stamp.
+      const merging = S.suppress > 0 || (window.__botMerging || 0) > 0;
+      try {
+        const prev0 = j(BASE, null);
+        if (prev0 && !merging && bot && Array.isArray(bot.bets)) {
+          const now = new Date().toISOString();
+          for (const b of bot.bets) {
+            const was = b && b.id ? prev0.bets[b.id] : null;
+            const sig = b && { status: b.status, shares: +b.shares || 0, trims: (b.partialSells || []).length + (b.trims || []).length };
+            if (b && b.id && (!was || was.status !== sig.status || Math.abs((was.shares || 0) - sig.shares) > 1e-9 || was.trims !== sig.trims)) b.updatedAt = now;
+          }
+        }
+      } catch (e) {}
       const r = origSave.apply(this, arguments);
       try {
         const prev = j(BASE, null);
         if (!prev) { put(BASE, snap(bot)); return r; }                 // first sight: baseline only
-        if (S.suppress > 0) { put(BASE, snap(bot)); return r; }
+        if (merging) { put(BASE, snap(bot)); return r; }
         const acts = diff(prev, bot);
         put(BASE, snap(bot));
         if (acts.length) { put(OUTBOX, j(OUTBOX, []).concat(acts)); schedule(); }
