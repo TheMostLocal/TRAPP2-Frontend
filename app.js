@@ -44011,6 +44011,18 @@ function _mergeBotTrainingData(data, sourceLabel) {
   // bankroll drifted away from the trades it should sum. Keep the runner value
   // for reference; take it only when the local state has no bets of its own.
   if (typeof data.bankroll === 'number') bot.runnerBankroll = data.bankroll;
+  // z112: the runner's capital entries (deposits / withdrawals / its one-time
+  // opening adjustment) come along, so both ledgers sum the same things.
+  if (Array.isArray(data.transactions)) {
+    bot.transactions = bot.transactions || [];
+    const have = new Set(bot.transactions.map(t => t && t.id));
+    for (const t of data.transactions) {
+      if (!t || !t.id || have.has(t.id) || !['deposit', 'withdrawal', 'adjustment'].includes(t.type)) continue;
+      if (t.origin === 'app' && bot.transactions.some(x => x && x.type === t.type && Math.abs((+x.amount || 0) - (+t.amount || 0)) < 0.01 && String(x.ts || '').slice(0, 10) === String(t.ts || '').slice(0, 10))) continue;   // our own deposit coming back
+      bot.transactions.push({ ...t, origin: t.origin || 'runner' });
+      have.add(t.id);
+    }
+  }
   // The bankroll IS "start + capital added + realized P/L" - so derive it from
   // the merged trade ledger instead of copying a number that belongs to a
   // different trade set. (Trims were the bulk of the old gap: their realized
@@ -44209,13 +44221,20 @@ async function supabaseSyncAllTrades() {
     for (const b of bets) { const had = b.id; _ensureTradeId(b); if (b.id !== had) mutated = true; }
     if (mutated) saveBotState(bot);
 
-    // 3. Build rows. Re-upsert EVERY trade: upsert is idempotent, and a trade
-    //    that was synced while OPEN and later CLOSED locally must be re-pushed so
-    //    Supabase reflects the closure (status/exitDate/pnl/won). The old logic
-    //    skipped "already-present + closed" rows, which is exactly why trades
-    //    closed to rebalance cash never updated and bot_trades_closed stayed
-    //    empty. Re-pushing all trades is cheap (chunked) and always correct.
-    const rows = bets.map(b => _supabaseRow(b));
+    // 2. z112: PULL + MERGE first (newer runner / other-device versions win),
+    //    then push only the trades where THIS device holds the winning version
+    //    (or Supabase doesn't have them). Never push a stale copy over a newer row.
+    const pulled = await supabaseLoadTrades();
+    const remote = (pulled && pulled.remote) || null;
+    const fresh = loadBotState().bets || [];
+    const rows = fresh.filter(b => {
+      if (!remote || !remote.has(b.id)) return true;
+      const r = remote.get(b.id);
+      // push only when this device's copy is STRICTLY newer (a tie = same version)
+      const nt = t => (t.trims || []).length + (t.partialSells || []).length;
+      return (b.status === 'closed' && r.status !== 'closed') || nt(b) > nt(r)
+          || (r.status === b.status && nt(b) === nt(r) && String(b.updatedAt || '') > String(r.updatedAt || ''));
+    }).map(b => _supabaseRow(b));
     if (!rows.length) {
       if (typeof flashStatus === 'function') flashStatus(`Supabase already up to date (${bets.length} trades, nothing new)`, 'success');
       return 0;
@@ -44246,33 +44265,64 @@ async function supabaseSyncAllTrades() {
   }
 }
 
-// Read ALL trades from Supabase and merge into local state (append by id, never
-// drop). This is the auto-load on a fresh device — pulls the full history with
-// no manual import.
+// ---- One merge rule for bot trades (z112) — same as TRAPP2-BOT trade_sync.py ----
+// 1. CLOSED beats open  2. more trims beat fewer  3. later updatedAt wins
+// 4. no stamps -> keep the local version. The old load only APPENDED new ids and
+// never updated a trade it already had, so a close made by the runner (or on
+// another device) never reached this one - and the bulk push ran FIRST, pushing
+// this device's stale copy over the newer row.
+const _TRADE_SYNC_FIELDS = ['status', 'exitDate', 'exitPrice', 'exitReason', 'pnl', 'realizedPL', 'won', 'returnPct',
+  'trims', 'realizedTrim', 'partialSells', 'shares', 'notional', 'sharesAtExit', 'closedBy', 'holdDays', 'updatedAt'];
+function _tradeWinner(local, remote) {
+  const lc = local.status === 'closed', rc = remote.status === 'closed';
+  if (rc && !lc) return 'remote';
+  if (lc && !rc) return 'local';
+  const nt = t => (t.trims || []).length + (t.partialSells || []).length;
+  if (nt(remote) > nt(local)) return 'remote';
+  if (nt(local) > nt(remote)) return 'local';
+  const lu = String(local.updatedAt || ''), ru = String(remote.updatedAt || '');
+  return (ru && ru > lu) ? 'remote' : 'local';
+}
+async function _supabaseFetchAllTrades() {
+  const out = [];
+  for (let off = 0; off < 20000; off += 1000) {
+    const r = await fetch(`${getSupabaseUrl()}/rest/v1/${SUPABASE_TABLE}?select=id,trade&order=id&limit=1000&offset=${off}`, { headers: _supabaseHeaders() });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const page = await r.json();
+    if (!Array.isArray(page)) break;
+    out.push(...page);
+    if (page.length < 1000) break;
+  }
+  return out;
+}
+// Read ALL trades from Supabase and MERGE into local state: new ids appended,
+// existing ids updated when Supabase holds the winning version.
 async function supabaseLoadTrades() {
   if (!supabaseConfigured()) return null;
   try {
-    const r = await fetch(`${getSupabaseUrl()}/rest/v1/${SUPABASE_TABLE}?select=id,trade&order=updated_at.asc`, {
-      headers: _supabaseHeaders(),
-    });
-    if (!r.ok) { console.warn('[supabase] load failed', r.status); return null; }
-    const rows = await r.json();
-    if (!Array.isArray(rows)) return null;
+    const rows = await _supabaseFetchAllTrades();
     const bot = loadBotState();
-    const localIds = new Set((bot.bets || []).map(b => b.id));
-    let added = 0;
+    const byId = new Map((bot.bets || []).map(b => [b.id, b]));
+    let added = 0, updated = 0;
     for (const row of rows) {
-      const t = row.trade;
-      if (t && t.id && !localIds.has(t.id)) {
-        bot.bets.push(t);
-        localIds.add(t.id);
-        added++;
+      const t = row && row.trade;
+      if (!t || !t.id) continue;
+      const loc = byId.get(t.id);
+      if (!loc) { bot.bets.push(t); byId.set(t.id, t); added++; continue; }
+      if (_tradeWinner(loc, t) === 'remote') {
+        for (const k of _TRADE_SYNC_FIELDS) if (t[k] !== undefined) loc[k] = t[k];
+        loc._sbSynced = new Date().toISOString();
+        updated++;
       }
     }
-    if (added) saveBotState(bot);
-    console.log(`[supabase] loaded ${rows.length} trades, ${added} new appended`);
-    if (typeof flashStatus === 'function' && added) flashStatus(`Loaded ${added} trades from Supabase`, 'success');
-    return { total: rows.length, added };
+    if (added || updated) {
+      if (typeof window !== 'undefined') window.__botMerging = (window.__botMerging || 0) + 1;   // not app actions
+      try { if (typeof botLedgerBankroll === 'function') bot.bankroll = botLedgerBankroll(bot); saveBotState(bot); }
+      finally { if (typeof window !== 'undefined') window.__botMerging--; }
+    }
+    console.log(`[supabase] ${rows.length} trades read · ${added} new · ${updated} updated`);
+    if (typeof flashStatus === 'function' && (added || updated)) flashStatus(`Supabase: ${added} new, ${updated} updated trade(s)`, 'success');
+    return { total: rows.length, added, updated, remote: new Map(rows.filter(r => r && r.trade && r.trade.id).map(r => [r.trade.id, r.trade])) };
   } catch (e) {
     console.warn('[supabase] load error', e.message);
     return null;
@@ -48159,6 +48209,10 @@ function botMarkToMarket() {
           if (bet.direction === 'short' && bet.dividendCarry) _realized -= bet.dividendCarry;
         }
         if (!isFinite(_realized)) _realized = (bet.pnl || 0);
+        // z112: a trade the RUNNER trimmed carries trims[] + realizedTrim; its
+        // closed pnl must include them (runner semantics) or the shared ledger
+        // (start + trims + exit P/L) would undercount.
+        if (Array.isArray(bet.trims) && bet.trims.length && bet.realizedTrim != null) _realized += (+bet.realizedTrim || 0);
         _realized = +_realized.toFixed(2);
         bet.realizedPL = _realized;          // the durable, exported truth
         bet.pnl = _realized;                  // keep MTM field consistent at close
@@ -48978,7 +49032,7 @@ function botReconstructEquityCurve(bot) {
       const ds = cur.toISOString().slice(0, 10);
       let realized = 0, openMark = 0;
       // z98: capital the user added/withdrew (bot.transactions deposit/withdrawal)
-      for (const t of (bot.transactions || [])) if ((t.type === 'deposit' || t.type === 'withdrawal') && String(t.ts || '').slice(0, 10) <= ds) realized += (+t.amount || 0);
+      for (const t of (bot.transactions || [])) if ((t.type === 'deposit' || t.type === 'withdrawal' || t.type === 'adjustment') && String(t.ts || '').slice(0, 10) <= ds) realized += (+t.amount || 0);
       for (const b of bets) {
         if (!b.entryDate || b.entryDate > ds) continue;
         // z98: partial sells (trims) realize P/L into the bankroll and shrink
@@ -49241,7 +49295,7 @@ function _botDailySeries() {
     if (_reconDates) {
       const closedPnl = (bot.bets || []).filter(b => b.status === 'closed').reduce((s2, b) => s2 + _betExitRealized(b), 0);
       const partials = (bot.bets || []).reduce((s2, b) => s2 + _betTrimEvents(b).reduce((s3, ps) => s3 + ps.realized, 0), 0);
-      const capital = (bot.transactions || []).filter(t => t.type === 'deposit' || t.type === 'withdrawal').reduce((s2, t) => s2 + (+t.amount || 0), 0);
+      const capital = (bot.transactions || []).filter(t => t.type === 'deposit' || t.type === 'withdrawal' || t.type === 'adjustment').reduce((s2, t) => s2 + (+t.amount || 0), 0);
       const ledgerLive = +(BOT_STARTING_BANKROLL + capital + closedPnl + partials + openUnreal).toFixed(2);
       window._botLedgerGap = { bankrollBook: liveVal, ledger: ledgerLive, gap: +(liveVal - ledgerLive).toFixed(2),
                                parts: { start: BOT_STARTING_BANKROLL, capital: +capital.toFixed(2), closedPnl: +closedPnl.toFixed(2), partials: +partials.toFixed(2), openUnreal: +openUnreal.toFixed(2) } };
