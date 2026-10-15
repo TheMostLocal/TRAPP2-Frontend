@@ -300,7 +300,7 @@
   // TIME-WEIGHTED (flows removed), so taking cash out never looks like a loss.
   // Opening capital = the reconciliation value if you've entered one, else the
   // amount that makes today's cash match the stored balance.
-  const ACC = { range: 'ALL' };
+  const ACC = { range: '3M' };
   async function accountSeries() {
     const txAll = (typeof loadTransactions === 'function') ? loadTransactions() : [];
     const entries = (typeof loadPortfolio === 'function') ? (loadPortfolio() || []) : [];
@@ -326,6 +326,32 @@
     await Promise.all(tickers.map(t => fetchDaily(t)));
     const fx = {}; for (const t of tickers) fx[t] = (typeof _botUsdFactor === 'function') ? _botUsdFactor(t) : 1;
     const start = tx[0].d, end = new Date().toISOString().slice(0, 10);
+    // z111: RECONCILE holdings to the portfolio as it stands. The ledger can miss
+    // a share change (a position switched to Tracking / Watching, or deleted
+    // without a sell row), and replaying it then keeps "holding" shares you no
+    // longer have - which is how this chart sat ~$30k above the portfolio value.
+    // For each ticker whose replayed quantity today doesn't match the active
+    // positions, the share path comes from the active positions themselves
+    // (each counted from its added date) instead of the ledger.
+    const sharesOf = e => (e.position === 'Short' ? -1 : 1) * (+e.qty || 0);
+    const activeQty = {}, activeEntries = {};
+    for (const e of entries) {
+      if (!ACTIVE.includes(e.position) || (e.instrument && e.instrument !== 'shares' && e.instrument !== 'stock')) continue;
+      const T = String(e.ticker || '').toUpperCase();
+      activeQty[T] = (activeQty[T] || 0) + sharesOf(e);
+      (activeEntries[T] = activeEntries[T] || []).push({ d: String(e.addedAt || e.createdAt || start).slice(0, 10), q: sharesOf(e) });
+    }
+    const replayFinal = {};
+    for (const t of tx) {
+      const T = String(t.ticker || '').toUpperCase();
+      if (t.type === 'buy') replayFinal[T] = (replayFinal[T] || 0) + (+t.qty || 0);
+      else if (t.type === 'sell' || t.type === 'short') replayFinal[T] = (replayFinal[T] || 0) - (+t.qty || 0);
+    }
+    const fromEntries = new Set();
+    for (const T of new Set([...Object.keys(replayFinal), ...Object.keys(activeQty)])) {
+      if (Math.abs((replayFinal[T] || 0) - (activeQty[T] || 0)) > 1e-6) fromEntries.add(T);
+    }
+    for (const T of Object.keys(activeQty)) if (!tickers.includes(T)) { tickers.push(T); await fetchDaily(T); fx[T] = (typeof _botUsdFactor === 'function') ? _botUsdFactor(T) : 1; }
     const ptr = {}, lastC = {}, qty = {};
     let cash = opening, k = 0;
     const points = [], flows = [];
@@ -341,6 +367,7 @@
         else if (t.type === 'deposit' || t.type === 'withdrawal') { flowToday += +t.amount || 0; flows.push({ t: ds, amount: +t.amount || 0 }); }
       }
       if (dow === 0 || dow === 6) continue;
+      for (const T of fromEntries) qty[T] = (activeEntries[T] || []).reduce((a, e) => a + (e.d <= ds ? e.q : 0), 0);
       let mv = 0;
       for (const T of Object.keys(qty)) {
         if (!qty[T]) continue;
@@ -353,7 +380,9 @@
     // time-weighted return: chain daily returns with that day's external flow removed
     let twr = 1;
     for (let i = 1; i < points.length; i++) { const prev = points[i - 1].v; if (prev > 0) twr *= (points[i].v - points[i].flow) / prev; }
-    return { points, flows, opening, openingSource: op ? 'reconciliation' : 'implied by stored cash', twrPct: (twr - 1) * 100, virtual: tx.filter(t => t._virtual).length };
+    return { points, flows, opening, openingSource: op ? 'reconciliation' : 'implied by stored cash', twrPct: (twr - 1) * 100,
+             virtual: tx.filter(t => t._virtual).length, reconciled: [...fromEntries].sort(),
+             cashGap: op ? +(stored - cash).toFixed(2) : 0 };
   }
   async function mountAccountChart() {
     const host = document.getElementById('acct-value-mount'); if (!host) return;
@@ -362,7 +391,7 @@
     if (!document.getElementById('acct-value-mount')) return;
     if (!s || s.points.length < 2) { host.innerHTML = '<div style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);padding:16px 0">No ledger activity yet.</div>'; return; }
     const draw = () => {
-      const r = { '1M': 31, '3M': 92, '1Y': 366, 'ALL': 'all' }[ACC.range];
+      const r = { '1W': 7, '1M': 31, '3M': 92, '6M': 183, '1Y': 366, '3Y': 1096, 'ALL': 'all' }[ACC.range];
       const pts = windowed(s.points, r);
       const last = pts[pts.length - 1], first = pts[0];
       const flowsIn = s.flows.filter(f => f.t >= first.t);
@@ -372,11 +401,11 @@
           <span style="font-size:20px;color:var(--ink)">$${last.v.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
           <span style="font-size:11px;color:${pnl >= 0 ? 'var(--pos)' : 'var(--neg)'}">${pnl >= 0 ? '+' : '−'}$${Math.abs(pnl).toLocaleString(undefined, { maximumFractionDigits: 0 })} market P/L ${ACC.range === 'ALL' ? 'since start' : ACC.range}</span>
           ${ACC.range === 'ALL' ? `<span style="font-size:11px;color:var(--ink-dim)">time-weighted ${s.twrPct >= 0 ? '+' : ''}${s.twrPct.toFixed(2)}%</span>` : ''}
-          <span style="margin-left:auto" class="seg-control">${['1M', '3M', '1Y', 'ALL'].map(k => `<button class="seg-btn ${ACC.range === k ? 'active' : ''}" data-acr="${k}" style="font-size:10px">${k}</button>`).join('')}</span></div>
+          <span style="margin-left:auto" class="seg-control">${['1W', '1M', '3M', '6M', '1Y', '3Y', 'ALL'].map(k => `<button class="seg-btn ${ACC.range === k ? 'active' : ''}" data-acr="${k}" style="font-size:10px">${k}</button>`).join('')}</span></div>
         <div class="acct-chart" style="margin-top:6px"></div>
         <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:4px;line-height:1.5">
           Cash + holdings at each day's close, rebuilt from the transaction ledger · ▲ deposit ▼ withdrawal (${flowsIn.length} in range, net ${netFlow >= 0 ? '+' : '−'}$${Math.abs(netFlow).toLocaleString(undefined, { maximumFractionDigits: 0 })}) — flows are excluded from P/L and return ·
-          opening capital $${Math.round(s.opening).toLocaleString()} (${esc(s.openingSource)})${s.virtual ? ` · ${s.virtual} position(s) older than the ledger enter at their added date and cost` : ''}</div>`;
+          opening capital $${Math.round(s.opening).toLocaleString()} (${esc(s.openingSource)})${s.virtual ? ` · ${s.virtual} position(s) older than the ledger enter at their added date and cost` : ''}${s.reconciled && s.reconciled.length ? ` · share path taken from current positions for ${esc(s.reconciled.join(', '))} (the ledger's share count didn't match)` : ''}${s.cashGap && Math.abs(s.cashGap) >= 1 ? ` · <span style="color:var(--red)">stored cash differs from the ledger by $${Math.abs(s.cashGap).toLocaleString()} — see Transactions → Cash reconciliation</span>` : ''}</div>`;
       drawStockChart(host.querySelector('.acct-chart'), pts, { height: 170, label: 'Account value',
         markers: flowsIn.map(f => ({ t: f.t, kind: f.amount >= 0 ? 'in' : 'out', label: `${f.t}: ${f.amount >= 0 ? 'deposit' : 'withdrawal'} $${Math.abs(f.amount).toLocaleString()}` })) });
       host.querySelectorAll('[data-acr]').forEach(b => b.onclick = () => { ACC.range = b.dataset.acr; draw(); });
