@@ -91,6 +91,43 @@
       `</tbody></table></div><div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:6px">Value at target = Black-Scholes with each contract's IV and its time left after your date; cost = current ask. Odds are market-implied (lognormal), not a forecast. Per share — x100 per contract. Paper research, not advice.</div>`;
   }
 
+  // ---- Options read (z114): TRAPP2-OPTIONS summary.json, one card per ticker ----
+  let SUMM = null, summAt = 0;
+  async function loadSummary() {
+    if (SUMM && Date.now() - summAt < 10 * 60 * 1000) return SUMM;
+    try {
+      const base = (typeof GH_RAW !== 'undefined' ? GH_RAW : 'https://raw.githubusercontent.com/TheMostLocal') + '/TRAPP2-OPTIONS/main/data/options/summary.json';
+      const r = await fetch(base, { cache: 'no-cache' }); if (r.ok) { SUMM = await r.json(); summAt = Date.now(); }
+    } catch (e) {}
+    return SUMM;
+  }
+  function readHtml(tk, s) {
+    if (!s) return '';
+    const pc = v => v == null ? '—' : (v * 100).toFixed(1) + '%';
+    const pts = v => v == null ? '—' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)} pts`;
+    const kv = (k, v, sub, col) => `<div><div style="font-size:9px;letter-spacing:.1em;color:var(--ink-faint)">${k}</div><div style="font-size:14px;color:${col || 'var(--ink)'}">${v}</div>${sub ? `<div style="font-size:9px;color:var(--ink-faint)">${sub}</div>` : ''}</div>`;
+    const rk = s.ivRank || {};
+    const rank = rk.rank != null ? `${rk.rank.toFixed(0)}` : '—';
+    const rankSub = rk.rank != null ? `percentile ${rk.percentile}% · ${rk.n} days` : `building history: ${rk.n || 0}/20 days`;
+    const skCol = s.skew25 == null ? null : s.skew25 > 0.03 ? 'var(--neg)' : s.skew25 < 0 ? 'var(--pos)' : null;
+    const tsCol = s.termSlope == null ? null : s.termSlope < -0.01 ? 'var(--neg)' : null;
+    const ua = (s.unusual || []).slice(0, 4).map(u => `<div>${esc(u.expiry)} ${u.strike} ${u.type === 'call' ? 'C' : 'P'} · vol ${u.volume.toLocaleString()} vs OI ${u.openInterest.toLocaleString()} (${u.volOi}×)</div>`).join('');
+    return `<div class="company-card" id="opt-read" style="margin:0 0 12px;font-family:var(--mono)">
+      <div style="font-size:10px;letter-spacing:.12em;color:var(--ink-dim);margin-bottom:8px">OPTIONS READ · ${esc(tk)} <span style="color:var(--ink-faint)">· ${esc(String(s.asOf || '').slice(0, 16).replace('T', ' '))}</span></div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:10px 14px">
+        ${kv('ATM IV (30d)', pc(s.atmIv30), s.dte30 ? `nearest ${s.dte30}-day expiry` : '')}
+        ${kv('IV RANK', rank, rankSub)}
+        ${kv('EXPECTED MOVE', s.expectedMove30Pct != null ? '±' + s.expectedMove30Pct + '%' : '—', 'to that expiry (1 sd)')}
+        ${kv('25Δ SKEW', pts(s.skew25), s.skew25 > 0 ? 'puts richer — downside demand' : s.skew25 < 0 ? 'calls richer' : '', skCol)}
+        ${kv('TERM SLOPE', pts(s.termSlope), s.termSlope == null ? '' : s.termSlope < -0.01 ? 'inverted — near-term stress' : s.termSlope > 0.01 ? 'normal (longer dated higher)' : 'flat', tsCol)}
+        ${kv('PUT/CALL OI', s.putCallOI != null ? s.putCallOI.toFixed(2) : '—', '')}
+        ${kv('MAX PAIN', s.maxPain != null ? '$' + s.maxPain : '—', 'nearest expiry')}
+        ${kv('QUOTE QUALITY', s.quoteQualityPct != null ? s.quoteQualityPct + '%' : '—', 'clean two-sided quotes')}
+      </div>
+      ${ua ? `<div style="margin-top:10px;font-size:9px;letter-spacing:.1em;color:var(--ink-dim)">UNUSUAL ACTIVITY · volume ≥ 500 and ≥ 2× open interest</div><div style="font-size:10px;color:var(--ink);line-height:1.6">${ua}</div>` : ''}
+    </div>`;
+  }
+
   async function requestCoverage(tk, btn) {
     const token = localStorage.getItem('valuatio.github.token');
     const msg = $('#opt-req-msg');
@@ -121,6 +158,9 @@
         const data = (typeof loadOptionsForTicker === 'function') ? await loadOptionsForTicker(tk) : null;
         if (data && data.expiries && data.expiries.length) {
           if (!$('#opt-finder', body)) body.insertAdjacentHTML('afterbegin', finderHtml(tk, data));
+          const sm = await loadSummary();
+          const srow = sm && sm.tickers && sm.tickers[tk];
+          if (srow && !$('#opt-read', body)) body.insertAdjacentHTML('afterbegin', readHtml(tk, srow));
           const go = () => renderFinder(tk, data);
           $('#opt-f-go').onclick = go; $('#opt-f-px').onkeydown = e => { if (e.key === 'Enter') go(); };
           go();
