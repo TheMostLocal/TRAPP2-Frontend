@@ -26812,7 +26812,10 @@ function renderStockBookPortfolio(content) {
   // z97: account value (cash + positions) from the ledger + real closes (charts.js)
   const acctHtml = (['all', 'trading'].includes(state.portfolioSubTab || 'all') && typeof window !== 'undefined' && window.VChart && window.VChart.mountAccountChart)
     ? `<section class="portfolio-chart-section"><div class="portfolio-chart-head"><div class="portfolio-chart-title">Account Value · cash + positions</div></div><div id="acct-value-mount"></div></section>` : '';
-  content.innerHTML = summary + acctHtml + chartHtml + subTabs + awPanelHtml + toolbar + `
+  // z111: ONE portfolio chart. The Account Value chart (cash + holdings from the
+  // ledger, flows marked) replaces the older Position Performance chart, which
+  // stays only as the fallback when charts.js isn't loaded.
+  content.innerHTML = summary + acctHtml + (acctHtml ? '' : chartHtml) + subTabs + awPanelHtml + toolbar + `
     <div class="sb-table-wrap">
       <table class="sb-table portfolio-table">
         <thead>
@@ -26848,7 +26851,7 @@ function renderStockBookPortfolio(content) {
 
   // Wire range buttons + render the chart
   if (acctHtml) { try { window.VChart.mountAccountChart(); } catch (e) { console.warn('[acct-chart]', e); } }
-  if (chartHtml) {
+  if (chartHtml && !acctHtml) {
     document.querySelectorAll('.portfolio-range-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         document.querySelectorAll('.portfolio-range-btn').forEach(b => b.classList.remove('active'));
