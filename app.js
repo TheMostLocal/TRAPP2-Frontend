@@ -54648,8 +54648,18 @@ function vCacheBust(url, bucketMs) {
   return url + (url.indexOf('?') >= 0 ? '&' : '?') + '_v=' + b;
 }
 async function vFetchLive(url, opts) {
+  // z115: NO custom request headers. 'Cache-Control' / 'Pragma' are not
+  // CORS-safelisted, so the browser sent a preflight OPTIONS first - and
+  // raw.githubusercontent.com answers OPTIONS with 403. Every tape request
+  // failed before it was sent, which is why the header always said NO TAPE even
+  // with fresh data on GitHub. Freshness comes from cache:'no-store' (a fetch
+  // option, not a header) plus the per-minute ?_v= cache-buster.
   const o = Object.assign({ cache: 'no-store', redirect: 'follow' }, opts || {});
-  o.headers = Object.assign({ 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' }, o.headers || {});
+  if (o.headers) {
+    const h = Object.assign({}, o.headers);
+    for (const k of Object.keys(h)) if (/^(cache-control|pragma)$/i.test(k)) delete h[k];
+    o.headers = h;
+  }
   const r = await fetch(vCacheBust(url, o._bucketMs), o);
   if (!r.ok) throw new Error(`HTTP ${r.status} ${url}`);
   return r;
