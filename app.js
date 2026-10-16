@@ -44274,6 +44274,9 @@ async function supabaseSyncAllTrades() {
 const _TRADE_SYNC_FIELDS = ['status', 'exitDate', 'exitPrice', 'exitReason', 'pnl', 'realizedPL', 'won', 'returnPct',
   'trims', 'realizedTrim', 'partialSells', 'shares', 'notional', 'sharesAtExit', 'closedBy', 'holdDays', 'updatedAt'];
 function _tradeWinner(local, remote) {
+  // z116: 'void' = a runner trade from a run whose state was never saved; final
+  if (remote.status === 'void' && local.status !== 'void') return 'remote';
+  if (local.status === 'void') return 'local';
   const lc = local.status === 'closed', rc = remote.status === 'closed';
   if (rc && !lc) return 'remote';
   if (lc && !rc) return 'local';
@@ -44308,6 +44311,10 @@ async function supabaseLoadTrades() {
       const t = row && row.trade;
       if (!t || !t.id) continue;
       const loc = byId.get(t.id);
+      if (t.status === 'void') {                       // z116: drop void trades from this device
+        if (loc) { bot.bets = bot.bets.filter(b => b.id !== t.id); byId.delete(t.id); updated++; }
+        continue;
+      }
       if (!loc) { bot.bets.push(t); byId.set(t.id, t); added++; continue; }
       if (_tradeWinner(loc, t) === 'remote') {
         for (const k of _TRADE_SYNC_FIELDS) if (t[k] !== undefined) loc[k] = t[k];
