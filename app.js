@@ -11431,7 +11431,7 @@ function switchTab(tabName) {
       tabName === 'risk' ? 'Risk Calculator · Ray Dalio Holy Grail · diversification math' :
       tabName === 'bonds' ? 'Bonds & Treasuries · yield curve · interest rates · public debt' :
       tabName === 'fed' ? 'Federal Reserve · rate-cut/hike pricing · FOMC schedule · decision effectiveness' :
-      tabName === 'bets' ? 'Bot Bets · $1,000 paper portfolio · conviction signals · 6-month challenge' :
+      tabName === 'bets' ? 'Bot Bets · $100,000 paper portfolio · conviction signals · 6-month challenge' :
       tabName === 'research' ? 'Research · cross-stockbook ranking · screen by any metric · letter grades' :
       tabName === 'review' ? 'Review · human-in-the-loop · confirm guesses · retrain the model' :
       tabName === 'news'  ? 'News Feed · sorted by market cap · search, "My News" preset, lead+closer summarization' :
@@ -49074,13 +49074,20 @@ function _botUsdFactor(tic) {
   } catch {}
   return 1;
 }
-// ---- one ledger for app + runner (z100) ----
+// ---- one ledger for app + runner (z100, z118) ----
 // Trims: the runner records trims[] (realizedTrim folded into pnl at close);
-// the app's older trims are partialSells[] (kept out of pnl). Prefer the
-// runner's record when both exist (the runner applied the app's trim).
+// the app's trims are partialSells[] (kept out of pnl). z118: count BOTH, once.
+// A partial sell the runner applied from an app trim action is mirrored in
+// trims[] (origin app, same date, same realized) and is skipped; one it never
+// saw (an adopted trade's device-side history) still counts. z100 preferred
+// trims[] wholesale, which would drop those the first time the runner trimmed.
+// Same rule as TRAPP2-BOT trade_sync.trim_events.
 function _betTrimEvents(b) {
-  const tr = Array.isArray(b.trims) && b.trims.length ? b.trims : (b.partialSells || []);
-  return tr.filter(x => x && x.date).map(x => ({ date: String(x.date).slice(0, 10), realized: +x.realized || 0 }));
+  const tr = (Array.isArray(b.trims) ? b.trims : []).filter(x => x && x.date);
+  const mirrored = p => tr.some(t => t.origin === 'app' && String(t.date).slice(0, 10) === String(p.date).slice(0, 10)
+    && Math.abs((+t.realized || 0) - (+p.realized || 0)) <= 0.05);
+  const ps = (Array.isArray(b.partialSells) ? b.partialSells : []).filter(x => x && x.date && !mirrored(x));
+  return tr.concat(ps).map(x => ({ date: String(x.date).slice(0, 10), realized: +x.realized || 0 }));
 }
 // Realized at the exit itself (trims excluded - they're counted on their dates).
 function _betExitRealized(b) {
