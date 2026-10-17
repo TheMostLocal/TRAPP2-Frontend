@@ -43660,7 +43660,9 @@ function botRetrain() {
     // wrong ("right trade, wrong regime" teaches the wrong lesson). Regime-based
     // signals learn only from bets whose regime call was dialed in AND correct.
     const _rc = bet.regimeContext || null;
-    const _regimeUntrusted = (_rc && _rc.dialedIn === false) || bet.regimeCallCorrect === false;
+    // z117: no regimeContext = trust unknown = untrusted (the same default as a
+    // missing certainty file). App bets before z117 never recorded one.
+    const _regimeUntrusted = !_rc || _rc.dialedIn !== true || bet.regimeCallCorrect === false;
     for (const [key, signed] of Object.entries(bet.components)) {
       if (!isFinite(signed) || signed === 0) continue;
       if (_regimeUntrusted && (key === 'regimeGrade' || key === 'regime' || key === 'quad')) continue;
@@ -44017,7 +44019,16 @@ function _mergeBotTrainingData(data, sourceLabel) {
     bot.transactions = bot.transactions || [];
     const have = new Set(bot.transactions.map(t => t && t.id));
     for (const t of data.transactions) {
-      if (!t || !t.id || have.has(t.id) || !['deposit', 'withdrawal', 'adjustment'].includes(t.type)) continue;
+      if (!t || !t.id || !['deposit', 'withdrawal', 'adjustment'].includes(t.type)) continue;
+      // z117: the runner owns the entries it wrote (e.g. the opening adjustment it
+      // re-derived as of its stored date) - take its current version by id, never
+      // keep a stale copy and never add a second one.
+      if (have.has(t.id)) {
+        const mine = bot.transactions.find(x => x && x.id === t.id);
+        if (mine && (t.origin || 'runner') === 'runner' && (mine.origin || 'runner') === 'runner' &&
+            (+mine.amount !== +t.amount || mine.ts !== t.ts)) Object.assign(mine, t, { origin: 'runner' });
+        continue;
+      }
       if (t.origin === 'app' && bot.transactions.some(x => x && x.type === t.type && Math.abs((+x.amount || 0) - (+t.amount || 0)) < 0.01 && String(x.ts || '').slice(0, 10) === String(t.ts || '').slice(0, 10))) continue;   // our own deposit coming back
       bot.transactions.push({ ...t, origin: t.origin || 'runner' });
       have.add(t.id);
@@ -45778,6 +45789,26 @@ const BOT_CONVICTION_THRESHOLD = 0.42;  // below this absolute conviction → no
 // deterministically from entry/exit/shares for any closed bet missing it — so
 // historical gains (e.g. the ~$10k that vanished) come back. Runs once per load,
 // only touching closed bets that are recoverable; idempotent.
+// z117: pnl that contradicts the trade's own prices. Both ledgers sum pnl; on 21
+// trades closed 2026-10-04 it came from a stale mark (booked -$845.48) while
+// realizedPL = shares x (exit - entry) to the cent (+$4,852.46; the exits are the
+// real Oct 2 closes). Same rule as TRAPP2-BOT trade_sync.repair_pnl: repaired only
+// when realizedPL and the prices agree; the original is kept as pnlRecorded.
+function _botArithExitPnl(bet) {
+  if (!bet || bet.status !== 'closed' || (bet.instrument || 'shares') !== 'shares') return null;
+  const e = +bet.entryPrice, x = +bet.exitPrice;
+  const sh = (+bet.sharesAtExit > 0) ? +bet.sharesAtExit : +bet.shares;
+  if (!(e > 0) || !(x > 0) || !(sh > 0)) return null;
+  let v = (bet.direction === 'short' ? -1 : 1) * (x - e) * sh * (+bet.leverage || 1) - (+bet.fees || 0);
+  if (Array.isArray(bet.trims) && bet.trims.length && bet.realizedTrim != null) v += (+bet.realizedTrim || 0);
+  return v;
+}
+function _botPnlContradictsPrices(bet) {
+  const a = _botArithExitPnl(bet);
+  if (a == null || bet.realizedPL == null || !isFinite(bet.realizedPL)) return false;
+  if (bet.direction === 'short' && bet.dividendCarry) return false;
+  return Math.abs(+bet.realizedPL - a) <= 0.05 && Math.abs((+bet.pnl || 0) - (+bet.realizedPL)) > 0.05;
+}
 function _botRepairClosedPnl(state) {
   try {
     if (!state || !Array.isArray(state.bets)) return state;
@@ -45785,6 +45816,15 @@ function _botRepairClosedPnl(state) {
     for (const bet of state.bets) {
       if (bet.status !== 'closed') continue;
       const hasRealized = bet.realizedPL != null && isFinite(bet.realizedPL) && bet.realizedPL !== 0;
+      if (hasRealized && _botPnlContradictsPrices(bet)) {          // z117 (see _botArithExitPnl)
+        if (bet.pnlRecorded == null) bet.pnlRecorded = bet.pnl;
+        bet.pnl = +(+bet.realizedPL).toFixed(2);
+        bet.won = bet.pnl > 0;
+        const _cap = ((+bet.sharesAtExit > 0) ? +bet.sharesAtExit : +bet.shares || 0) * (+bet.entryPrice || 0);
+        if (_cap > 0) bet.returnPct = +((bet.pnl / _cap) * 100).toFixed(2);
+        repaired++;
+        continue;
+      }
       if (hasRealized) continue;                 // already good
       const entry = bet.entryPrice;
       const exit = (bet.exitPrice != null && isFinite(bet.exitPrice)) ? bet.exitPrice : null;
@@ -45933,7 +45973,7 @@ function saveBotState(b) {
 // ============================================================
 let _botRegime = null;
 let _botBestAvailableConfidence = null;   // best conviction seen in the latest scan (for opportunity-cost exits)
-function botAssessRegime() {
+function _botAssessRegimeRaw() {
   // 1) The nightly pipeline's regime_current.json (loaded into state.marketRegime
   //    by loadRegimeSnapshot) — it sees macro/liquidity/breadth data the browser
   //    doesn't. Trusted when fresh (<36h) and confident (≥0.4).
@@ -46009,6 +46049,46 @@ function _regimeProfile(mode, evidence) {
   };
   return profiles[mode] || profiles['choppy'];
 }
+// ============================================================
+// z117 — §1b in the app's manual Run. The runner has been regime-agnostic since
+// z93 whenever TRAPP2-1's regime_certainty.json is not DIALED IN; the in-browser
+// bot still tilted weights (x1.3 ...), used regimeGrade and regime entry bars at
+// 18% certainty (2026-10-14 app trades) and stamped no regimeContext, so the
+// learner could credit regime signals from untrusted calls. Now certainty is
+// loaded before every Run; not dialed in (or unreadable) = no regime weight
+// tilts, no regime entry bars, no regimeGrade, no regime-based leverage, and
+// every new bet carries regimeContext like the runner's.
+// ============================================================
+let _botRegimeCert = null;
+async function botPrimeRegimeCertainty() {
+  try {
+    const RC = (typeof window !== 'undefined') ? window.RegimeCertainty : null;
+    if (RC && typeof RC.load === 'function') {
+      const rc = await RC.load();
+      if (rc && typeof rc === 'object') _botRegimeCert = rc;
+    }
+  } catch {}
+  return _botRegimeCert;
+}
+function botRegimeDialedIn() { return !!(_botRegimeCert && _botRegimeCert.dialedIn === true); }
+function _botRegimeGate(profile) {
+  if (!profile) return profile;
+  if (botRegimeDialedIn()) return { ...profile, agnostic: false };
+  const c = (_botRegimeCert && Number.isFinite(_botRegimeCert.certainty)) ? `${Math.round(_botRegimeCert.certainty * 100)}%` : 'unavailable';
+  return { ...profile, weightMods: {}, thresholdMod: 0, shortBar: 0, longBar: 0, leverageOK: false, agnostic: true,
+           evidence: `${profile.evidence} · REGIME-AGNOSTIC (certainty ${c} · not dialed in)` };
+}
+function botAssessRegime() {
+  _botRegime = _botRegimeGate(_botAssessRegimeRaw());
+  return _botRegime;
+}
+function botRegimeContext() {
+  const rc = _botRegimeCert || {};
+  return { regime: rc.regime ?? null, quad: rc.quadNowcast ?? null,
+           certainty: Number.isFinite(rc.certainty) ? rc.certainty : null, dialedIn: rc.dialedIn === true,
+           botMode: _botRegime ? _botRegime.mode : null, origin: 'app' };
+}
+if (typeof window !== 'undefined') setTimeout(() => { try { botPrimeRegimeCertainty(); } catch {} }, 3000);
 if (typeof window !== 'undefined') window.botAssessRegime = botAssessRegime;
 
 // ============================================================
@@ -46784,7 +46864,9 @@ async function botScoreTicker(ticker) {
   try {
     if (typeof computeRegimeGrade === 'function') {
       const rg = computeRegimeGrade(t);
-      if (rg && isFinite(rg.signed)) {
+      if (rg && isFinite(rg.signed) && _botRegime && _botRegime.agnostic) {
+        decisionPath.push('regimeGrade: skipped (regime not dialed in)');   // z117 §1b
+      } else if (rg && isFinite(rg.signed)) {
         add('regimeGrade', rg.signed, 0.14, `Regime grade ${rg.label} (${rg.note})`);
       }
     }
@@ -47237,6 +47319,8 @@ async function _botDailyRunInner(bot, today, rows, force = false) {
   // scan's zero-network guarantee depends on it.
   try { if (typeof loadBackendResearch === 'function') await loadBackendResearch(); } catch {}
   // Root of the decision tree: classify today's market regime ONCE per scan.
+  // z117: certainty first - not dialed in (or unreadable) = regime-agnostic (§1b).
+  try { await botPrimeRegimeCertainty(); } catch {}
   const regime = botAssessRegime();
   console.log(`[bot] regime: ${regime.mode} — ${regime.evidence}`);
 
@@ -47660,6 +47744,7 @@ async function _botDailyRunInner(bot, today, rows, force = false) {
       components: p.components,
       decisionPath: p.decisionPath || null,
       regimeAtEntry: (typeof _botRegime !== 'undefined' && _botRegime) ? _botRegime.mode : (typeof botAssessRegime === 'function' ? botAssessRegime().mode : null),
+      regimeContext: (typeof botRegimeContext === 'function') ? botRegimeContext() : null,   // z117: like the runner's
       tradeStyle: _classifyTradeStyle({ ...p, components: p.components }),
       dalioEnv: p._dalioEnv || null,
       longTermTrend: p._longTermTrend?.classification || null,
@@ -48738,7 +48823,7 @@ function botNetCapital(bot) {
     for (const t of txns) {
       if (!t) continue;
       const ty = String(t.type || '').toLowerCase();
-      if (ty !== 'deposit' && ty !== 'withdrawal') continue;
+      if (ty !== 'deposit' && ty !== 'withdrawal' && ty !== 'adjustment') continue;   // z117: the dated opening adjustment is base, not return
       const amt = Number(t.amount);
       if (!isFinite(amt)) continue;
       flows += (ty === 'withdrawal' && amt > 0) ? -amt : amt;   // withdrawals may be stored +ve
@@ -48765,7 +48850,7 @@ function botFlowsBetween(bot, fromMs, toMs) {
   for (const t of txns) {
     if (!t) continue;
     const ty = String(t.type || '').toLowerCase();
-    if (ty !== 'deposit' && ty !== 'withdrawal') continue;
+    if (ty !== 'deposit' && ty !== 'withdrawal' && ty !== 'adjustment') continue;
     const ts = new Date(t.ts || t.date || 0).getTime();
     if (!isFinite(ts) || ts <= fromMs || ts > toMs) continue;
     const amt = Number(t.amount);
@@ -49008,7 +49093,9 @@ function botLedgerBankroll(bot) {
   const bets = (bot && bot.bets) || [];
   const closed = bets.filter(b => b.status === 'closed').reduce((s, b) => s + _betExitRealized(b), 0);
   const trims = bets.reduce((s, b) => s + _betTrimEvents(b).reduce((s2, ps) => s2 + ps.realized, 0), 0);
-  const capital = ((bot && bot.transactions) || []).filter(t => t.type === 'deposit' || t.type === 'withdrawal').reduce((s, t) => s + (+t.amount || 0), 0);
+  // z117: + 'adjustment' (the runner's dated opening reconciliation) - the same set
+  // as trade_sync.ledger_bankroll, so the app and the runner sum the same things.
+  const capital = ((bot && bot.transactions) || []).filter(t => t.type === 'deposit' || t.type === 'withdrawal' || t.type === 'adjustment').reduce((s, t) => s + (+t.amount || 0), 0);
   return +(BOT_STARTING_BANKROLL + capital + closed + trims).toFixed(2);
 }
 if (typeof window !== 'undefined') window.botLedgerBankroll = botLedgerBankroll;
