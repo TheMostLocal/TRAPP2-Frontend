@@ -35,9 +35,18 @@
      carrying this device's current version, stored by the runner as an app trade.
    * Queue times in local time; actions queued while a send is in flight are
      never dropped (the outbox is re-read before it is written back).
+
+   z119
+   * The verdict names the two settings that look right but don't grant this
+     token anything: Repository access "Public repositories" (read-only) and
+     the repo's Settings → Actions → General → Workflow permissions (that one
+     is the GITHUB_TOKEN of workflow runs). Classic tokens show their scopes
+     (X-OAuth-Scopes). The line shows the botsync version, so a stale cached
+     copy is visible at a glance.
    ========================================================================== */
 (function () {
   'use strict';
+  const VERSION = 'z119';
   const OUTBOX = 'valuatio.bot.outbox.v1', BASE = 'valuatio.bot.syncBaseline.v1', LAST = 'valuatio.bot.lastSent.v1';
   const DIAG = 'valuatio.bot.tokenDiag.v1', SENT_IDS = 'valuatio.bot.sentTradeIds.v1', BLOCK = 'valuatio.bot.authBlocked.v1';
   const OWNER = () => { try { if (typeof VALUATIO_OWNER !== 'undefined' && VALUATIO_OWNER) return String(VALUATIO_OWNER); } catch (e) {} return 'TheMostLocal'; };
@@ -260,6 +269,7 @@
       let r = await fetch('https://api.github.com/user', { headers: H });
       if (r.status === 401) d.verdict = 'rejected';
       else {
+        try { const sc = r.headers && r.headers.get ? r.headers.get('x-oauth-scopes') : null; if (sc != null) d.scopes = sc; } catch (e) {}
         try { d.login = ((await r.json()) || {}).login || null; } catch (e) { d.login = null; }
         r = await fetch(`https://api.github.com/users/${encodeURIComponent(owner)}`, { headers: H });
         try { d.ownerType = ((await r.json()) || {}).type || null; } catch (e) { d.ownerType = null; }
@@ -286,7 +296,8 @@
   function verdictText(d) {
     const o = d.owner, who = d.login ? '@' + d.login : 'this token', url = 'github.com/settings/personal-access-tokens';
     const gh = d.contentsMsg ? ` (GitHub: “${d.contentsMsg}”)` : '';
-    const repos = 'Repository access: XTRAPP, TRAPP2-PORT, TRAPP2-OPTIONS, TRAPP2-BOT · permissions: Contents Read and write (XTRAPP, TRAPP2-PORT, TRAPP2-BOT), Actions Read and write (TRAPP2-OPTIONS, TRAPP2-BOT)';
+    const repos = 'Repository access: Only select repositories → XTRAPP, TRAPP2-PORT, TRAPP2-OPTIONS, TRAPP2-BOT · Repository permissions: Contents Read and write, Actions Read and write';
+    const wf = ' (The repo\'s Settings → Actions → General → Workflow permissions is for workflow runs - it never applies to this token.)';
     switch (d.verdict) {
       case 'none': return 'No GitHub token on this device — Home 🏠 → Connections & API keys → GitHub token.';
       case 'rejected': return `GitHub rejected the token (expired or revoked). Signed in as ${o}: ${url} → Generate new token (${repos}).`;
@@ -298,10 +309,12 @@
     if (d.login && d.login.toLowerCase() !== String(o).toLowerCase() && d.ownerType === 'User')
       return d.kind === 'classic'
         ? `This is a classic token for @${d.login}, who can't write to ${o}/TRAPP2-BOT${gh}. Use a fine-grained token made while signed in as ${o}.`
-        : `This token belongs to @${d.login}; TRAPP2-BOT belongs to @${o}. A fine-grained token only reaches repositories of its Resource owner, so it can't write here${gh}. Sign in to GitHub as ${o} → ${url} → Generate new token → Resource owner ${o} → ${repos} → paste it in Home 🏠 → Connections.`;
+        : `This token belongs to @${d.login}; TRAPP2-BOT belongs to @${o}. A fine-grained token only reaches repositories of its Resource owner, so it can't write here${gh}. Sign in to GitHub as ${o} → ${url} → Generate new token → Resource owner ${o} → ${repos} → paste it in Home 🏠 → Connections.${wf}`;
     if (d.ownerType === 'Organization')
       return `TRAPP2-BOT is in the ${o} organization: the token needs Resource owner ${o}, TRAPP2-BOT with Contents: Read and write, and approval (${o} → Settings → Personal access tokens → Pending requests)${gh}.`;
-    return `${who === 'this token' ? 'This token' : `The token (${who})`} can't write TRAPP2-BOT${gh}. ${url} → this token → Repository access: add TRAPP2-BOT → Contents: Read and write, Actions: Read and write → Update.`;
+    if (d.kind === 'classic')
+      return `Classic token (${who}) can't write TRAPP2-BOT${gh}${d.scopes != null ? ` · its scopes: ${d.scopes || 'none'}` : ''}. A classic token needs the "repo" scope, made while signed in as ${o} (or by a collaborator with write access).${wf}`;
+    return `${who === 'this token' ? 'This token' : `The token (${who})`} can't write TRAPP2-BOT${gh}. ${url} → this token → ${repos} → Update. "Public repositories" access is read-only whatever the permissions say.${wf}`;
   }
   function discardAll() {
     const n = j(OUTBOX, []).length;
@@ -331,7 +344,7 @@
       ? `<div style="flex-basis:100%;color:var(--ink-dim);line-height:1.5">⚠ ${S.stranded.n} trade(s) on this device (${S.stranded.open} open, realized ${money(S.stranded.realized)}) aren't in the runner's book — opened here before the outbox existed or missed by it. Their trims/closes are held${S.held ? ` (${S.held})` : ''} until they're adopted. ${btn('Send to runner', 'BotSync.adoptStranded()')}</div>` : '';
     const list = S.showQueue && box.length ? `<div style="flex-basis:100%;max-height:180px;overflow:auto;border-top:1px solid var(--rule);padding-top:6px">${box.map(a => `<div style="color:var(--ink-dim)">${esc(fmtT(a.ts))} · ${esc(a.type.toUpperCase())} ${esc(a.trade ? a.trade.ticker + ' ' + (a.trade.shares || '') + (a.type === 'open' ? ' @ ' + (a.trade.entryPrice || '') : ` · ${a.trade.status || ''}`) : a.tradeId ? (a.tradeId + (a.shares ? ' · ' + a.shares + ' sh' : '') + (a.price ? ' @ ' + a.price : '')) : (a.amount != null ? '$' + a.amount : ''))}</div>`).join('')}</div>` : '';
     el.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;font-family:var(--mono);font-size:10.5px;padding:7px 12px;border:1px solid var(--rule);border-left:3px solid ${col};border-radius:4px;margin:8px 0;background:var(--bg-elev)">
-      <span style="color:${col};font-weight:700">APP ↔ RUNNER</span><span style="color:var(--ink-dim)">${esc(state)}</span>
+      <span style="color:${col};font-weight:700">APP ↔ RUNNER</span><span style="color:var(--ink-faint)">${VERSION}</span><span style="color:var(--ink-dim)">${esc(state)}</span>
       <span style="color:var(--ink-faint)">· runner trades on schedule; app trades only when you press Run</span>
       ${(box.length || bad) ? `<span style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">
         ${box.length ? btn(`${S.showQueue ? 'Hide' : 'View'} queue`, 'BotSync.toggleQueue()') : ''}
