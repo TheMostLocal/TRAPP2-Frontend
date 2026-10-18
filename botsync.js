@@ -46,7 +46,20 @@
    ========================================================================== */
 (function () {
   'use strict';
-  const VERSION = 'z119';
+  const VERSION = 'z122';
+  // z122: one-book trading (botmirror.js) - the bot is autonomous, so this device queues and
+  // sends NOTHING; leftovers from before are kept aside for audit, and the line is hidden.
+  const ONE_BOOK = () => { try { return localStorage.getItem('valuatio.bot.appTrading') !== '1'; } catch (e) { return true; } };
+  function retireOutbox() {
+    try {
+      const box = JSON.parse(localStorage.getItem('valuatio.bot.outbox.v1') || '[]');
+      if (Array.isArray(box) && box.length) {
+        const old = JSON.parse(localStorage.getItem('valuatio.bot.outbox.retired.v1') || '[]');
+        localStorage.setItem('valuatio.bot.outbox.retired.v1', JSON.stringify(old.concat(box).slice(-500)));
+      }
+      localStorage.removeItem('valuatio.bot.outbox.v1');
+    } catch (e) {}
+  }
   const OUTBOX = 'valuatio.bot.outbox.v1', BASE = 'valuatio.bot.syncBaseline.v1', LAST = 'valuatio.bot.lastSent.v1';
   const DIAG = 'valuatio.bot.tokenDiag.v1', SENT_IDS = 'valuatio.bot.sentTradeIds.v1', BLOCK = 'valuatio.bot.authBlocked.v1';
   const OWNER = () => { try { if (typeof VALUATIO_OWNER !== 'undefined' && VALUATIO_OWNER) return String(VALUATIO_OWNER); } catch (e) {} return 'TheMostLocal'; };
@@ -130,7 +143,7 @@
       try {
         const prev = j(BASE, null);
         if (!prev) { put(BASE, snap(bot)); return r; }                 // first sight: baseline only
-        if (merging) { put(BASE, snap(bot)); return r; }
+        if (merging || ONE_BOOK()) { put(BASE, snap(bot)); return r; }   // z122: nothing is queued in one-book mode
         const acts = diff(prev, bot);
         put(BASE, snap(bot));
         if (acts.length) { put(OUTBOX, j(OUTBOX, []).concat(acts)); schedule(); }
@@ -208,6 +221,7 @@
   let timer = null;
   function schedule(ms) { clearTimeout(timer); timer = setTimeout(flush, ms == null ? 3000 : ms); badge(); }
   async function flush(manual) {
+    if (ONE_BOOK()) { retireOutbox(); badge(); return; }          // z122: the bot is autonomous - nothing is sent
     const box = j(OUTBOX, []);
     if (!box.length || S.sending) { badge(); return; }
     if (!manual && S.authBlocked && S.authBlocked.token === tokenTag()) { badge(); return; }
@@ -326,6 +340,7 @@
   function badge() {
     const body = document.getElementById('bets-body'); if (!body) return;
     let el = document.getElementById('botsync-badge');
+    if (ONE_BOOK()) { if (el) el.remove(); return; }            // z122: no APP ↔ RUNNER line - nothing to send
     if (!el) { el = document.createElement('div'); el.id = 'botsync-badge'; body.insertBefore(el, body.firstChild); }
     const box = j(OUTBOX, []), last = j(LAST, null), dg = j(DIAG, null);
     const blocked = S.authBlocked && S.authBlocked.token === tokenTag();
@@ -354,7 +369,7 @@
   }
 
   if (!hook()) document.addEventListener('DOMContentLoaded', hook);
-  setTimeout(() => { if (j(OUTBOX, []).length) schedule(2000); refreshStranded(); badge(); }, 6000);
+  setTimeout(() => { if (ONE_BOOK()) { retireOutbox(); badge(); return; } if (j(OUTBOX, []).length) schedule(2000); refreshStranded(); badge(); }, 6000);
   setInterval(badge, 30000);
   document.addEventListener('click', e => { if (e.target.closest && e.target.closest('.tab-btn[data-tab="bets"]')) setTimeout(() => { refreshStranded(); badge(); }, 400); }, true);
   window.BotSync = { flush, diff, snap, checkAccess: diagnose, diagnose, discardAll, adoptStranded, refreshStranded,
