@@ -11,8 +11,15 @@
        contributing on its removal date (its past stays baked in)
      * 1D = today's intraday tape (15-min snapshots in data/intraday/) vs each
        member's previous close
-   Range bar: 1D 1W 1M 3M YTD 1Y ALL; daily / weekly / monthly points for 3M+.
+   Range bar: 1D 1W 1M 3M YTD 1Y ALL. Interval points (z122): 1D = the day's
+   15-min tape only; 1W = daily or weekly; 1M and longer = daily, weekly or
+   monthly (a weekly / monthly point is that period's last close). The chosen
+   interval is remembered and falls back to the coarsest one a range offers.
    Scrub (mouse or finger) reads out the date/time, index price and change.
+
+   Account value (z122) uses the same chart, ranges, intervals and scrub header
+   as the index — with deposits / withdrawals taken out: the % is time-weighted
+   and the P/L is market P/L, both from the range's first point to the scrubbed one.
 
    The same drawing + data helpers are reused for the bot equity and portfolio
    value charts (WIP).
@@ -132,7 +139,9 @@
       for (const m of ms) { const pc = prevClose[m.ticker], px = last[m.ticker]; if (pc && px) { sum += m.dir * (px / pc - 1); n++; } }
       if (n) series.push({ t, v: +(L0 * (1 + sum / n)).toFixed(4) });
     }
-    return series.length ? { points: [{ t: tapeDate + 'T13:30:00Z', v: L0 }, ...series], date: tapeDate, base: L0 } : null;
+    if (!series.length) return null;
+    const t0 = new Date(Date.parse(series[0].t) - 60000).toISOString();   // the previous close, just before the first tick
+    return { points: [{ t: t0, v: L0, _base: true }, ...series], date: tapeDate, base: L0 };
   }
 
   // ---------------- windows & resampling ----------------
@@ -148,6 +157,24 @@
     const s = Math.max(0, i - 1);          // include the close before the window as its base
     return points.slice(s);
   }
+  // z122: which interval points each range offers, and the effective one for a preference
+  const IVALS = { '1D': ['D'], '1W': ['D', 'W'], '1M': ['D', 'W', 'M'] };   // 3M, YTD, 1Y, ALL: D W M
+  const ivalsFor = r => IVALS[r] || ['D', 'W', 'M'];
+  function effInterval(pref, avail) {
+    if (avail.includes(pref)) return pref;
+    const order = ['D', 'W', 'M'], want = order.indexOf(pref);
+    return avail.filter(k => order.indexOf(k) <= want).pop() || avail[0];
+  }
+  function whenLabel(p, ivl, intraday) {
+    if (!p) return '';
+    if (p._base) return intraday ? 'previous close' : 'start of range';
+    if (intraday) return new Date(p.t).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    const d = new Date(p.t + 'T12:00:00Z'), f = o => d.toLocaleDateString(undefined, Object.assign({ timeZone: 'UTC' }, o));
+    if (ivl === 'W' && p._k) return 'week ending ' + f({ weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+    if (ivl === 'M' && p._k) return f({ month: 'long', year: 'numeric' }) + ' (to ' + f({ month: 'short', day: 'numeric' }) + ')';
+    return f({ weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+  }
+  const ivlBar = (avail, cur, attr) => `<span class="seg-control" style="font-size:10px;margin-left:6px">${avail.map(k => `<button class="seg-btn ${cur === k ? 'active' : ''}" ${attr}="${k}" style="font-size:10px" title="${k === 'D' ? 'daily' : k === 'W' ? 'weekly' : 'monthly'} points">${k}</button>`).join('')}</span>`;
   function resample(points, mode) {
     if (mode === 'D' || points.length < 3) return points;
     const key = p => { const d = new Date(p.t + 'T00:00:00Z');
@@ -217,7 +244,7 @@
   }
 
   // ---------------- GoodGlobe mount ----------------
-  const GG = { range: '1Y', interval: 'D', daily: null, intraday: undefined, builtAt: 0 };
+  const GG = { range: '1Y', interval: 'D', daily: null, intraday: undefined, builtAt: 0 };   // interval = the preference (z122)
   async function mountGoodGlobeChart() {
     const host = document.getElementById('gg-hist-mount');
     if (!host) return;
@@ -232,6 +259,7 @@
     if (!host || !GG.daily) return;
     const priceEl = document.getElementById('gg-price-readout'), pctEl = document.getElementById('gg-pct-readout'), subEl = document.getElementById('gg-sub-readout');
     const all = GG.daily.points;
+    const avail = ivalsFor(GG.range), ivl = effInterval(GG.interval, avail);
     let pts, label;
     if (GG.range === '1D') {
       if (GG.intraday === undefined) GG.intraday = await indexIntraday(GG.daily);
@@ -240,13 +268,11 @@
     } else {
       const r = RANGES.find(x => x[0] === GG.range)[1];
       pts = windowed(all, r);
-      if (['3M', 'YTD', '1Y', 'ALL'].includes(GG.range)) pts = resample(pts, GG.interval);
+      if (ivl !== 'D') pts = resample(pts, ivl);
       label = GG.range === 'ALL' ? `since inception (${GG.daily.inception}, $${BASE_VALUE.toFixed(2)})` : GG.range;
     }
     const bar = RANGES.map(([k]) => `<button class="seg-btn ${GG.range === k ? 'active' : ''}" data-vcr="${k}" style="font-size:10px">${k}</button>`).join('');
-    const ivl = ['3M', 'YTD', '1Y', 'ALL'].includes(GG.range)
-      ? `<span class="seg-control" style="font-size:10px;margin-left:6px">${['D', 'W', 'M'].map(k => `<button class="seg-btn ${GG.interval === k ? 'active' : ''}" data-vci="${k}" style="font-size:10px">${k}</button>`).join('')}</span>` : '';
-    host.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0 4px"><span class="seg-control" style="font-size:10px">${bar}</span>${ivl}</div><div class="vc-chart"></div>
+    host.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0 4px"><span class="seg-control" style="font-size:10px">${bar}</span>${ivlBar(avail, ivl, 'data-vci')}</div><div class="vc-chart"></div>
       <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:4px">${GG.daily.members.length} member${GG.daily.members.length === 1 ? '' : 's'} · built from each member's daily closes · equal-weighted, shorts inverse · starts at $${BASE_VALUE.toFixed(2)} on ${esc(GG.daily.inception || '—')}</div>`;
     const setHeader = (p, base, sub) => {
       if (!p || !base) return;
@@ -257,7 +283,7 @@
     };
     const resetHeader = () => pts.length ? setHeader(pts[pts.length - 1], pts[0], label + ' · scrub the chart') : null;
     drawStockChart(host.querySelector('.vc-chart'), pts, { label: 'GoodGlobe Index', empty: label,
-      onScrub: (p, base, when) => setHeader(p, base, when), onReset: resetHeader });
+      onScrub: (p, base) => setHeader(p, base, whenLabel(p, ivl, GG.range === '1D')), onReset: resetHeader });
     resetHeader();
     host.querySelectorAll('[data-vcr]').forEach(b => b.onclick = () => { GG.range = b.dataset.vcr; render(); });
     host.querySelectorAll('[data-vci]').forEach(b => b.onclick = () => { GG.interval = b.dataset.vci; render(); });
@@ -300,7 +326,6 @@
   // TIME-WEIGHTED (flows removed), so taking cash out never looks like a loss.
   // Opening capital = the reconciliation value if you've entered one, else the
   // amount that makes today's cash match the stored balance.
-  const ACC = { range: '3M' };
   async function accountSeries() {
     const txAll = (typeof loadTransactions === 'function') ? loadTransactions() : [];
     const entries = (typeof loadPortfolio === 'function') ? (loadPortfolio() || []) : [];
@@ -353,7 +378,7 @@
     }
     for (const T of Object.keys(activeQty)) if (!tickers.includes(T)) { tickers.push(T); await fetchDaily(T); fx[T] = (typeof _botUsdFactor === 'function') ? _botUsdFactor(T) : 1; }
     const ptr = {}, lastC = {}, qty = {};
-    let cash = opening, k = 0;
+    let cash = opening, k = 0, pendingFlow = 0;
     const points = [], flows = [];
     for (let ts = Date.parse(start + 'T00:00:00Z'); ts <= Date.parse(end + 'T00:00:00Z'); ts += 864e5) {
       const day = new Date(ts), dow = day.getUTCDay(), ds = day.toISOString().slice(0, 10);
@@ -366,6 +391,7 @@
         else if (t.type === 'short') qty[T] = (qty[T] || 0) - (+t.qty || 0);
         else if (t.type === 'deposit' || t.type === 'withdrawal') { flowToday += +t.amount || 0; flows.push({ t: ds, amount: +t.amount || 0 }); }
       }
+      pendingFlow += flowToday;                 // z122: a weekend deposit belongs to the next weekday's point
       if (dow === 0 || dow === 6) continue;
       for (const T of fromEntries) qty[T] = (activeEntries[T] || []).reduce((a, e) => a + (e.d <= ds ? e.q : 0), 0);
       let mv = 0;
@@ -375,43 +401,117 @@
         while (i < h.length && h[i].d <= ds) { lastC[T] = h[i].c; i++; } ptr[T] = i;
         if (lastC[T] != null) mv += qty[T] * lastC[T] * (fx[T] || 1);
       }
-      points.push({ t: ds, v: +(cash + mv).toFixed(2), flow: flowToday });
+      points.push({ t: ds, v: +(cash + mv).toFixed(2), flow: +pendingFlow.toFixed(2) });
+      pendingFlow = 0;
     }
     // time-weighted return: chain daily returns with that day's external flow removed
     let twr = 1;
     for (let i = 1; i < points.length; i++) { const prev = points[i - 1].v; if (prev > 0) twr *= (points[i].v - points[i].flow) / prev; }
     return { points, flows, opening, openingSource: op ? 'reconciliation' : 'implied by stored cash', twrPct: (twr - 1) * 100,
+             final: { cash, qty: { ...qty }, fx },
              virtual: tx.filter(t => t._virtual).length, reconciled: [...fromEntries].sort(),
              cashGap: op ? +(stored - cash).toFixed(2) : 0 };
   }
+  // z122: time-weighted return and market P/L carried on every point (from the window's
+  // first point), so a weekly / monthly point still reads exactly - flows never count as P/L.
+  function withReturns(pts) {
+    let f = 1, cf = 0;
+    return pts.map((p, i) => {
+      if (i > 0) { const prev = pts[i - 1].v; if (prev > 0) f *= (p.v - (p.flow || 0)) / prev; cf += p.flow || 0; }
+      return Object.assign({}, p, { twr: f, cumFlow: +cf.toFixed(2) }, i === 0 ? { _base: true } : {});
+    });
+  }
+  // 1D: today's positions x the books' 15-min tape + today's cash; the base is the previous close
+  async function accountIntraday(s) {
+    const q = (s.final && s.final.qty) || {}, fx = (s.final && s.final.fx) || {};
+    const held = Object.keys(q).filter(T => q[T]);
+    if (!held.length || !s.points.length) return null;
+    await Promise.all(held.map(T => fetchDaily(T)));
+    const books = [...new Set(held.map(T => _book[T]).filter(Boolean))];
+    let tapeDate = null;
+    for (let back = 0; back < 8 && !tapeDate; back++) {
+      const dt = new Date(Date.now() - back * 864e5).toISOString().slice(0, 10);
+      for (const b of books) { const tp = await fetchTapeDay(b, dt); if (tp && tp.snapshots && tp.snapshots.length) { tapeDate = dt; break; } }
+    }
+    if (!tapeDate) return null;
+    const prev = s.points.filter(p => p.t < tapeDate);
+    if (!prev.length) return null;
+    const base = prev[prev.length - 1].v;
+    const flowToday = s.flows.filter(f => f.t === tapeDate).reduce((a, f) => a + f.amount, 0), adj = base + flowToday;
+    const last = {};
+    for (const T of held) for (const b of (_daily[T] || [])) { if (b.d < tapeDate) last[T] = b.c; else break; }
+    const perBook = {}, times = new Set();
+    for (const b of books) { const tp = await fetchTapeDay(b, tapeDate); perBook[b] = (tp && tp.snapshots) || []; perBook[b].forEach(x => times.add(x.t)); }
+    const cash = s.final.cash, out = [];
+    for (const t of [...times].sort()) {
+      for (const b of books) for (const x of perBook[b]) if (x.t === t && x.p) for (const T of held) if (_book[T] === b && x.p[T] != null && isFinite(+x.p[T])) last[T] = +x.p[T];
+      const v = cash + held.reduce((a, T) => a + (last[T] != null ? q[T] * last[T] * (fx[T] || 1) : 0), 0);
+      out.push({ t, v: +v.toFixed(2), twr: adj > 0 ? v / adj : 1, cumFlow: flowToday });
+    }
+    if (!out.length) return null;
+    const t0 = new Date(Date.parse(out[0].t) - 60000).toISOString();
+    return { points: [{ t: t0, v: base, twr: 1, cumFlow: 0, _base: true }, ...out], date: tapeDate, base };
+  }
+  const ACC = { range: '3M', interval: 'D', series: null, intraday: undefined };
   async function mountAccountChart() {
     const host = document.getElementById('acct-value-mount'); if (!host) return;
     host.innerHTML = '<div style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);padding:16px 0">Rebuilding account value from the ledger…</div>';
     const s = await accountSeries();
     if (!document.getElementById('acct-value-mount')) return;
     if (!s || s.points.length < 2) { host.innerHTML = '<div style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);padding:16px 0">No ledger activity yet.</div>'; return; }
-    const draw = () => {
-      const r = { '1W': 7, '1M': 31, '3M': 92, '6M': 183, '1Y': 366, '3Y': 1096, 'ALL': 'all' }[ACC.range];
-      const pts = windowed(s.points, r);
-      const last = pts[pts.length - 1], first = pts[0];
-      const flowsIn = s.flows.filter(f => f.t >= first.t);
-      const netFlow = flowsIn.reduce((a, f) => a + f.amount, 0);
-      const pnl = last.v - first.v - netFlow;
-      host.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:6px 16px;align-items:baseline;font-family:var(--mono)">
-          <span style="font-size:20px;color:var(--ink)">$${last.v.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
-          <span style="font-size:11px;color:${pnl >= 0 ? 'var(--pos)' : 'var(--neg)'}">${pnl >= 0 ? '+' : '−'}$${Math.abs(pnl).toLocaleString(undefined, { maximumFractionDigits: 0 })} market P/L ${ACC.range === 'ALL' ? 'since start' : ACC.range}</span>
-          ${ACC.range === 'ALL' ? `<span style="font-size:11px;color:var(--ink-dim)">time-weighted ${s.twrPct >= 0 ? '+' : ''}${s.twrPct.toFixed(2)}%</span>` : ''}
-          <span style="margin-left:auto" class="seg-control">${['1W', '1M', '3M', '6M', '1Y', '3Y', 'ALL'].map(k => `<button class="seg-btn ${ACC.range === k ? 'active' : ''}" data-acr="${k}" style="font-size:10px">${k}</button>`).join('')}</span></div>
-        <div class="acct-chart" style="margin-top:6px"></div>
-        <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:4px;line-height:1.5">
-          Cash + holdings at each day's close, rebuilt from the transaction ledger · ▲ deposit ▼ withdrawal (${flowsIn.length} in range, net ${netFlow >= 0 ? '+' : '−'}$${Math.abs(netFlow).toLocaleString(undefined, { maximumFractionDigits: 0 })}) — flows are excluded from P/L and return ·
-          opening capital $${Math.round(s.opening).toLocaleString()} (${esc(s.openingSource)})${s.virtual ? ` · ${s.virtual} position(s) older than the ledger enter at their added date and cost` : ''}${s.reconciled && s.reconciled.length ? ` · share path taken from current positions for ${esc(s.reconciled.join(', '))} (the ledger's share count didn't match)` : ''}${s.cashGap && Math.abs(s.cashGap) >= 1 ? ` · <span style="color:var(--red)">stored cash differs from the ledger by $${Math.abs(s.cashGap).toLocaleString()} — see Transactions → Cash reconciliation</span>` : ''}</div>`;
-      drawStockChart(host.querySelector('.acct-chart'), pts, { height: 170, label: 'Account value',
-        markers: flowsIn.map(f => ({ t: f.t, kind: f.amount >= 0 ? 'in' : 'out', label: `${f.t}: ${f.amount >= 0 ? 'deposit' : 'withdrawal'} $${Math.abs(f.amount).toLocaleString()}` })) });
-      host.querySelectorAll('[data-acr]').forEach(b => b.onclick = () => { ACC.range = b.dataset.acr; draw(); });
+    ACC.series = s; ACC.intraday = undefined;
+    if (!RANGES.some(x => x[0] === ACC.range)) ACC.range = '3M';
+    return renderAccount();
+  }
+  async function renderAccount() {
+    const host = document.getElementById('acct-value-mount'), s = ACC.series;
+    if (!host || !s) return;
+    const avail = ivalsFor(ACC.range), ivl = effInterval(ACC.interval, avail), intra = ACC.range === '1D';
+    let pts, label;
+    if (intra) {
+      if (ACC.intraday === undefined) ACC.intraday = await accountIntraday(s);
+      pts = ACC.intraday ? ACC.intraday.points : [];
+      label = ACC.intraday ? `${ACC.intraday.date} · intraday (15-min tape)` : 'no intraday tape for the latest session';
+    } else {
+      pts = withReturns(windowed(s.points, RANGES.find(x => x[0] === ACC.range)[1]));
+      if (ivl !== 'D') pts = resample(pts, ivl);
+      label = ACC.range === 'ALL' ? `since ${pts.length ? whenLabel(Object.assign({}, pts[0], { _base: false }), 'D', false) : '—'}` : ACC.range;
+    }
+    const from = pts.length ? pts[0].t : '', fromDay = String(from).slice(0, 10);
+    const flowsIn = s.flows.filter(f => (intra ? f.t === (ACC.intraday && ACC.intraday.date) : f.t > fromDay));
+    const netFlow = flowsIn.reduce((a, f) => a + f.amount, 0);
+    const money2 = v => '$' + v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const money0 = v => `${v >= 0 ? '+' : '−'}$${Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+    const bar = RANGES.map(([k]) => `<button class="seg-btn ${ACC.range === k ? 'active' : ''}" data-acr="${k}" style="font-size:10px">${k}</button>`).join('');
+    host.innerHTML = `<div>
+        <div style="display:flex;align-items:baseline;gap:10px;margin-top:3px;flex-wrap:wrap">
+          <span id="acct-price-readout" style="font-family:var(--mono);font-size:30px;font-weight:800;line-height:1"></span>
+          <span id="acct-pct-readout" style="font-family:var(--mono);font-size:14px;font-weight:700"></span>
+        </div>
+        <div id="acct-sub-readout" style="font-family:var(--mono);font-size:10px;color:var(--ink-dim);margin-top:2px"></div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0 4px"><span class="seg-control" style="font-size:10px">${bar}</span>${ivlBar(avail, ivl, 'data-aci')}</div>
+      <div class="acct-chart"></div>
+      <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:4px;line-height:1.5">
+        Cash + holdings at each close (1D: on the 15-min tape), rebuilt from the transaction ledger · % is time-weighted and P/L is market P/L — deposits / withdrawals are taken out (▲ deposit ▼ withdrawal: ${flowsIn.length} in range, net ${money0(netFlow)}) ·
+        opening capital $${Math.round(s.opening).toLocaleString()} (${esc(s.openingSource)})${s.virtual ? ` · ${s.virtual} position(s) older than the ledger enter at their added date and cost` : ''}${s.reconciled && s.reconciled.length ? ` · share path taken from current positions for ${esc(s.reconciled.join(', '))} (the ledger's share count didn't match)` : ''}${s.cashGap && Math.abs(s.cashGap) >= 1 ? ` · <span style="color:var(--red)">stored cash differs from the ledger by $${Math.abs(s.cashGap).toLocaleString()} — see Transactions → Cash reconciliation</span>` : ''}${ACC.range === 'ALL' ? ` · all-time time-weighted ${s.twrPct >= 0 ? '+' : ''}${s.twrPct.toFixed(2)}%` : ''}</div>`;
+    const priceEl = host.querySelector('#acct-price-readout'), pctEl = host.querySelector('#acct-pct-readout'), subEl = host.querySelector('#acct-sub-readout');
+    const setHeader = (p, base, sub) => {
+      if (!p || !base) return;
+      const pnl = p.v - base.v - (p.cumFlow || 0), pct = ((p.twr != null ? p.twr : p.v / base.v) - 1) * 100, c = pnl >= 0 ? 'var(--pos)' : 'var(--neg)';
+      priceEl.textContent = money2(p.v); priceEl.style.color = c;
+      pctEl.textContent = (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%'; pctEl.style.color = c;
+      subEl.textContent = `${sub} · market P/L ${money0(pnl)}`;
     };
-    draw();
+    const resetHeader = () => pts.length ? setHeader(pts[pts.length - 1], pts[0], `${label} · scrub the chart`) : null;
+    drawStockChart(host.querySelector('.acct-chart'), pts, { label: 'Account value', empty: label,
+      markers: flowsIn.map(f => ({ t: f.t, kind: f.amount >= 0 ? 'in' : 'out', label: `${f.t}: ${f.amount >= 0 ? 'deposit' : 'withdrawal'} $${Math.abs(f.amount).toLocaleString()}` })),
+      onScrub: (p, base) => setHeader(p, base, whenLabel(p, ivl, intra)), onReset: resetHeader });
+    resetHeader();
+    host.querySelectorAll('[data-acr]').forEach(b => b.onclick = () => { ACC.range = b.dataset.acr; renderAccount(); });
+    host.querySelectorAll('[data-aci]').forEach(b => b.onclick = () => { ACC.interval = b.dataset.aci; renderAccount(); });
   }
 
-  window.VChart = { fetchDaily, fetchTapeDay, drawStockChart, windowed, resample, indexDaily, indexIntraday, mountGoodGlobeChart, mountSparks, accountSeries, mountAccountChart, _gg: GG };
+  window.VChart = { fetchDaily, fetchTapeDay, drawStockChart, windowed, resample, indexDaily, indexIntraday, mountGoodGlobeChart, mountSparks, accountSeries, mountAccountChart,
+                    accountIntraday, withReturns, ivalsFor, effInterval, whenLabel, _gg: GG, _acc: ACC };
 })();
