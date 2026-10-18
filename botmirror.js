@@ -22,6 +22,13 @@
      becomes a deposit / withdrawal request that the runner books.
    * Escape hatch: localStorage 'valuatio.bot.appTrading' = '1' restores the
      z100–z120 behaviour (pair it with the runner's RUNNER_APP_TRADES=1).
+
+   z122 — the bot is AUTONOMOUS: the Bets tab offers nothing that runs, trades or
+   sends. Removed there: Run Scan, Rebalance Cash, Retrain, Import Repo / File,
+   Commit, the editable cash card, Run now, Send to runner / Discard. Nothing is
+   dispatched or requested from a device; Run, Add cash and edit-cash calls are
+   no-ops. Kept: the journal view, Refresh (re-reads the journal), Export (a
+   download) and Repo ↗.
    ========================================================================== */
 (function () {
   'use strict';
@@ -144,6 +151,8 @@
   }
 
   // ---- what the app does instead of trading ----
+  // z122: the bot is autonomous - nothing on a device starts it
+  async function noRun() { flash('The bot runs on its own: every 30 min while the NYSE is open (entries once per session after 10:00 ET)'); return { skipped: 'autonomous' }; }
   async function runNow() {
     const s = session(), token = localStorage.getItem('valuatio.github.token');
     if (!token) { flash('No GitHub token on this device — Home 🏠 → Connections'); return { skipped: 'no-token' }; }
@@ -210,13 +219,23 @@
     el.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;font-family:var(--mono);font-size:10.5px;padding:7px 12px;border:1px solid var(--rule);border-left:3px solid ${col};border-radius:4px;margin:8px 0;background:var(--bg-elev)">
       <span style="color:${col};font-weight:700">ONE BOOK · RUNNER</span><span style="color:var(--ink-dim)">${esc(s.text)}</span>
       <span style="flex-basis:100%;color:var(--ink-dim)">${line}</span>
-      <span style="color:var(--ink-faint)">Only the GitHub runner trades, and only while the NYSE is open: entries once per session after 10:00 ET, exits and requests every pass. This device shows its journal.</span>
-      <span style="margin-left:auto;display:flex;gap:6px">${btn('Sync now', "BotMirror.sync('button')")}${btn(s.open ? 'Run now' : 'Run (closed)', 'BotMirror.runNow()')}</span>
-      ${aside.length ? `<div style="flex-basis:100%;color:var(--amber)">⚠ ${aside.length} trade(s) exist only on this device (opened here before one-book trading) — set aside, not counted. ${btn('Send to runner', 'BotMirror.sendAside()')} ${btn('Discard', 'BotMirror.discardAside()')}</div>` : ''}</div>`;
-    const rb = document.getElementById('bets-run-btn');
-    if (rb && !rb.disabled) { rb.textContent = s.open ? '▶ Run the runner' : '▶ Run (market closed)'; rb.title = 'Asks the GitHub runner to run now — only it trades, and only while the NYSE is open'; }
-    const rr = document.getElementById('bets-rebalance-btn');
-    if (rr) { rr.disabled = true; rr.title = 'The runner manages cash and positions (one-book trading)'; }
+      <span style="color:var(--ink-faint)">The bot is autonomous: only the GitHub runner trades, and only while the NYSE is open — new entries once per session after 10:00 ET, exits every pass. Every device shows the same journal.</span>
+      <span style="margin-left:auto;display:flex;gap:6px">${btn('Refresh', "BotMirror.sync('button')")}</span></div>`;
+    strip();
+  }
+  // z122: nothing on the Bets tab runs, trades or sends - the bot is autonomous
+  const REMOVE = ['bets-run-btn', 'bets-rebalance-btn', 'bets-retrain-btn', 'bets-import-btn', 'bets-import-file-btn', 'bets-commit-btn'];
+  function strip() {
+    for (const id of REMOVE) { const el = document.getElementById(id); if (el) el.remove(); }
+    const cc = document.getElementById('bets-cash-card');
+    if (cc && !cc._z122) {
+      const ro = cc.cloneNode(true);                       // a clone carries no click listener (no edit-cash prompt)
+      ro._z122 = true;
+      ro.style.cursor = 'default';
+      ro.title = "The bot's cash — managed by the runner";
+      ro.querySelectorAll('span').forEach(sp => { if (/✎\s*edit/.test(sp.textContent)) sp.remove(); });
+      cc.replaceWith(ro);
+    }
   }
 
   // ---- take over the app's trading entry points ----
@@ -229,11 +248,12 @@
     return true;
   }
   function install() {
-    const ok = wrap('botDailyRun', () => runNow());
+    const ok = wrap('botDailyRun', () => noRun());
     wrap('botRebalanceToPositiveCash', () => { flash('The runner manages cash and positions now (one-book trading)'); return 0; });
     wrap('botPartialSell', () => 0);
-    wrap('botAddCash', (orig, amt) => requestCash(amt));
-    wrap('botEditCash', async () => { flash("Cash is the runner's book — use Add cash (a deposit / withdrawal request)"); return null; });
+    wrap('botAddCash', () => { flash("The bot's cash is managed by the runner"); return null; });
+    wrap('botEditCash', async () => { flash("The bot's cash is managed by the runner"); return null; });
+    wrap('_betsRetrainHandler', () => { flash('The runner learns from its own closed trades'); return null; });
     wrap('supabaseSyncAllTrades', async () => 0);
     wrap('supabaseUpsertTrade', async () => null);
     wrap('supabaseLoadTrades', async () => null);
@@ -254,5 +274,5 @@
   setInterval(() => { if (ON() && betsVisible()) sync('timer'); }, 120000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden && ON() && betsVisible()) sync('resume'); });
   document.addEventListener('click', e => { if (e.target.closest && e.target.closest('.tab-btn[data-tab="bets"]')) setTimeout(() => sync('tab'), 300); }, true);
-  window.BotMirror = { sync, runNow, requestCash, sendAside, discardAside, session, mirrorFrom, holidays, earlyCloses, on: ON };
+  window.BotMirror = { sync, session, mirrorFrom, holidays, earlyCloses, strip, on: ON };
 })();
