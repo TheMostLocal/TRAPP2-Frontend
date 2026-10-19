@@ -512,6 +512,75 @@
     host.querySelectorAll('[data-aci]').forEach(b => b.onclick = () => { ACC.interval = b.dataset.aci; renderAccount(); });
   }
 
-  window.VChart = { fetchDaily, fetchTapeDay, drawStockChart, windowed, resample, indexDaily, indexIntraday, mountGoodGlobeChart, mountSparks, accountSeries, mountAccountChart,
+  // ---------------- any one series, the GoodGlobe way (z127) ----------------
+  // The same chart as the GoodGlobe index and the account value - large value + % that follow
+  // the scrub, the 1D 1W 1M 3M YTD 1Y ALL bar and the D / W / M interval rule - for any one
+  // daily series (Regime → TLT). 1D comes from the 15-min tape of the ticker's book, with the
+  // previous close placed one minute before the first tick (the z122 rule).
+  const SC = {};
+  async function seriesIntraday(ticker, daily) {
+    const b = _book[ticker];
+    if (!b) return null;
+    let tp = null, tapeDate = null;
+    for (let back = 0; back < 8 && !tapeDate; back++) {
+      const dt = new Date(Date.now() - back * 864e5).toISOString().slice(0, 10);
+      const x = await fetchTapeDay(b, dt);
+      if (x && x.snapshots && x.snapshots.some(s => s.p && s.p[ticker] != null)) { tp = x; tapeDate = dt; }
+    }
+    if (!tapeDate) return null;
+    const prev = daily.filter(p => p.t < tapeDate);
+    if (!prev.length) return null;
+    const ticks = tp.snapshots.filter(s => s.p && s.p[ticker] != null).map(s => ({ t: s.t, v: +s.p[ticker] })).sort((a, z) => (a.t < z.t ? -1 : 1));
+    const t0 = new Date(Date.parse(ticks[0].t) - 60000).toISOString();
+    return { points: [{ t: t0, v: prev[prev.length - 1].v, _base: true }, ...ticks], date: tapeDate };
+  }
+  async function mountSeriesChart(host, cfg) {
+    if (!host) return;
+    const st = SC[cfg.key] || (SC[cfg.key] = { range: cfg.range || '1Y', interval: 'D', intraday: undefined });
+    const daily = (cfg.daily || []).filter(b => b && b.d && b.c > 0).map(b => ({ t: b.d, v: +b.c }));
+    if (!daily.length) { host.innerHTML = '<div style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);padding:16px 0">No price history.</div>'; return; }
+    const fmtV = cfg.fmt || (v => '$' + v.toFixed(2));
+    const draw = async () => {
+      if (!host.isConnected) return;
+      const avail = ivalsFor(st.range), ivl = effInterval(st.interval, avail);
+      let pts, label;
+      if (st.range === '1D') {
+        if (st.intraday === undefined) st.intraday = cfg.ticker ? await seriesIntraday(cfg.ticker, daily) : null;
+        pts = st.intraday ? st.intraday.points : [];
+        label = st.intraday ? `${st.intraday.date} · intraday (15-min tape)` : 'no intraday tape for the latest session';
+      } else {
+        const r = RANGES.find(x => x[0] === st.range)[1];
+        pts = windowed(daily, r);
+        if (ivl !== 'D') pts = resample(pts, ivl);
+        label = st.range === 'ALL' ? `since ${daily[0].t}` : st.range;
+      }
+      const bar = RANGES.map(([k]) => `<button class="seg-btn ${st.range === k ? 'active' : ''}" data-vcr="${k}" style="font-size:10px">${k}</button>`).join('');
+      host.innerHTML = `<div>
+          <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);letter-spacing:0.1em;text-transform:uppercase">${esc(cfg.title || cfg.ticker || '')}</div>
+          <div style="display:flex;align-items:baseline;gap:10px;margin-top:3px;flex-wrap:wrap">
+            <span data-vc-price style="font-family:var(--mono);font-size:30px;font-weight:800;line-height:1">—</span>
+            <span data-vc-pct style="font-family:var(--mono);font-size:14px;font-weight:700">—</span></div>
+          <div data-vc-sub style="font-family:var(--mono);font-size:10px;color:var(--ink-dim);margin-top:2px"></div></div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0 4px"><span class="seg-control" style="font-size:10px">${bar}</span>${ivlBar(avail, ivl, 'data-vci')}</div>
+        <div class="vc-chart"></div>${cfg.note ? `<div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:4px">${cfg.note}</div>` : ''}`;
+      const pe = host.querySelector('[data-vc-price]'), ce = host.querySelector('[data-vc-pct]'), se = host.querySelector('[data-vc-sub]');
+      const setHeader = (p, base, sub) => {
+        if (!p || !base) return;
+        const ch = (p.v / base.v - 1) * 100, c = ch >= 0 ? 'var(--pos)' : 'var(--neg)';
+        pe.textContent = fmtV(p.v); pe.style.color = c;
+        ce.textContent = (ch >= 0 ? '+' : '') + ch.toFixed(2) + '%'; ce.style.color = c;
+        se.textContent = sub;
+      };
+      const resetHeader = () => (pts.length ? setHeader(pts[pts.length - 1], pts[0], label + ' · scrub the chart') : null);
+      drawStockChart(host.querySelector('.vc-chart'), pts, { label: cfg.title || cfg.ticker, empty: label,
+        onScrub: (p, base) => setHeader(p, base, whenLabel(p, ivl, st.range === '1D')), onReset: resetHeader });
+      resetHeader();
+      host.querySelectorAll('[data-vcr]').forEach(b => b.onclick = () => { st.range = b.dataset.vcr; draw(); });
+      host.querySelectorAll('[data-vci]').forEach(b => b.onclick = () => { st.interval = b.dataset.vci; draw(); });
+    };
+    await draw();
+  }
+
+  window.VChart = { fetchDaily, fetchTapeDay, drawStockChart, mountSeriesChart, windowed, resample, indexDaily, indexIntraday, mountGoodGlobeChart, mountSparks, accountSeries, mountAccountChart,
                     accountIntraday, withReturns, ivalsFor, effInterval, whenLabel, _gg: GG, _acc: ACC };
 })();
