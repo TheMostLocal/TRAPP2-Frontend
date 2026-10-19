@@ -6859,7 +6859,7 @@
 
 </style>
 <!-- layout corrections (mobile + desktop) - z88 -->
-<link rel="stylesheet" href="layout.css?v=20260615z92">
+<link rel="stylesheet" href="layout.css?v=20260615z125">
 </head>
 <body>
 
@@ -7813,6 +7813,11 @@
   <div id="stockbook-content"></div>
 
 </div><!-- /stockbook panel -->
+
+<!-- ===== OPTIONS (z125): every ticker with a chain — Stock Book & Valuation → Options ===== -->
+<div class="tab-panel" data-panel="options">
+  <div id="options-hub-mount"></div>
+</div>
 
 <div class="tab-panel" data-panel="probability">
 
@@ -8907,7 +8912,7 @@
       'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
   }
 </script>
-<script src="app.js?v=20260615z124"></script>
+<script src="app.js?v=20260615z125"></script>
 <!-- Patterns & Templates (TA tool + overview pattern read) - z87 WIP; standalone, loads after app.js -->
 <script src="patterns.js?v=20260615z109"></script>
 <!-- UX: tickers clickable everywhere -> Valuation (z88) -->
@@ -8925,5 +8930,7 @@
 <!-- bot: app ↔ runner action outbox - z100 -->
 <script src="botsync.js?v=20260615z122"></script>
 <script src="botmirror.js?v=20260615z122"></script>
+<script src="optionshub.js?v=20260615z125"></script>
+<script src="navgroups.js?v=20260615z125"></script>
 </body>
 </html>
