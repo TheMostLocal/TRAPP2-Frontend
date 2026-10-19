@@ -12121,6 +12121,51 @@ function renderPortfolioTab() {
 }
 if (typeof window !== 'undefined') window.renderPortfolioTab = renderPortfolioTab;
 
+// ============================================================
+//   z124 — STOCK BOOK SORTING: a column sorts by what it SHOWS
+//   Text columns (ticker, name, sector, sub-sector, industry, country, …): A→Z on
+//   the first click, Z→A on the second. Number columns (price, market cap, P/E,
+//   beta): high→low first, then low→high. A blank ('—', '', NaN) always sorts last,
+//   and ties fall back to the ticker so the order never jumps between renders.
+//   Country is the displayed one (listing country from the ticker; "EUR → CAD" for
+//   a currency pair) - the old comparator subtracted strings (NaN), so country,
+//   sub-sector and industry never moved.
+// ============================================================
+const SB_NUM_COLS = new Set(['price', 'marketCap', 'pe', 'beta']);
+function stockBookSortValue(r, key, section) {
+  if (!r) return null;
+  if (key === 'country') {
+    const fx = (typeof rowUnitKind === 'function') && rowUnitKind(r) === 'fx';
+    if (section === 'currencies' || fx) {
+      const q = typeof fxPairQuote === 'function' ? fxPairQuote(r) : null;
+      return q ? `${q.base} ${q.quote}` : null;
+    }
+    const c = typeof tickerCountry === 'function' ? tickerCountry(r.ticker) : null;
+    return c && c.country && c.country !== '—' ? c.country : null;
+  }
+  if (key === 'marketCap' && typeof rowUnitKind === 'function' && rowUnitKind(r) !== 'money') return null;   // FX / index: no market cap
+  const v = r[key];
+  if (SB_NUM_COLS.has(key)) {
+    const n = typeof v === 'number' ? v : parseFloat(String(v == null ? '' : v).replace(/[$,%\s]/g, ''));
+    return isFinite(n) ? n : null;
+  }
+  const s = v == null ? '' : String(v).trim();
+  return s && s !== '—' ? s : null;
+}
+function sortStockBookRows(rows, sortBy, sortDir, section) {
+  const byTicker = (a, b) => String(a.ticker || '').localeCompare(String(b.ticker || ''), undefined, { numeric: true });
+  if (!sortBy) return rows.slice().sort(byTicker);           // default: ticker A→Z
+  for (const r of rows) { try { if (typeof ensureRowNormalized === 'function') ensureRowNormalized(r); } catch (e) {} }   // sort the USD figures shown
+  const num = SB_NUM_COLS.has(sortBy);
+  return rows.map(r => ({ r, v: stockBookSortValue(r, sortBy, section) })).sort((A, B) => {
+    if (A.v == null && B.v == null) return byTicker(A.r, B.r);
+    if (A.v == null) return 1;                                 // blanks last, both directions
+    if (B.v == null) return -1;
+    const cmp = num ? A.v - B.v : String(A.v).localeCompare(String(B.v), undefined, { sensitivity: 'base', numeric: true });
+    return (sortDir === 'desc' ? -cmp : cmp) || byTicker(A.r, B.r);
+  }).map(k => k.r);
+}
+
 function renderStockBook() {
   const content = document.getElementById('stockbook-content');
   if (!content) return;
@@ -12187,26 +12232,9 @@ function renderStockBook() {
     );
   }
 
-  // Apply sort
-  rows = [...rows];
+  // Apply sort (z124: by the value each column shows - see sortStockBookRows)
   const { sortBy, sortDir } = sb;
-  if (sortBy) {
-    const isString = ['ticker', 'name', 'sector', 'status', 'description'].includes(sortBy);
-    rows.sort((a, b) => {
-      const av = a[sortBy], bv = b[sortBy];
-      // Nulls always at the bottom regardless of direction
-      if (av == null && bv == null) return 0;
-      if (av == null) return 1;
-      if (bv == null) return -1;
-      let cmp;
-      if (isString) cmp = String(av).localeCompare(String(bv), undefined, { sensitivity: 'base' });
-      else cmp = av - bv;
-      return sortDir === 'desc' ? -cmp : cmp;
-    });
-  } else {
-    // Default: by ticker A→Z
-    rows.sort((a, b) => a.ticker.localeCompare(b.ticker));
-  }
+  rows = sortStockBookRows(rows, sortBy, sortDir, sb.section);
 
   if (rows.length === 0) {
     content.innerHTML = `<div class="empty" style="padding:60px;text-align:center">
@@ -12474,8 +12502,9 @@ function renderStockBook() {
   content.querySelectorAll('th.sortable').forEach(th => {
     th.addEventListener('click', () => {
       const key = th.dataset.sort;
-      // Strings default ASC. Numbers default DESC for "best first" (price/pl/mcap).
-      const isString = ['ticker', 'name', 'sector', 'status'].includes(key);
+      // z124: text columns start A→Z, number columns (price, market cap, P/E, beta) start high→low;
+      // a second click on the same column reverses it.
+      const isString = !SB_NUM_COLS.has(key);
       if (sb.sortBy === key) {
         sb.sortDir = sb.sortDir === 'asc' ? 'desc' : 'asc';
       } else {
