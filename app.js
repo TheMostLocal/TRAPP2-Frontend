@@ -650,6 +650,91 @@ function fmtFxUsd(v) {
   return '$' + v.toPrecision(4);
 }
 
+// ============================================================
+//   z123 — WHAT A ROW'S PRICE IS: money, an FX rate, or an index level
+//   An FX pair's quote is a RATE (quote-currency units per 1 base unit) and an
+//   index's quote is a LEVEL (points). Neither is an amount of money in its
+//   `currency`, so neither is ever converted to USD. "USD/JPY 157.99 JPY x
+//   0.00633 USD/JPY = $1.00" was exactly that bug (also EUR/CAD 1.589 -> "$1.12",
+//   Nikkei 64,426 -> "$408"). Indices are recognised by the ticker form (^...,
+//   DX-Y.NYB), never by asset_class: some foreign equities carry 'Index'.
+// ============================================================
+function rowUnitKind(row) {
+  const t = String((row && row.ticker) || '').toUpperCase();
+  if (t.endsWith('=X')) return 'fx';
+  if (t.startsWith('^') || t === 'DX-Y.NYB') return 'index';
+  return 'money';
+}
+// Undo a USD normalisation (an FX / index row from an earlier build, or a re-run).
+function _restoreLocalRow(row) {
+  if (!row) return row;
+  if (row._localPrice != null) row.price = row._localPrice;
+  if (row._localMarketCap != null) row.marketCap = row._localMarketCap;
+  if (row._localFinancials) for (const [f, v] of Object.entries(row._localFinancials)) row[f] = v;
+  row._localFinancials = null;
+  row._usdNormalized = false;
+  row._currencyUnconverted = false;
+  return row;
+}
+// FX pair in market convention: rate = QUOTE units per 1 BASE (Yahoo: EURCAD=X is CAD
+// per EUR; the 3-letter shorthand JPY=X is JPY per USD).
+function fxPairQuote(row) {
+  const t = String((row && row.ticker) || '').toUpperCase();
+  if (!t.endsWith('=X')) return null;
+  const body = t.slice(0, -2);
+  let base, quote;
+  if (/^[A-Z]{6}$/.test(body)) { base = body.slice(0, 3); quote = body.slice(3); }
+  else if (/^[A-Z]{3}$/.test(body)) { base = 'USD'; quote = body; }
+  else return null;
+  const rate = +(row._localPrice != null ? row._localPrice : row.price);
+  if (!(rate > 0) || !isFinite(rate)) return { base, quote, rate: null };
+  if (Math.abs(rate - 1) < 1e-9 && !(NEAR_PARITY_CCY.has(base) && NEAR_PARITY_CCY.has(quote))) return { base, quote, rate: null, placeholder: true };
+  return { base, quote, rate };
+}
+function fmtFxRate(rate) {
+  if (rate == null || !isFinite(rate)) return '—';
+  const dec = rate >= 1000 ? 2 : rate >= 100 ? 3 : rate >= 1 ? 4 : 6;
+  return (+rate).toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec });
+}
+// Compact price text (ticker tape): FX in market convention, index levels without a
+// currency sign, everything else as USD.
+function fmtRowPrice(row, price) {
+  const kind = rowUnitKind(row || {});
+  if (kind === 'fx') { const q = fxPairQuote({ ticker: row.ticker, price }); return q && q.rate != null ? `${fmtFxRate(q.rate)} ${q.quote}` : '—'; }
+  if (kind === 'index') return price != null && isFinite(price) ? (+price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
+  return fmt$(price);
+}
+// Display currency for the valuation views (z123). null = USD (the model's basis).
+const CCY_SYMBOL = { USD: '$', EUR: '€', GBP: '£', JPY: '¥', CNY: 'CN¥', KRW: '₩', INR: '₹', CHF: 'CHF ', CAD: 'C$', AUD: 'A$',
+  HKD: 'HK$', TWD: 'NT$', SGD: 'S$', SEK: 'SEK ', NOK: 'NOK ', DKK: 'DKK ', SAR: 'SAR ', BRL: 'R$', MXN: 'MX$', ZAR: 'R ',
+  ILS: '₪', TRY: '₺', RUB: '₽', PLN: 'zł ', IDR: 'Rp ', MYR: 'RM ', THB: '฿', PHP: '₱', NZD: 'NZ$' };
+const ccySymbol = c => CCY_SYMBOL[c] || (c + ' ');
+let _CCY_LENS = null;   // { code, symbol, factor } while a valuation view renders in a local currency
+// Daily USD-per-unit history for a currency, from the FX pair histories the books keep.
+const _fxHistCache = {};
+async function fxHistoryUsdPer(ccy) {
+  ccy = String(ccy || '').toUpperCase();
+  if (!ccy || ccy === 'USD') return null;
+  if (ccy in _fxHistCache) return _fxHistCache[ccy];
+  const fd = (typeof window !== 'undefined' && window.VChart && window.VChart.fetchDaily) || null;
+  if (!fd) return null;
+  for (const [t, inv] of [[`${ccy}USD=X`, false], [`USD${ccy}=X`, true], [`${ccy}=X`, true]]) {
+    try { const h = await fd(t); if (h && h.length > 20) return (_fxHistCache[ccy] = h.map(b => ({ d: b.d, v: inv ? 1 / b.c : b.c }))); } catch (e) {}
+  }
+  return (_fxHistCache[ccy] = null);
+}
+// USD per unit at a date: the close on/before `end` (days = 0, balance sheets) or the
+// average over (end - days, end] (income / cash flow for the period).
+function fxRateAt(hist, end, days) {
+  if (!hist || !hist.length || !end) return null;
+  const e = String(end).slice(0, 10);
+  if (!days) { let v = null; for (const b of hist) { if (b.d <= e) v = b.v; else break; } return v; }
+  const from = new Date(Date.parse(e + 'T00:00:00Z') - days * 864e5).toISOString().slice(0, 10);
+  let s = 0, n = 0;
+  for (const b of hist) if (b.d > from && b.d <= e) { s += b.v; n++; }
+  return n ? s / n : null;
+}
+
 // Look up how many USD one unit of `currency` is worth, using FX pairs loaded
 // in the stockbook. Yahoo FX convention: KRW=X is USD/KRW (Won per dollar), so
 // USD per Won = 1 / price. EURUSD=X is USD per Euro directly. We handle both.
@@ -734,12 +819,13 @@ const FX_SUBUNIT = { GBP_FROM: ['GBP', 0.01], };
 // Look up usdPer (USD per 1 unit) for a currency. Priority:
 //   1. LIVE rates.json (authoritative, updated every 15 min by the pipeline)
 //   2. Hardcoded fallback table (gap-filler for uncovered currencies)
-function fxRatesUsdPer(currency) {
+function fxRatesUsdPer(currency, liveOnly) {
   const c = loadFxRatesCache();
   const entry = c?.rates?.[currency];
   if (entry && typeof entry.usdPer === 'number' && isFinite(entry.usdPer) && entry.usdPer > 0) {
     return entry.usdPer;
   }
+  if (liveOnly) return null;   // z123: the live FX rows in the books come before the hardcoded table
   // Cross-check / gap-fill from the hardcoded table.
   const fb = FX_USD_PER_FALLBACK[currency];
   if (typeof fb === 'number' && fb > 0) {
@@ -887,7 +973,7 @@ function _fxRateToUSD(currency) {
   // 0. AUTHORITATIVE: dedicated FX rates file (usdPer multiplier). This is the
   //    clean source that bypasses the broken sheet FX pairs entirely. Reads the
   //    nested {usdPer} structure that fetch_fx.py writes via fxRatesUsdPer().
-  const filePer = (typeof fxRatesUsdPer === 'function') ? fxRatesUsdPer(currency) : null;
+  const filePer = (typeof fxRatesUsdPer === 'function') ? fxRatesUsdPer(currency, true) : null;
   if (filePer != null && filePer > 0) return filePer;
   const getRow = (t) => (typeof getStockbookRow === 'function') ? getStockbookRow(t) : null;
   // Read the FX pair's price. The sheet's price column is WRONG for bare-form
@@ -934,6 +1020,10 @@ function _fxRateToUSD(currency) {
   const bareInverse = priceOf(`${currency}=X`);
   if (bareInverse != null && bareInverse > 0) return 1 / bareInverse;
 
+  // z123: the hardcoded June-2026 table only when neither rates.json nor a live FX row
+  // in the books knows the currency (HUF / CLP / PHP / EGP used to stop at the table).
+  const fb = FX_USD_PER_FALLBACK[currency];
+  if (typeof fb === 'number' && fb > 0) { console.log(`[fx] ${currency}: no live rate — using the June-2026 fallback ${fb}`); return fb; }
   return null;  // no usable rate — caller should NOT convert, flag discrepancy
 }
 
@@ -948,22 +1038,27 @@ function normalizeRowToUSD(row) {
   if (currency === 'USX' || currency === 'USd') {
     const cp = (typeof row.price === 'number' && isFinite(row.price)) ? row.price * 0.01 : row.price;
     const cm = (typeof row.marketCap === 'number' && isFinite(row.marketCap)) ? row.marketCap * 0.01 : row.marketCap;
-    return { price: cp, marketCap: cm, converted: true, currency: 'USD', rate: 0.01 };
+    return { price: cp, marketCap: cm, converted: true, currency: 'USD', rate: 0.01, priceRate: 0.01 };
   }
   if (!currency || currency === 'USD') {
     return { price: row.price, marketCap: row.marketCap, converted: false, currency: 'USD', rate: 1 };
   }
   // London quotes are often in GBX (pence) = 1/100 GBP. Detect via currency code.
+  // z123: also JSE cents (ZAc) and Israeli agorot (ILA). Yahoo quotes these PRICES in the
+  // sub-unit but MARKET CAPS in the main unit (Glencore: 583.10 GBp, cap £69.8B), so the
+  // sub-unit factor applies to price-like fields only.
   let penceFactor = 1;
   if (currency === 'GBX' || currency === 'GBp') { currency = 'GBP'; penceFactor = 0.01; }
+  else if (currency === 'ZAc' || currency === 'ZAC') { currency = 'ZAR'; penceFactor = 0.01; }
+  else if (currency === 'ILA' || currency === 'ILa') { currency = 'ILS'; penceFactor = 0.01; }
   const rate = _fxRateToUSD(currency);
   if (rate == null) {
     // No FX rate loaded — don't fake it. Flag so UI can mark "local ccy".
     return { price: row.price, marketCap: row.marketCap, converted: false, currency, rate: null };
   }
   const price = (typeof row.price === 'number' && isFinite(row.price)) ? row.price * penceFactor * rate : row.price;
-  const marketCap = (typeof row.marketCap === 'number' && isFinite(row.marketCap)) ? row.marketCap * penceFactor * rate : row.marketCap;
-  return { price, marketCap, converted: true, currency, rate };
+  const marketCap = (typeof row.marketCap === 'number' && isFinite(row.marketCap)) ? row.marketCap * rate : row.marketCap;
+  return { price, marketCap, converted: true, currency, rate, priceRate: penceFactor * rate };
 }
 
 // On-demand: ensure a row is USD-normalized, RETRYING the FX lookup if a
@@ -974,39 +1069,43 @@ function normalizeRowToUSD(row) {
 // Returns the row (mutated in place when conversion now succeeds).
 function ensureRowNormalized(row) {
   if (!row || !row.ticker) return row;
-  if (row._usdNormalized) return row;  // already done
-  const localCcy = (row.currency && row.currency !== 'USD') ? row.currency : _tickerLocalCurrency(row.ticker);
-  if (!localCcy || localCcy === 'USD') return row;  // US/plain — nothing to do
-  const norm = normalizeRowToUSD(row);
-  if (norm.converted) {
-    row._localPrice = row.price;
-    row._localMarketCap = row.marketCap;
-    row._localCurrency = norm.currency;
-    row._fxRate = norm.rate;
-    row.price = norm.price;
-    row.marketCap = norm.marketCap;
-    // Convert all monetary financial-statement fields too, so foreign company
-    // assets/liabilities/equity/revenue compare apples-to-apples with US names
-    // (and feed the reasoning chain in USD). These are absolute-currency
-    // amounts; ratios (P/E, margins, ROE) are unit-less and left untouched.
-    const MONETARY_FIELDS = [
-      'totalAssets', 'totalLiabilities', 'totalEquity', 'bookValue', 'cash',
-      'totalDebt', 'freeCashFlow', 'revenue', 'netIncome', 'ebitda', 'eps',
-      'priorClose', 'high52', 'low52', 'fmpHigh52', 'fmpLow52',
-    ];
-    if (!row._localFinancials) row._localFinancials = {};
-    for (const f of MONETARY_FIELDS) {
-      if (typeof row[f] === 'number' && isFinite(row[f])) {
-        row._localFinancials[f] = row[f];
-        row[f] = row[f] * norm.rate;
-      }
-    }
-    row._usdNormalized = true;
-    row._currencyUnconverted = false;
-  } else {
-    row._currencyUnconverted = true;
-    row._localCurrency = norm.currency || localCcy;
+  if (rowUnitKind(row) !== 'money') {                    // z123: FX rates and index levels are never converted
+    if (row._usdNormalized || row._localFinancials) _restoreLocalRow(row);
+    return row;
   }
+  if (row._usdNormalized) return row;  // already done
+  const tradeCcy = (row.currency && row.currency !== 'USD') ? row.currency : _tickerLocalCurrency(row.ticker);
+  const finRaw = row.financialCurrency || row.financialcurrency || row.financial_currency || '';
+  const finCcy = finRaw ? String(finRaw).trim().toUpperCase() : null;
+  if ((!tradeCcy || tradeCcy === 'USD') && (!finCcy || finCcy === 'USD')) return row;   // all USD
+  let norm;
+  if (tradeCcy && tradeCcy !== 'USD') {
+    norm = normalizeRowToUSD(row);
+    if (!norm.converted) { row._currencyUnconverted = true; row._localCurrency = norm.currency || tradeCcy; return row; }
+  } else norm = { converted: true, price: row.price, marketCap: row.marketCap, currency: 'USD', rate: 1, priceRate: 1 };
+  // z123: statements are in the REPORTING currency when the pipeline knows it (an ADR like
+  // TSM trades in USD but reports in TWD; Glencore trades in GBp and reports in USD) -
+  // otherwise in the trading currency's main unit.
+  const finRate = finCcy ? (finCcy === 'USD' ? 1 : _fxRateToUSD(finCcy)) : norm.rate;
+  const priceRate = norm.priceRate != null ? norm.priceRate : norm.rate;
+  row._localPrice = row.price;
+  row._localMarketCap = row.marketCap;
+  row._localCurrency = norm.currency;
+  row._fxRate = priceRate;
+  row.price = norm.price;
+  row.marketCap = norm.marketCap;
+  row._finCurrency = finCcy || norm.currency;
+  row._finRate = finRate;
+  if (!row._localFinancials) row._localFinancials = {};
+  const conv = (f, k) => { if (typeof row[f] === 'number' && isFinite(row[f]) && k != null && k !== 1) { row._localFinancials[f] = row[f]; row[f] = row[f] * k; } };
+  for (const f of ['priorClose', 'high52', 'low52', 'fmpHigh52', 'fmpLow52']) conv(f, priceRate);   // prices (sub-unit aware)
+  if (finRate != null && finRate > 0) {
+    for (const f of ['totalAssets', 'totalLiabilities', 'totalEquity', 'bookValue', 'cash', 'totalDebt', 'freeCashFlow', 'revenue', 'netIncome', 'ebitda']) conv(f, finRate);
+  } else row._finUnconverted = finCcy;
+  // EPS: per share in the reporting currency on a home listing; Yahoo quotes an ADR's EPS per ADR in USD.
+  conv('eps', (tradeCcy && tradeCcy !== 'USD') ? (finRate != null ? finRate : norm.rate) : 1);
+  row._usdNormalized = true;
+  row._currencyUnconverted = false;
   return row;
 }
 
@@ -5822,10 +5921,12 @@ function recalculate() {
 
 function fmt$(n, dec = 2) {
   if (n == null || !isFinite(n)) return '—';
+  let $s = '$';
+  if (_CCY_LENS) { n = n * _CCY_LENS.factor; $s = _CCY_LENS.symbol; }   // z123: valuation in a local currency
   const abs = Math.abs(n);
-  if (abs >= 1e12) return '$' + (n/1e12).toFixed(2) + 'T';
-  if (abs >= 1e9)  return '$' + (n/1e9).toFixed(2)  + 'B';
-  if (abs >= 1e6)  return '$' + (n/1e6).toFixed(2)  + 'M';
+  if (abs >= 1e12) return $s + (n/1e12).toFixed(2) + 'T';
+  if (abs >= 1e9)  return $s + (n/1e9).toFixed(2)  + 'B';
+  if (abs >= 1e6)  return $s + (n/1e6).toFixed(2)  + 'M';
   // Sub-million values: locale-aware grouping commas + fixed decimals.
   // Sub-dollar values get more precision so they don't round to $0.00.
   // Caller can override with explicit dec.
@@ -5838,7 +5939,7 @@ function fmt$(n, dec = 2) {
   const num   = Math.abs(n).toLocaleString(undefined, {
     minimumFractionDigits: effectiveDec, maximumFractionDigits: effectiveDec,
   });
-  return sign + '$' + num;
+  return sign + $s + num;
 }
 
 function fmtPct(n, dec = 2) {
@@ -5864,11 +5965,12 @@ function fmtNum(n, dec = 2) {
 //   exactValue(1234567.89, true)  → "$1,234,567.89"
 function exactValue(n, withDollar = false) {
   if (n == null || !isFinite(n)) return '—';
+  if (withDollar && _CCY_LENS) { n = n * _CCY_LENS.factor; }
   const formatted = n.toLocaleString(undefined, {
     minimumFractionDigits: Math.abs(n) < 1 ? 4 : 2,
     maximumFractionDigits: Math.abs(n) < 1 ? 6 : 2,
   });
-  return withDollar ? '$' + formatted : formatted;
+  return withDollar ? (_CCY_LENS ? _CCY_LENS.symbol : '$') + formatted : formatted;
 }
 
 // Wraps any formatted number in a span with the exact-value tooltip.
@@ -12300,9 +12402,15 @@ function renderStockBook() {
             // FX PAIRS: show the USD value of one unit of the foreign currency
             // (RUB=X → $0.0138), computed from the authoritative rate so it's
             // correct without opening each pair. Market cap is N/A for FX.
-            const _fxVal = (sb.section === 'currencies' && typeof fxRowUsdValue === 'function') ? fxRowUsdValue(r) : null;
-            const priceCell = _fxVal
-              ? `<td title="1 ${_fxVal.foreignCcy} = ${fmtFxUsd(_fxVal.usd)} USD (raw quote ${_fxVal.raw != null ? (+_fxVal.raw).toFixed(4) : '—'})">${fmtFxUsd(_fxVal.usd)} <span style="color:var(--ink-faint);font-size:9px">/ ${escapeHtml(_fxVal.foreignCcy)}</span></td>`
+            // z123: an FX pair shows its rate in market convention (USD/JPY 157.99 JPY, EUR/CAD
+            // 1.5889 CAD) with the USD value of the non-USD currency under it; an index shows its
+            // level with no currency sign.
+            const _fxQ = (typeof rowUnitKind === 'function' && rowUnitKind(r) === 'fx') ? fxPairQuote(r) : null;
+            const _fxVal = _fxQ && typeof fxRowUsdValue === 'function' ? fxRowUsdValue(r) : null;
+            const priceCell = _fxQ
+              ? `<td title="${escapeHtml(_fxQ.base)}/${escapeHtml(_fxQ.quote)}: ${_fxQ.rate != null ? fmtFxRate(_fxQ.rate) : '—'} ${escapeHtml(_fxQ.quote)} per 1 ${escapeHtml(_fxQ.base)}${_fxVal ? ` · 1 ${escapeHtml(_fxVal.foreignCcy)} = ${fmtFxUsd(_fxVal.usd)}` : ''}">${_fxQ.rate != null ? `${fmtFxRate(_fxQ.rate)} <span style="color:var(--ink-faint);font-size:9px">${escapeHtml(_fxQ.quote)}</span>` : `<span style="color:#e0b04c">⚠ ${_fxQ.placeholder ? '1.00 placeholder' : 'no rate'}</span>`}${_fxVal && _fxQ.quote !== 'USD' && _fxVal.foreignCcy !== 'USD' ? `<div style="color:var(--ink-faint);font-size:9px">1 ${escapeHtml(_fxVal.foreignCcy)} = ${fmtFxUsd(_fxVal.usd)}</div>` : ''}</td>`
+              : (typeof rowUnitKind === 'function' && rowUnitKind(r) === 'index')
+              ? `<td title="index level (points), not a price in ${escapeHtml(r.currency || 'USD')}">${r.price != null && isFinite(r.price) ? (+r.price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—'}</td>`
               : r._currencyUnconverted
               ? `<td title="No FX rate loaded for ${r._localCurrency} — showing local currency. Add ${r._localCurrency}=X to convert."><span style="color:#e0b04c">⚠ ${r.price != null ? fmt$H(r.price) : '—'}</span></td>`
               : `<td>${r.price != null ? fmt$H(r.price) : '—'}</td>`;
@@ -13741,7 +13849,7 @@ async function fnDES(ticker) {
                 <div><div class="l">Type</div><div class="v" style="color:var(--amber)">Currency pair</div></div>
                 <div><div class="l">1 ${escapeHtml(fx.foreignCcy)} =</div><div class="v">${fmtFxUsd(fx.usd)} USD</div></div>
                 <div><div class="l">1 USD =</div><div class="v">${fx.usd > 0 ? (1 / fx.usd).toFixed(4) : '—'} ${escapeHtml(fx.foreignCcy)}</div></div>
-                <div><div class="l">Raw quote</div><div class="v">${fx.raw != null ? (+fx.raw).toFixed(4) : '—'}</div></div>`;
+                <div><div class="l">Market quote</div><div class="v">${(() => { const q = fxPairQuote(merged); return q && q.rate != null ? `${escapeHtml(q.base)}/${escapeHtml(q.quote)} ${fmtFxRate(q.rate)} ${escapeHtml(q.quote)}` : '—'; })()}</div></div>`;
             }
           }
           return `
@@ -14122,8 +14230,10 @@ async function fnFA(ticker) {
   // absent (e.g. a brand-new ticker not yet in the pipeline).
   let fmpData = null;
   let finSource = null;
+  let repoFinMeta = null;   // z123: the statements' currency lives on the repo file
   try {
     const repoFin = await fetchRepoFinancials(ticker);
+    repoFinMeta = repoFin;
     if (repoFin && (repoFin.income?.length || repoFin.balance?.length || repoFin.cashflow?.length)) {
       fmpData = { income: repoFin.income || [], balance: repoFin.balance || [], cashflow: repoFin.cashflow || [] };
       finSource = `repo · ${repoFin.source || 'yahoo'}${repoFin.updated ? ' · ' + repoFin.updated.slice(0, 10) : ''}`;
@@ -14152,7 +14262,29 @@ async function fnFA(ticker) {
   // Build FMP financials table if available
   let fmpHtml = '';
   if (fmpData) {
+    // z123: the statements' own currency (the pipeline's financialCurrency, FMP's reportedCurrency)
+    // and - unless you pick the local currency - a USD view converted at each period's OWN rate:
+    // income and cash flow at the year's average rate, the balance sheet at the year-end close
+    // (rates from the books' daily FX histories; spot only if no history exists).
+    const finCcy = String((repoFinMeta && (repoFinMeta.financialCurrency || repoFinMeta.currency)) || ((fmpData.income || [])[0] || {}).reportedCurrency || 'USD').toUpperCase();
+    const faUsd = finCcy !== 'USD' && ((state.ccyLens || {})[ticker] || 'USD') !== 'LOCAL';
+    const faHist = faUsd ? await fxHistoryUsdPer(finCcy) : null;
+    const faSpot = finCcy === 'USD' ? 1 : _fxRateToUSD(finCcy);
+    const FA_NOT_MONEY = /shares|shs|ratio|margin|percent|pct|calendarYear|^date$|period|employees/i;
+    const faC = (y, key, kind) => {
+      const v = y[key];
+      if (!faUsd || v == null || !isFinite(v) || FA_NOT_MONEY.test(key)) return v;
+      const r = (faHist && y.date) ? fxRateAt(faHist, y.date, kind === 'flow' ? 365 : 0) : null;
+      const k = r || faSpot;
+      return k ? v * k : null;
+    };
     const fmt = (n) => n != null && isFinite(n) ? formatHumanNumber(n) : '—';
+    if (finCcy !== 'USD') {
+      const tq = escapeHtml(ticker);
+      fmpHtml += `<div class="fn-section" style="display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;font-family:var(--mono);font-size:10.5px">
+        <span>Statements in <strong>${faUsd ? 'USD' : escapeHtml(finCcy)}</strong>${faUsd ? ` — converted from ${escapeHtml(finCcy)}: income & cash flow at each year's average rate, balance sheet at the year-end rate${faHist ? '' : ' (no FX history found: spot rate)'}` : ' (reporting currency)'}</span>
+        <span class="seg-control" style="font-size:10px;margin-left:auto"><button class="seg-btn ${faUsd ? 'active' : ''}" onclick="state.ccyLens=state.ccyLens||{};state.ccyLens['${tq}']='USD';fnFA('${tq}')">USD</button><button class="seg-btn ${!faUsd ? 'active' : ''}" onclick="state.ccyLens=state.ccyLens||{};state.ccyLens['${tq}']='LOCAL';fnFA('${tq}')">${escapeHtml(finCcy)}</button></span></div>`;
+    }
     const incomeYears = fmpData.income || [];
     const balanceYears = fmpData.balance || [];
     const cashflowYears = fmpData.cashflow || [];
@@ -14160,7 +14292,7 @@ async function fnFA(ticker) {
     if (incomeYears.length > 0) {
       const headers = incomeYears.map(y => y.calendarYear || y.date?.slice(0, 4) || '—');
       const incomeRow = (label, key) => `
-        <tr><td>${label}</td>${incomeYears.map(y => `<td>${fmt(y[key])}</td>`).join('')}</tr>
+        <tr><td>${label}</td>${incomeYears.map(y => `<td>${fmt(faC(y, key, 'flow'))}</td>`).join('')}</tr>
       `;
       fmpHtml += `
         <div class="fn-section">
@@ -14185,7 +14317,7 @@ async function fnFA(ticker) {
     if (balanceYears.length > 0) {
       const headers = balanceYears.map(y => y.calendarYear || y.date?.slice(0, 4) || '—');
       const balanceRow = (label, key) => `
-        <tr><td>${label}</td>${balanceYears.map(y => `<td>${fmt(y[key])}</td>`).join('')}</tr>
+        <tr><td>${label}</td>${balanceYears.map(y => `<td>${fmt(faC(y, key, 'stock'))}</td>`).join('')}</tr>
       `;
       fmpHtml += `
         <div class="fn-section">
@@ -14209,7 +14341,7 @@ async function fnFA(ticker) {
     if (cashflowYears.length > 0) {
       const headers = cashflowYears.map(y => y.calendarYear || y.date?.slice(0, 4) || '—');
       const cfRow = (label, key) => `
-        <tr><td>${label}</td>${cashflowYears.map(y => `<td>${fmt(y[key])}</td>`).join('')}</tr>
+        <tr><td>${label}</td>${cashflowYears.map(y => `<td>${fmt(faC(y, key, 'flow'))}</td>`).join('')}</tr>
       `;
       fmpHtml += `
         <div class="fn-section">
@@ -21586,7 +21718,7 @@ function renderTickerTape() {
     const pctClass = pct == null ? 'flat' : pct > 0 ? 'up' : pct < 0 ? 'down' : 'flat';
     const pctText = pct == null ? '' : (pct >= 0 ? '+' : '') + (pct * 100).toFixed(2) + '%';
     const arrow = pct == null ? '' : pct > 0 ? '▲ ' : pct < 0 ? '▼ ' : '';
-    const priceText = fmt$(it.price);
+    const priceText = fmtRowPrice(it, it.price);   // z123: FX in market convention, index levels without $
     const groupBadge = it.groupLabel
       ? `<span class="ticker-tape-sort">${escapeHtml(it.groupLabel)} ›</span>`
       : '';
@@ -21683,7 +21815,7 @@ function _updateTickerTapePricesInPlace(items) {
     const pctClass = pct == null ? 'flat' : pct > 0 ? 'up' : pct < 0 ? 'down' : 'flat';
     const pctText = pct == null ? '' : (pct >= 0 ? '+' : '') + (pct * 100).toFixed(2) + '%';
     const arrow = pct == null ? '' : pct > 0 ? '▲ ' : pct < 0 ? '▼ ' : '';
-    const priceText = fmt$(it.price);
+    const priceText = fmtRowPrice(it, it.price);   // z123: FX in market convention, index levels without $
     els.forEach(el => {
       const priceEl = el.querySelector('.ticker-tape-price');
       const pctEl = el.querySelector('.ticker-tape-pct');
@@ -23028,29 +23160,9 @@ function enrichRowClassification(row) {
   row._subClass = sub;
 
   // ----- Foreign currency → USD normalization -----
-  // Convert foreign-listed equities (priced in local currency) to USD so the
-  // Stock Book, heat map, and market-cap rankings aren't corrupted by raw
-  // Won/Yen/etc. figures (the Hyundai "$180T market cap" bug). We preserve the
-  // originals on _localPrice / _localMarketCap / _localCurrency so nothing is
-  // lost and the UI can show "₩200,000 local" on hover if desired.
-  const localCcy = (row.currency && row.currency !== 'USD') ? row.currency : _tickerLocalCurrency(row.ticker);
-  if (localCcy && localCcy !== 'USD' && !row._usdNormalized) {
-    const norm = normalizeRowToUSD(row);
-    if (norm.converted) {
-      row._localPrice = row.price;
-      row._localMarketCap = row.marketCap;
-      row._localCurrency = norm.currency;
-      row._fxRate = norm.rate;
-      row.price = norm.price;
-      row.marketCap = norm.marketCap;
-      row._usdNormalized = true;
-    } else {
-      // Couldn't convert — flag so the row can be visually marked as local-ccy
-      // rather than silently showing a wrong USD figure.
-      row._currencyUnconverted = true;
-      row._localCurrency = norm.currency || localCcy;
-    }
-  }
+  // z123: ONE normaliser for every path (this one used to convert price + market cap only,
+  // leaving statements in local currency, and it converted FX rates and index levels).
+  if (typeof ensureRowNormalized === 'function') ensureRowNormalized(row);
 }
 
 // Collect all unique sectors/sub-sectors/industries seen across the stockbook
@@ -55175,3 +55287,66 @@ function vDataStatus() {
   return out;
 }
 if (typeof window !== 'undefined') window.vDataStatus = vDataStatus;
+
+// ============================================================
+//   z123 — VALUATION DISPLAY CURRENCY (USD ⇄ local)
+//   The valuation is modelled in USD (foreign rows are normalised to USD). For a
+//   foreign listing, a bar under the price switches every money figure the overview,
+//   results, projection and Monte Carlo print between USD and the local currency at
+//   the spot rate (local = USD ÷ USD-per-unit, so price and market cap read exactly
+//   as quoted at home). The Financials overlay follows the same choice, converting
+//   each period at that period's own rate.
+// ============================================================
+function valuationLocalCcy(stock) {
+  const row = stock && typeof getStockbookRow === 'function' ? getStockbookRow(stock.ticker) : null;
+  return row && row._usdNormalized && row._localCurrency && row._localCurrency !== 'USD' ? row._localCurrency : null;
+}
+function valuationLens(stock) {
+  const local = valuationLocalCcy(stock);
+  if (!local || ((state.ccyLens || {})[stock.ticker] || 'USD') !== 'LOCAL') return null;
+  const usdPer = _fxRateToUSD(local);
+  return usdPer > 0 ? { code: local, symbol: ccySymbol(local), factor: 1 / usdPer } : null;
+}
+function setValuationCurrency(ticker, mode) {
+  state.ccyLens = state.ccyLens || {};
+  state.ccyLens[ticker] = mode;
+  try {
+    if (state.stock && state.stock.ticker === ticker) {
+      renderSummary(state.stock);
+      if (typeof recalculate === 'function') recalculate();
+    }
+  } catch (e) { console.warn('[ccy-lens]', e); }
+}
+function _ccyLensBar(stock) {
+  const priceEl = document.getElementById('s-price');
+  let bar = document.getElementById('ccy-lens-bar');
+  const local = stock ? valuationLocalCcy(stock) : null;
+  if (!priceEl || !local) { if (bar) bar.remove(); return; }
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'ccy-lens-bar';
+    bar.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;font-family:var(--mono);font-size:10px;color:var(--ink-dim);margin:6px 0';
+    const anchor = priceEl.parentElement || priceEl;
+    if (anchor.parentElement) anchor.parentElement.insertBefore(bar, anchor.nextSibling); else anchor.appendChild(bar);
+  }
+  const mode = (state.ccyLens || {})[stock.ticker] === 'LOCAL' ? 'LOCAL' : 'USD', usdPer = _fxRateToUSD(local), t = escapeHtml(stock.ticker);
+  bar.innerHTML = `<span class="seg-control" style="font-size:10px"><button class="seg-btn ${mode === 'USD' ? 'active' : ''}" onclick="setValuationCurrency('${t}','USD')">USD</button><button class="seg-btn ${mode === 'LOCAL' ? 'active' : ''}" onclick="setValuationCurrency('${t}','LOCAL')">${escapeHtml(local)}</button></span>
+    <span>1 ${escapeHtml(local)} = ${usdPer > 0 ? fmtFxUsd(usdPer) : '—'} spot · the model runs in USD · statements: Financials (each year at its own rate)</span>`;
+}
+(function () {
+  const wrapLens = name => {
+    const orig = window[name];
+    if (typeof orig !== 'function' || orig._z123) return;
+    const w = function () {
+      const st = (name === 'renderSummary' && arguments[0]) || (typeof state !== 'undefined' ? state.stock : null);
+      const prev = _CCY_LENS;
+      _CCY_LENS = st ? valuationLens(st) : null;
+      try { return orig.apply(this, arguments); }
+      finally { _CCY_LENS = prev; if (name === 'renderSummary') { try { _ccyLensBar(st); } catch (e) {} } }
+    };
+    w._z123 = true;
+    window[name] = w;
+  };
+  ['renderSummary', 'renderResults', 'renderProjection', 'renderMonteCarlo', 'renderValuationConfidenceAudit'].forEach(wrapLens);
+})();
+
