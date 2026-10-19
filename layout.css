@@ -56,3 +56,32 @@
      grade column; the table scrolls sideways inside its wrapper instead. */
   .sb-table td, .sb-table th { overflow-wrap: anywhere; }
 }
+
+/* ===== z125 — a simpler home: grouped top bar + sub-tabs (navgroups.js) ===== */
+.tab-nav .nav-hidden { display: none !important; }
+.nav-group-btn {
+  background: transparent; border: none; border-bottom: 2px solid transparent; color: var(--ink-dim);
+  padding: 14px 18px 12px; cursor: pointer; font-family: var(--sans); text-align: left; transition: all 0.15s ease;
+  display: flex; align-items: center; gap: 8px; position: relative; white-space: nowrap; flex-shrink: 0;
+}
+.nav-group-btn:hover { color: var(--ink); background: var(--bg-card); }
+.nav-group-btn.active { color: var(--amber); border-bottom-color: var(--amber); background: linear-gradient(180deg, transparent 0%, rgba(212,162,76,0.04) 100%); }
+.nav-group-btn .tab-num { display: none; }
+.nav-group-btn .tab-label { font-family: var(--sans); font-size: 14px; font-weight: 500; letter-spacing: 0.02em; }
+.nav-group-btn.active .tab-label { font-weight: 600; }
+html[data-theme="light"] .nav-group-btn { color: var(--ink-dim); }
+html[data-theme="light"] .nav-group-btn.active { color: var(--ink); border-bottom-color: var(--amber); background: rgba(184, 114, 28, 0.08); }
+.sub-nav {
+  display: flex; gap: 6px; padding: 8px 24px; border-bottom: 1px solid var(--rule); background: var(--bg);
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: none; -webkit-overflow-scrolling: touch;
+}
+.sub-nav[hidden] { display: none; }
+.sub-nav::-webkit-scrollbar { display: none; }
+.sub-nav .tab-btn { padding: 6px 12px; border: 1px solid var(--rule); border-radius: 999px; }
+.sub-nav .tab-btn .tab-label { font-size: 12px; }
+.sub-nav .tab-btn.active { border-color: var(--amber); background: rgba(212,162,76,0.10); }
+@media (max-width: 600px) {
+  .nav-group-btn { padding: 12px 12px 10px; }
+  .nav-group-btn .tab-label { font-size: 13px; }
+  .sub-nav { padding: 8px 12px; }
+}
