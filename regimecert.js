@@ -133,7 +133,11 @@
     const old = document.getElementById('bond-trend-card');
     const anchor = document.getElementById('regime-cert-card');          // re-query: the card may have been re-rendered
     if (old) old.outerHTML = html; else if (anchor && anchor.isConnected) anchor.insertAdjacentHTML('afterend', html); else return;
-    window.VChart.drawStockChart(document.getElementById('bond-trend-chart'), tlt.slice(-130).map(b => ({ t: b.d, v: b.c })), { height: 130, label: 'TLT 6 months' });
+    // z127: the same chart as the GoodGlobe index and the account value (header that follows the
+    // scrub, 1D-ALL range bar, D / W / M intervals); the old 6-month mini chart only if charts.js is older
+    const tltHost = document.getElementById('bond-trend-chart');
+    if (window.VChart.mountSeriesChart) window.VChart.mountSeriesChart(tltHost, { key: 'regime-tlt', ticker: 'TLT', title: 'TLT · 20+ year Treasury ETF', daily: tlt, range: '1Y' });
+    else window.VChart.drawStockChart(tltHost, tlt.slice(-130).map(b => ({ t: b.d, v: b.c })), { height: 130, label: 'TLT 6 months' });
   }
   async function tagHeader() {
     const tag = document.getElementById('s-regime-tag');
