@@ -12180,6 +12180,12 @@ function renderStockBook() {
     renderStockBookPortfolio(content);
     return;
   }
+  // z125: the Options section lists every ticker with an options chain (TRAPP2-OPTIONS) -
+  // it used to filter for OCC contract rows, which the books don't hold, so it was empty.
+  if (sb.section === 'options' && window.OptionsHub) {
+    window.OptionsHub.render(content);
+    return;
+  }
 
   // Filter by section. Top-level buckets (equities/derivatives/crypto/futures/universe)
   // use coarse classification; sector tabs (metals/currencies/indices/commodities/options)
