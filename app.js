@@ -48290,6 +48290,11 @@ function botMarkToMarket() {
     if (px == null || !isFinite(px)) continue;
     bet.lastPrice = px;
     bet.lastPriceSource = pxSource;
+    // z128: a CLOSED trade keeps the P/L it was booked at. Re-marking it at today's price
+    // (this loop did) rewrote every settled result - the Win Rate card read 18W / 13L from
+    // those marks while the journal says 21W / 10L - the same class of bug as z117's stale
+    // marks. Only open positions are marked.
+    if (bet.status !== 'open') continue;
     // Raw % move of the underlying since entry
     const rawPct = bet.entryPrice > 0 ? (px - bet.entryPrice) / bet.entryPrice : 0;
     // Directional return (short profits when price falls), times leverage
@@ -48639,6 +48644,7 @@ function botBookValue() {
     openNotional: +openNotional.toFixed(2),     // capital committed
     openExposure: +openExposure.toFixed(2),     // post-leverage market exposure
     openPnl: +openPnl.toFixed(2),               // unrealized
+    openMarketValue: +(openNotional + openPnl).toFixed(2),   // z128: cost + unrealized - cash + this = book value
     feesPaid: +feesPaid.toFixed(2),             // total fees (explicit + estimated)
     cashAdded: +(bot.cashAdded || 0).toFixed(2),// external cash injected by the user
     // Capital base = the starting bankroll plus net external cash in/out. The
@@ -50090,18 +50096,18 @@ function renderBetsTab() {
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:10px;margin:18px 0">
       <div class="company-card" style="margin:0;border-left:3px solid ${pnlColor(perf.totalPnl)};min-width:0;overflow:hidden;container-type:inline-size">
         <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);letter-spacing:0.1em;text-transform:uppercase">Portfolio Value</div>
-        <div class="bet-card-val" data-fit-max="22" style="font-family:var(--mono);font-size:22px;font-weight:700;color:${pnlColor(perf.totalPnl)};margin-top:4px;white-space:nowrap">$${(book ? book.totalValue : perf.currentValue).toLocaleString(undefined,{maximumFractionDigits:0})}</div>
-        <div style="font-family:var(--mono);font-size:9px;color:${pnlColor(perf.totalPnl)};margin-top:2px">${perf.totalReturnPct >= 0 ? '+' : ''}${perf.totalReturnPct}% on $${(perf.netCapital || 100000).toLocaleString(undefined,{maximumFractionDigits:0})} capital${perf.cashAdded ? ` (${perf.cashAdded > 0 ? '+' : '−'}$${Math.abs(perf.cashAdded).toLocaleString(undefined,{maximumFractionDigits:0})} ${perf.cashAdded > 0 ? 'deposited' : 'withdrawn'})` : ''}</div>
+        <div class="bet-card-val" data-fit-max="22" style="font-family:var(--mono);font-size:22px;font-weight:700;color:${pnlColor(perf.totalPnl)};margin-top:4px;white-space:nowrap">$${(book ? +(book.cash + book.openMarketValue).toFixed(2) : perf.currentValue).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+        <div style="font-family:var(--mono);font-size:9px;color:${pnlColor(perf.totalPnl)};margin-top:2px">= cash + open positions · ${perf.totalReturnPct >= 0 ? '+' : ''}${perf.totalReturnPct}% on $${(perf.netCapital || 100000).toLocaleString(undefined,{maximumFractionDigits:0})} capital${perf.cashAdded ? ` (${perf.cashAdded > 0 ? '+' : '−'}$${Math.abs(perf.cashAdded).toLocaleString(undefined,{maximumFractionDigits:0})} ${perf.cashAdded > 0 ? 'deposited' : 'withdrawn'})` : ''}</div>
       </div>
       ${book ? `<div class="company-card" style="margin:0;border-left:3px solid var(--amber);min-width:0;overflow:hidden;container-type:inline-size">
         <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);letter-spacing:0.1em;text-transform:uppercase">Open Positions</div>
-        <div class="bet-card-val" data-fit-max="19" style="font-family:var(--mono);font-size:19px;font-weight:700;color:var(--ink);margin-top:4px;white-space:nowrap">$${book.openNotional.toLocaleString(undefined,{maximumFractionDigits:0})}</div>
-        <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:2px">${book.openReturnPct != null ? `<span style="color:${pnlColor(book.openPnl)}">${book.openReturnPct >= 0 ? '+' : '−'}${Math.abs(book.openReturnPct)}%</span> · ` : ''}${book.openPositions} open · $${book.openExposure.toLocaleString(undefined,{maximumFractionDigits:0})} exposure (${book.grossLeverage}× gross)</div>
+        <div class="bet-card-val" data-fit-max="19" style="font-family:var(--mono);font-size:19px;font-weight:700;color:var(--ink);margin-top:4px;white-space:nowrap">$${book.openMarketValue.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+        <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:2px"><span style="color:${pnlColor(book.openPnl)}">${book.openPnl >= 0 ? '+' : '−'}$${Math.abs(book.openPnl).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})} unrealized${book.openReturnPct != null ? ` (${book.openReturnPct >= 0 ? '+' : '−'}${Math.abs(book.openReturnPct)}%)` : ''}</span> on $${book.openNotional.toLocaleString(undefined,{maximumFractionDigits:0})} cost · ${book.openPositions} open · $${book.openExposure.toLocaleString(undefined,{maximumFractionDigits:0})} exposure (${book.grossLeverage}× gross)</div>
       </div>
       <div class="company-card" style="margin:0;cursor:pointer;min-width:0;overflow:hidden;container-type:inline-size" id="bets-cash-card" title="Click to feed the bot cash (or withdraw). Recorded as a capital deposit, not P&L — gives the bot more to size trades with.">
         <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);letter-spacing:0.1em;text-transform:uppercase">Cash <span style="color:var(--amber);text-transform:none;letter-spacing:0">✎ edit</span></div>
-        <div class="bet-card-val" data-fit-max="19" style="font-family:var(--mono);font-size:19px;font-weight:700;color:var(--ink);margin-top:4px;white-space:nowrap">$${book.cash.toLocaleString(undefined,{maximumFractionDigits:0})}</div>
-        <div style="font-family:var(--mono);font-size:9px;color:${pnlColor(book.openPnl)};margin-top:2px">${book.openPnl >= 0 ? '+' : '−'}$${Math.abs(book.openPnl).toLocaleString(undefined,{maximumFractionDigits:0})} unrealized${book.cashAdded ? ` · $${book.cashAdded.toLocaleString(undefined,{maximumFractionDigits:0})} ${book.cashAdded >= 0 ? 'added' : 'withdrawn'}` : ''}</div>
+        <div class="bet-card-val" data-fit-max="19" style="font-family:var(--mono);font-size:19px;font-weight:700;color:var(--ink);margin-top:4px;white-space:nowrap">$${book.cash.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+        <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:2px">uninvested · bankroll − cost of open positions${book.cashAdded ? ` · $${book.cashAdded.toLocaleString(undefined,{maximumFractionDigits:0})} ${book.cashAdded >= 0 ? 'added' : 'withdrawn'}` : ''}</div>
       </div>` : ''}
       ${book ? `<div class="company-card" style="margin:0;min-width:0;overflow:hidden;container-type:inline-size">
         <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);letter-spacing:0.1em;text-transform:uppercase">Fees Paid</div>
