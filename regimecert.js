@@ -97,7 +97,7 @@
   async function renderBondCard() {
     if (_bondBusy || !document.getElementById('regime-cert-card') || !window.VChart) return;
     _bondBusy = true;
-    try { await _renderBondCard(); } finally { _bondBusy = false; }
+    try { await _renderBondCard(); } finally { _bondBusy = false; renderCurveCard(); }
   }
   async function _renderBondCard() {
     const [tlt, spy] = await Promise.all([window.VChart.fetchDaily('TLT'), window.VChart.fetchDaily('SPY')]);
@@ -154,5 +154,38 @@
     const panel = document.querySelector('.tab-panel[data-panel="regime"]');
     if (panel && panel.classList.contains('active') && !document.getElementById('regime-cert-card')) renderRegimeCard();
   }, 1500);
-  window.RegimeCertainty = { load, renderRegimeCard };
+  // ---- Yield curve · context (z126) ---------------------------------------
+  // The latest Treasury curve read (Data → Yield curve does the maths): shape, last
+  // month's move, 2s10s, 3m10y, 10Y real and breakeven, 5y5y. Context, not scored.
+  let _curveBusy = false;
+  async function renderCurveCard() {
+    if (_curveBusy || !document.getElementById('regime-cert-card') || !window.DataTab || !window.DataTab.curveSnapshot) return;
+    _curveBusy = true;
+    try {
+      const s = await window.DataTab.curveSnapshot();
+      if (!s) return;
+      const bp = v => v == null ? '—' : `${v > 0 ? '+' : ''}${v} bp`, pc = v => v == null ? '—' : (+v).toFixed(2) + '%';
+      const shape = s.inverted ? 'INVERTED' : (s.s2s10 != null && Math.abs(s.s2s10) < 10 ? 'FLAT' : 'UPWARD-SLOPING');
+      const col = s.inverted ? 'var(--red)' : s.s2s10 != null && Math.abs(s.s2s10) < 10 ? 'var(--amber)' : 'var(--pos)';
+      const html = `<section id="curve-context-card" class="company-card" style="margin:0 0 16px;border-left:3px solid ${col}">
+      <div style="display:flex;flex-wrap:wrap;gap:6px 14px;align-items:baseline">
+        <div style="font-family:var(--mono);font-size:10px;letter-spacing:.12em;color:var(--ink-dim)">YIELD CURVE · TREASURIES (CONTEXT)</div>
+        <div style="font-family:var(--mono);font-size:15px;color:${col};font-weight:700">${shape}</div>
+        <div style="margin-left:auto;font-family:var(--mono);font-size:9.5px;color:var(--ink-faint)">${esc(s.date)}</div></div>
+      <div style="font-family:var(--mono);font-size:10.5px;color:var(--ink-dim);margin:6px 0">Last month (vs ${esc(s.vs || '—')}): <strong style="color:var(--ink)">${esc(s.move ? s.move.label : '—')}</strong>${s.move ? ` · 2Y ${bp(s.move.d2)}, 10Y ${bp(s.move.d10)}` : ''}</div>
+      <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 14px;font-family:var(--mono);font-size:10.5px">
+        <span>2Y <strong style="color:var(--ink)">${pc(s.y2)}</strong></span><span>10Y <strong style="color:var(--ink)">${pc(s.y10)}</strong></span>
+        <span>2s10s <strong style="color:var(--ink)">${bp(s.s2s10)}</strong></span><span>3m10y <strong style="color:var(--ink)">${bp(s.s3m10y)}</strong></span>
+        <span>10Y real <strong style="color:var(--ink)">${pc(s.real10)}</strong></span><span>10Y breakeven <strong style="color:var(--ink)">${pc(s.be10)}</strong></span>
+        ${s.fwd != null ? `<span>5y5y breakeven <strong style="color:var(--ink)">${pc(s.fwd)}</strong></span>` : ''}
+      </div>
+      <div style="margin-top:8px"><button class="btn btn-ghost" style="padding:3px 9px;font-size:10px" onclick="DataTab.openCurve()">Open the curve ↗</button></div>
+      <div style="font-family:var(--mono);font-size:9.5px;color:var(--ink-faint);margin-top:6px;line-height:1.5">Context, not scored: the bot records this curve on every trade (regimeContext.curve). It becomes a signal only if the trade record shows entries in one curve state doing measurably worse — the same rule as the bond trend and the Fed. 10Y real = 10Y nominal − 10Y breakeven (FRED's definition).</div>
+    </section>`;
+      const old = document.getElementById('curve-context-card');
+      const anchor = document.getElementById('bond-trend-card') || document.getElementById('regime-cert-card');
+      if (old) old.outerHTML = html; else if (anchor && anchor.isConnected) anchor.insertAdjacentHTML('afterend', html);
+    } catch (e) { console.warn('[curve-card]', e); } finally { _curveBusy = false; }
+  }
+  window.RegimeCertainty = { load, renderRegimeCard, renderCurveCard };
 })();
