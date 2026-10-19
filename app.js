@@ -43950,22 +43950,24 @@ function buildBotTrainingData() {
   // Prefer the frozen realizedPL on closed bets (the deterministic shares-based
   // number); fall back to pnl. This is what fixes "0% P&L / no win rate" — the
   // realized figure is always populated at close now.
-  const _plOf = (b) => (b.realizedPL != null && isFinite(b.realizedPL)) ? b.realizedPL : (b.pnl || 0);
-  const wins = closed.filter(b => _plOf(b) > 0);
-  const losses = closed.filter(b => _plOf(b) <= 0);
-  const winRate = closed.length ? +(wins.length / closed.length).toFixed(3) : null;
-  const totalPnl = +closed.reduce((s, b) => s + _plOf(b), 0).toFixed(2);
-  const avgWin = wins.length ? +(wins.reduce((s, b) => s + _plOf(b), 0) / wins.length).toFixed(2) : null;
-  const avgLoss = losses.length ? +(losses.reduce((s, b) => s + _plOf(b), 0) / losses.length).toFixed(2) : null;
-  const profitFactor = (avgLoss && avgLoss !== 0 && wins.length && losses.length)
-    ? +Math.abs((avgWin * wins.length) / (avgLoss * losses.length)).toFixed(2) : null;
+  // z127: the runner's rule (exit + trims; flat = neither) - it was realizedPL-only with flats
+  // counted as losses (33% here vs 53.3% on the card; the runner's own number was 67.7%).
+  const _ss = botSettledStats(bets);
+  const _plOf = _ss.plOf;
+  const wins = _ss.wins;
+  const losses = _ss.losses;
+  const winRate = _ss.winRate != null ? +_ss.winRate.toFixed(3) : null;
+  const totalPnl = _ss.totalPnl, avgWin = _ss.avgWin, avgLoss = _ss.avgLoss, profitFactor = _ss.profitFactor;
+  const trimsOnOpen = +open.reduce((s, b) => s + _betTrimEvents(b).reduce((s2, x) => s2 + x.realized, 0), 0).toFixed(2);
 
   // Per-signal performance: across all settled trades, when a signal leaned a
   // direction, did the trade tend to win? This tells the bot which signals to
   // trust — the data-driven version of what botRetrain nudges.
   const signalPerf = {};
   for (const b of closed) {
-    const won = (b.realizedPL != null ? b.realizedPL : (b.pnl || 0)) > 0;
+    const _p = _plOf(b);
+    if (_p === 0) continue;                    // z127: a flat trade is neither a win nor a loss
+    const won = _p > 0;
     const dirSign = b.direction === 'short' ? -1 : 1;
     for (const [k, v] of Object.entries(b.components || {})) {
       if (!isFinite(v) || v === 0) continue;
@@ -43980,6 +43982,7 @@ function buildBotTrainingData() {
     signal: k,
     trades: s.trades,
     winRateWhenLeaning: s.agreedTrades ? +(s.agreedAndWon / s.agreedTrades).toFixed(3) : null,
+    leanN: s.agreedTrades,                     // z127: decisive trades where it leaned the trade's way
     currentWeight: +(weights[k] ?? 1).toFixed(2),
   })).sort((a, b) => (b.winRateWhenLeaning ?? 0) - (a.winRateWhenLeaning ?? 0));
 
@@ -43987,23 +43990,29 @@ function buildBotTrainingData() {
   const stylePerf = {};
   for (const b of closed) {
     const st = _classifyTradeStyle(b);
-    const s = stylePerf[st] || { trades: 0, wins: 0, pnl: 0 };
-    s.trades++; if ((b.pnl || 0) > 0) s.wins++; s.pnl += (b.pnl || 0);
+    const s = stylePerf[st] || { trades: 0, wins: 0, losses: 0, pnl: 0 };
+    const _p = _plOf(b);                       // z127: same rule as every other win rate
+    s.trades++; if (_p > 0) s.wins++; else if (_p < 0) s.losses++; s.pnl += _p;
     stylePerf[st] = s;
   }
   const styleScores = Object.entries(stylePerf).map(([style, s]) => ({
-    style, trades: s.trades, winRate: +(s.wins / s.trades).toFixed(3), totalPnl: +s.pnl.toFixed(2),
+    style, trades: s.trades, winRate: (s.wins + s.losses) ? +(s.wins / (s.wins + s.losses)).toFixed(3) : null, totalPnl: +s.pnl.toFixed(2),
   })).sort((a, b) => b.totalPnl - a.totalPnl);
 
   // Human/bot-readable takeaways.
   const takeaways = [];
-  if (winRate != null) takeaways.push(`Win rate ${(winRate * 100).toFixed(0)}% over ${closed.length} settled trades; net P&L ${totalPnl >= 0 ? '+' : ''}$${totalPnl}.`);
-  if (profitFactor != null) takeaways.push(`Profit factor ${profitFactor} (avg win $${avgWin} vs avg loss $${avgLoss}).`);
-  const bestSig = signalScores.filter(s => s.trades >= 3 && s.winRateWhenLeaning != null)[0];
-  const worstSig = [...signalScores].filter(s => s.trades >= 3 && s.winRateWhenLeaning != null).pop();
-  if (bestSig) takeaways.push(`Most reliable signal: ${bestSig.signal} (${(bestSig.winRateWhenLeaning * 100).toFixed(0)}% win when it leans, ${bestSig.trades} trades) — trust it more.`);
-  if (worstSig && worstSig !== bestSig) takeaways.push(`Least reliable signal: ${worstSig.signal} (${(worstSig.winRateWhenLeaning * 100).toFixed(0)}% win when it leans) — consider down-weighting.`);
-  if (styleScores[0]) takeaways.push(`Best-performing style: ${styleScores[0].style} (${styleScores[0].totalPnl >= 0 ? '+' : ''}$${styleScores[0].totalPnl} over ${styleScores[0].trades} trades).`);
+  const $s = v => `${v >= 0 ? '+' : '−'}$${Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  if (winRate != null) takeaways.push(`Win rate ${(winRate * 100).toFixed(1)}% — ${wins.length} wins / ${losses.length} losses${_ss.flat ? ` (${_ss.flat} flat, not counted)` : ''} of ${closed.length} closed trades; closed-trade P/L ${$s(totalPnl)} (exit + trims).`);
+  if (trimsOnOpen) takeaways.push(`Realized ${$s(totalPnl + trimsOnOpen)} = closed trades ${$s(totalPnl)} + trims on still-open positions ${$s(trimsOnOpen)} (the Total P/L card's realized figure).`);
+  if (profitFactor != null) takeaways.push(`Profit factor ${profitFactor} (avg win ${$s(avgWin)} vs avg loss ${$s(avgLoss)}).`);
+  // Evidence before scoring (§1c): no "trust it more" on a handful of trades.
+  const SIG_MIN = 15;
+  const judged = signalScores.filter(s => s.leanN >= SIG_MIN && s.winRateWhenLeaning != null);
+  const bestSig = judged[0], worstSig = judged.length > 1 ? judged[judged.length - 1] : null;
+  if (bestSig && winRate != null && bestSig.winRateWhenLeaning > winRate) takeaways.push(`Most reliable signal: ${bestSig.signal} (${(bestSig.winRateWhenLeaning * 100).toFixed(0)}% win when it leans, ${bestSig.leanN} trades) — above the ${(winRate * 100).toFixed(0)}% base rate.`);
+  if (worstSig && winRate != null && worstSig.winRateWhenLeaning < winRate) takeaways.push(`Least reliable signal: ${worstSig.signal} (${(worstSig.winRateWhenLeaning * 100).toFixed(0)}% win when it leans, ${worstSig.leanN} trades) — below the base rate.`);
+  if (!judged.length && signalScores.length) takeaways.push(`Signal reliability: not judged yet — no signal has ${SIG_MIN} decisive trades where it leaned (most: ${Math.max(...signalScores.map(s => s.leanN || 0))}).`);
+  if (styleScores[0]) takeaways.push(`Best-performing style: ${styleScores[0].style} (${$s(styleScores[0].totalPnl)} over ${styleScores[0].trades} trades).`);
   const stopOuts = closed.filter(b => b.exitReason === 'stop-loss').length;
   if (stopOuts / Math.max(1, closed.length) > 0.4) takeaways.push(`${Math.round(stopOuts / closed.length * 100)}% of trades stopped out — stops may be too tight or entries too early.`);
   const soldEarly = closed.filter(b => b.soldStillStrong).length;
@@ -44015,7 +44024,7 @@ function buildBotTrainingData() {
     bankroll: bot.bankroll,
     startingBankroll: BOT_STARTING_BANKROLL,
     allTimeReturnPct: +(((bot.bankroll - BOT_STARTING_BANKROLL) / BOT_STARTING_BANKROLL) * 100).toFixed(2),
-    counts: { total: bets.length, open: open.length, closed: closed.length, wins: wins.length, losses: losses.length },
+    counts: { total: bets.length, open: open.length, closed: closed.length, wins: wins.length, losses: losses.length, flat: _ss.flat },
     performance: { winRate, totalPnl, avgWin, avgLoss, profitFactor },
     learnedWeights: weights,
     signalScores,      // which signals actually predict wins
@@ -45656,13 +45665,13 @@ function renderBotTrainingInsights() {
     </div>`;
   }
   const takeawayList = d.takeaways.map(t => `<li style="margin-bottom:4px">${escapeHtml(t)}</li>`).join('');
-  const sigRows = d.signalScores.filter(s => s.trades >= 2).slice(0, 8).map(s => {
-    const wr = s.winRateWhenLeaning;
-    const c = wr == null ? 'var(--ink-faint)' : wr >= 0.55 ? 'var(--pos)' : wr <= 0.45 ? 'var(--neg)' : 'var(--ink)';
+  const sigRows = d.signalScores.filter(s => (s.leanN != null ? s.leanN : s.trades) >= 1).slice(0, 8).map(s => {
+    const wr = s.winRateWhenLeaning, nLean = s.leanN != null ? s.leanN : s.trades, judged = nLean >= 15;   // z127: evidence bar
+    const c = wr == null || !judged ? 'var(--ink-faint)' : wr >= 0.55 ? 'var(--pos)' : wr <= 0.45 ? 'var(--neg)' : 'var(--ink)';
     return `<tr>
       <td style="font-family:var(--mono);font-size:10px">${escapeHtml(s.signal)}</td>
       <td style="font-family:var(--mono);font-size:10px;text-align:right;color:${c}">${wr == null ? '—' : Math.round(wr * 100) + '%'}</td>
-      <td style="font-family:var(--mono);font-size:10px;text-align:right;color:var(--ink-dim)">${s.trades}</td>
+      <td style="font-family:var(--mono);font-size:10px;text-align:right;color:var(--ink-dim)" title="${judged ? 'decisive trades where it leaned the trade\'s way' : 'fewer than 15 decisive trades - not judged yet'}">${nLean}${judged ? '' : '*'}</td>
       <td style="font-family:var(--mono);font-size:10px;text-align:right;color:var(--ink-dim)">×${s.currentWeight}</td>
     </tr>`;
   }).join('');
@@ -45670,13 +45679,13 @@ function renderBotTrainingInsights() {
     const c = s.totalPnl >= 0 ? 'var(--pos)' : 'var(--neg)';
     return `<tr>
       <td style="font-family:var(--mono);font-size:10px">${escapeHtml(s.style)}</td>
-      <td style="font-family:var(--mono);font-size:10px;text-align:right">${Math.round(s.winRate * 100)}%</td>
+      <td style="font-family:var(--mono);font-size:10px;text-align:right">${s.winRate == null ? '—' : Math.round(s.winRate * 100) + '%'}</td>
       <td style="font-family:var(--mono);font-size:10px;text-align:right;color:var(--ink-dim)">${s.trades}</td>
-      <td style="font-family:var(--mono);font-size:10px;text-align:right;color:${c}">${s.totalPnl >= 0 ? '+' : ''}$${Math.abs(s.totalPnl).toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
+      <td style="font-family:var(--mono);font-size:10px;text-align:right;color:${c}">${s.totalPnl >= 0 ? '+' : '−'}$${Math.abs(s.totalPnl).toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
     </tr>`;
   }).join('');
   return `<div class="company-card" style="margin:0 0 18px">
-    <h4 style="margin-bottom:8px">Bot Training Insights <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);font-weight:400">· ${d.counts.closed} settled · ${d.performance.winRate != null ? Math.round(d.performance.winRate * 100) + '% win' : ''} · PF ${d.performance.profitFactor ?? '—'}</span></h4>
+    <h4 style="margin-bottom:8px">Bot Training Insights <span style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);font-weight:400">· ${d.counts.closed} closed · ${d.performance.winRate != null ? (d.performance.winRate * 100).toFixed(1) + '% win' : ''} (${d.counts.wins}W / ${d.counts.losses}L${d.counts.flat ? ' / ' + d.counts.flat + ' flat' : ''}) · PF ${d.performance.profitFactor ?? '—'}</span></h4>
     ${takeawayList ? `<ul style="margin:0 0 14px;padding-left:18px;color:var(--ink-dim);font-size:11px;line-height:1.5">${takeawayList}</ul>` : ''}
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px">
       <div>
@@ -45685,6 +45694,7 @@ function renderBotTrainingInsights() {
           <thead><tr><th style="text-align:left;font-family:var(--mono);font-size:8px;color:var(--ink-faint)">SIGNAL</th><th style="text-align:right;font-family:var(--mono);font-size:8px;color:var(--ink-faint)">WIN%</th><th style="text-align:right;font-family:var(--mono);font-size:8px;color:var(--ink-faint)">N</th><th style="text-align:right;font-family:var(--mono);font-size:8px;color:var(--ink-faint)">WEIGHT</th></tr></thead>
           <tbody>${sigRows || '<tr><td colspan="4" style="font-family:var(--mono);font-size:10px;color:var(--ink-faint)">Need ≥2 trades per signal</td></tr>'}</tbody>
         </table>
+        <div style="font-family:var(--mono);font-size:8.5px;color:var(--ink-faint);margin-top:4px">N = decisive trades (win or loss) where the signal leaned the trade's way · * fewer than 15: not judged yet, so not coloured or used in the takeaways</div>
       </div>
       <div>
         <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Style performance</div>
@@ -49019,8 +49029,10 @@ function botPerformance(filterTicker = null) {
   // unrealized on open shares at live prices. Win rate is per CLOSED position.
   const _acct = botTickerLedger(bets, _botPriceOf);
   const _closedPos = _acct.positions.filter(p => p.status === 'closed' && p.realized !== 0);
-  const wins = _closedPos.filter(p => p.realized > 0);
-  const losses = _closedPos.filter(p => p.realized < 0);
+  // z127: per closed TRADE with the runner's rule (was per closed position: "8W / 7L · 36 closed")
+  const _ss = botSettledStats(bets);
+  const wins = _ss.wins;
+  const losses = _ss.losses;
   // Realized is authoritative from the running bankroll (starting + everything the
   // bot has ever booked), so it stands even if an OLD closed record lost its exit
   // fields. Unrealized is the live per-ticker mark. Together the book value is
@@ -49068,6 +49080,9 @@ function botPerformance(filterTicker = null) {
     closedCount: closed.length,
     winCount: wins.length,
     lossCount: losses.length,
+    flatCount: _ss.flat,                  // z127
+    closedPnl: _ss.totalPnl,              // z127: exit + trims of the closed trades
+    profitFactor: _ss.profitFactor,       // z127
     winRate: (wins.length + losses.length) ? +((wins.length / (wins.length + losses.length)) * 100).toFixed(1) : null,
     avgWin: wins.length ? +(wins.reduce((s, p) => s + p.realized, 0) / wins.length).toFixed(2) : null,
     avgLoss: losses.length ? +(losses.reduce((s, p) => s + p.realized, 0) / losses.length).toFixed(2) : null,
@@ -49120,17 +49135,15 @@ function botConfidenceFactor() {
   const winRate = perf.winRate != null ? perf.winRate / 100 : 0.5;   // 0..1
   // Profit factor: gross win $ / gross loss $. >1 is profitable. Normalize to a
   // 0..1 "edge" score centered so PF≈1 → 0.5.
-  const wins = closed.filter(b => b.pnl > 0);
-  const losses = closed.filter(b => b.pnl < 0);
-  const grossWin = wins.reduce((s, b) => s + b.pnl, 0);
-  const grossLoss = Math.abs(losses.reduce((s, b) => s + b.pnl, 0));
+  const _ss = botSettledStats(bot.bets || []);          // z127: the runner's rule (exit + trims)
+  const grossWin = _ss.grossWin, grossLoss = _ss.grossLoss;
   const pf = grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? 2.5 : 1);
   const pfScore = Math.max(0, Math.min(1, (pf - 0.6) / (2.0 - 0.6)));   // PF 0.6→0, 2.0→1
 
   // Recent streak: look at the last 6 settled trades by exit date. A hot streak
   // adds confidence, a cold streak removes it (this is the "running well" part).
-  const recent = closed.slice().sort((a, b) => new Date(a.exitDate || 0) - new Date(b.exitDate || 0)).slice(-6);
-  const recentWins = recent.filter(b => b.pnl > 0).length;
+  const recent = _ss.wins.concat(_ss.losses).sort((a, b) => new Date(a.exitDate || 0) - new Date(b.exitDate || 0)).slice(-6);
+  const recentWins = recent.filter(b => _ss.plOf(b) > 0).length;
   const streakScore = recent.length ? recentWins / recent.length : 0.5;   // 0..1
 
   // Blend the three signals (win rate, profit factor, recent streak), then scale
@@ -49242,6 +49255,26 @@ function _betExitRealized(b) {
   return (b.realizedTrim != null && Array.isArray(b.trims) && b.trims.length) ? pnl - (+b.realizedTrim || 0) : pnl;
 }
 if (typeof window !== 'undefined') { window._betTrimEvents = _betTrimEvents; window._betExitRealized = _betExitRealized; }
+// z127: ONE rule for a settled trade's result - the runner's (recompute, z117): what the trade
+// put into the bankroll = exit P/L + its trims. Win > 0, loss < 0, flat = 0 (closed at its entry
+// price, or with no exit fill). Win rate = W / (W + L). The Bets cards, the training insights,
+// the confidence factor and the runner all read this - they used to disagree (per position /
+// realizedPL-only / per trade).
+function botTradePl(b) { return +(_betExitRealized(b) + _betTrimEvents(b).reduce((s, x) => s + x.realized, 0)).toFixed(2); }
+function botSettledStats(bets) {
+  const closed = (bets || []).filter(b => b && b.status === 'closed');
+  const pl = new Map(closed.map(b => [b, botTradePl(b)]));
+  const plOf = b => (pl.has(b) ? pl.get(b) : botTradePl(b));
+  const wins = closed.filter(b => pl.get(b) > 0), losses = closed.filter(b => pl.get(b) < 0);
+  const sum = arr => arr.reduce((s, b) => s + pl.get(b), 0);
+  const grossWin = sum(wins), grossLoss = Math.abs(sum(losses));
+  return { closed, wins, losses, flat: closed.length - wins.length - losses.length, plOf,
+    winRate: (wins.length + losses.length) ? wins.length / (wins.length + losses.length) : null,
+    totalPnl: +sum(closed).toFixed(2), grossWin, grossLoss,
+    avgWin: wins.length ? +(grossWin / wins.length).toFixed(2) : null, avgLoss: losses.length ? +(-grossLoss / losses.length).toFixed(2) : null,
+    profitFactor: grossLoss > 0 && wins.length ? +(grossWin / grossLoss).toFixed(2) : null };
+}
+if (typeof window !== 'undefined') { window.botTradePl = botTradePl; window.botSettledStats = botSettledStats; }
 // start + capital injections + closed P/L + partial-sell (trim) realizations.
 function botLedgerBankroll(bot) {
   const bets = (bot && bot.bets) || [];
@@ -49927,10 +49960,11 @@ function _botRiskCard() {
   const col = (v, good, bad) => v == null ? 'var(--ink-faint)' : v >= good ? 'var(--pos)' : v <= bad ? 'var(--neg)' : 'var(--ink)';
   const pct = (v, dp = 1) => v == null ? '\u2014' : (v * 100).toFixed(dp) + '%';
   const pf = r.profitFactor == null ? '\u2014' : (r.profitFactor === Infinity ? '\u221e' : r.profitFactor.toFixed(2));
+  // z127: each cell is a size container and its figure scales to the cell (it used to wrap mid-number)
   const cell = (label, value, color, sub) => `
-    <div style="min-width:0">
+    <div style="min-width:0;container-type:inline-size">
       <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);letter-spacing:0.1em;text-transform:uppercase">${label}</div>
-      <div style="font-family:var(--mono);font-size:16px;font-weight:700;color:${color};margin-top:3px;overflow-wrap:anywhere">${value}</div>
+      <div class="bet-card-val" data-fit-max="16" style="font-family:var(--mono);font-size:16px;font-weight:700;color:${color};margin-top:3px;white-space:nowrap">${value}</div>
       <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${sub || ''}</div>
     </div>`;
   const cells = [
@@ -49964,6 +49998,18 @@ function _botRiskCard() {
     </div>`;
 }
 
+// z127: every summary-card figure fits its card at any width (phone, half screen, desktop).
+// The card is a size container and the figure's font follows the card's own width:
+// min(max, 100cqi / (0.62 × characters)). JetBrains Mono (and the ui-monospace fallbacks)
+// advance 0.60 em per character, so the figure is never wider than the card; on a wide card
+// it stays at its normal size. Browsers without container units keep the normal size.
+function _fitBetCardValues(root) {
+  (root || document).querySelectorAll('.bet-card-val').forEach(el => {
+    const max = +el.dataset.fitMax || 19, n = Math.max(4, (el.textContent || '').trim().length);
+    el.style.fontSize = max + 'px';
+    el.style.fontSize = `min(${max}px, ${(100 / (0.62 * n)).toFixed(2)}cqi)`;
+  });
+}
 function renderBetsTab() {
   const body = document.getElementById('bets-body');
   if (!body) return;
@@ -50028,7 +50074,8 @@ function renderBetsTab() {
   const perf = botPerformance(filter);
   const today = new Date().toISOString().slice(0, 10);
 
-  const fmtPnl = (v) => v == null ? '—' : `${v >= 0 ? '+' : ''}$${Math.abs(v).toFixed(2)}`;
+  // z127: thousands separators and a real minus sign (a loss used to print as "$209.63")
+  const fmtPnl = (v) => v == null ? '—' : `${v >= 0 ? '+' : '−'}$${Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   const pnlColor = (v) => v > 0 ? 'var(--pos)' : v < 0 ? 'var(--neg)' : 'var(--ink-dim)';
   const dirBadge = (d) => d === 'long'
     ? `<span style="color:var(--pos);font-weight:700">▲ LONG</span>`
@@ -50041,39 +50088,39 @@ function renderBetsTab() {
     ? (perf.vsSpyDiff >= 0 ? 'var(--pos)' : 'var(--neg)') : 'var(--ink-dim)';
   const summary = `
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:10px;margin:18px 0">
-      <div class="company-card" style="margin:0;border-left:3px solid ${pnlColor(perf.totalPnl)};min-width:0;overflow:hidden">
+      <div class="company-card" style="margin:0;border-left:3px solid ${pnlColor(perf.totalPnl)};min-width:0;overflow:hidden;container-type:inline-size">
         <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);letter-spacing:0.1em;text-transform:uppercase">Portfolio Value</div>
-        <div style="font-family:var(--mono);font-size:22px;font-weight:700;color:${pnlColor(perf.totalPnl)};margin-top:4px;white-space:nowrap">$${(book ? book.totalValue : perf.currentValue).toLocaleString(undefined,{maximumFractionDigits:0})}</div>
+        <div class="bet-card-val" data-fit-max="22" style="font-family:var(--mono);font-size:22px;font-weight:700;color:${pnlColor(perf.totalPnl)};margin-top:4px;white-space:nowrap">$${(book ? book.totalValue : perf.currentValue).toLocaleString(undefined,{maximumFractionDigits:0})}</div>
         <div style="font-family:var(--mono);font-size:9px;color:${pnlColor(perf.totalPnl)};margin-top:2px">${perf.totalReturnPct >= 0 ? '+' : ''}${perf.totalReturnPct}% on $${(perf.netCapital || 100000).toLocaleString(undefined,{maximumFractionDigits:0})} capital${perf.cashAdded ? ` (${perf.cashAdded > 0 ? '+' : '−'}$${Math.abs(perf.cashAdded).toLocaleString(undefined,{maximumFractionDigits:0})} ${perf.cashAdded > 0 ? 'deposited' : 'withdrawn'})` : ''}</div>
       </div>
-      ${book ? `<div class="company-card" style="margin:0;border-left:3px solid var(--amber);min-width:0;overflow:hidden">
+      ${book ? `<div class="company-card" style="margin:0;border-left:3px solid var(--amber);min-width:0;overflow:hidden;container-type:inline-size">
         <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);letter-spacing:0.1em;text-transform:uppercase">Open Positions</div>
-        <div style="font-family:var(--mono);font-size:19px;font-weight:700;color:var(--ink);margin-top:4px;white-space:nowrap">$${book.openNotional.toLocaleString(undefined,{maximumFractionDigits:0})}${book.openReturnPct != null ? ` <span style="font-size:12px;color:${pnlColor(book.openPnl)}">${book.openReturnPct >= 0 ? '+' : ''}${book.openReturnPct}%</span>` : ''}</div>
-        <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:2px">${book.openPositions} open · $${book.openExposure.toLocaleString(undefined,{maximumFractionDigits:0})} exposure (${book.grossLeverage}× gross)</div>
+        <div class="bet-card-val" data-fit-max="19" style="font-family:var(--mono);font-size:19px;font-weight:700;color:var(--ink);margin-top:4px;white-space:nowrap">$${book.openNotional.toLocaleString(undefined,{maximumFractionDigits:0})}</div>
+        <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:2px">${book.openReturnPct != null ? `<span style="color:${pnlColor(book.openPnl)}">${book.openReturnPct >= 0 ? '+' : '−'}${Math.abs(book.openReturnPct)}%</span> · ` : ''}${book.openPositions} open · $${book.openExposure.toLocaleString(undefined,{maximumFractionDigits:0})} exposure (${book.grossLeverage}× gross)</div>
       </div>
-      <div class="company-card" style="margin:0;cursor:pointer;min-width:0;overflow:hidden" id="bets-cash-card" title="Click to feed the bot cash (or withdraw). Recorded as a capital deposit, not P&L — gives the bot more to size trades with.">
+      <div class="company-card" style="margin:0;cursor:pointer;min-width:0;overflow:hidden;container-type:inline-size" id="bets-cash-card" title="Click to feed the bot cash (or withdraw). Recorded as a capital deposit, not P&L — gives the bot more to size trades with.">
         <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);letter-spacing:0.1em;text-transform:uppercase">Cash <span style="color:var(--amber);text-transform:none;letter-spacing:0">✎ edit</span></div>
-        <div style="font-family:var(--mono);font-size:19px;font-weight:700;color:var(--ink);margin-top:4px;white-space:nowrap">$${book.cash.toLocaleString(undefined,{maximumFractionDigits:0})}</div>
-        <div style="font-family:var(--mono);font-size:9px;color:${pnlColor(book.openPnl)};margin-top:2px">${book.openPnl >= 0 ? '+' : ''}$${book.openPnl.toLocaleString(undefined,{maximumFractionDigits:0})} unrealized${book.cashAdded ? ` · $${book.cashAdded.toLocaleString(undefined,{maximumFractionDigits:0})} ${book.cashAdded >= 0 ? 'added' : 'withdrawn'}` : ''}</div>
+        <div class="bet-card-val" data-fit-max="19" style="font-family:var(--mono);font-size:19px;font-weight:700;color:var(--ink);margin-top:4px;white-space:nowrap">$${book.cash.toLocaleString(undefined,{maximumFractionDigits:0})}</div>
+        <div style="font-family:var(--mono);font-size:9px;color:${pnlColor(book.openPnl)};margin-top:2px">${book.openPnl >= 0 ? '+' : '−'}$${Math.abs(book.openPnl).toLocaleString(undefined,{maximumFractionDigits:0})} unrealized${book.cashAdded ? ` · $${book.cashAdded.toLocaleString(undefined,{maximumFractionDigits:0})} ${book.cashAdded >= 0 ? 'added' : 'withdrawn'}` : ''}</div>
       </div>` : ''}
-      ${book ? `<div class="company-card" style="margin:0;min-width:0;overflow:hidden">
+      ${book ? `<div class="company-card" style="margin:0;min-width:0;overflow:hidden;container-type:inline-size">
         <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);letter-spacing:0.1em;text-transform:uppercase">Fees Paid</div>
-        <div style="font-family:var(--mono);font-size:19px;font-weight:700;color:var(--ink);margin-top:4px;white-space:nowrap">$${book.feesPaid.toLocaleString(undefined,{maximumFractionDigits:0})}</div>
+        <div class="bet-card-val" data-fit-max="19" style="font-family:var(--mono);font-size:19px;font-weight:700;color:var(--ink);margin-top:4px;white-space:nowrap">$${book.feesPaid.toLocaleString(undefined,{maximumFractionDigits:0})}</div>
         <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:2px">est. commission + spread, all trades</div>
       </div>` : ''}
-      <div class="company-card" style="margin:0;min-width:0;overflow:hidden">
+      <div class="company-card" style="margin:0;min-width:0;overflow:hidden;container-type:inline-size">
         <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);letter-spacing:0.1em;text-transform:uppercase">Total P/L</div>
-        <div style="font-family:var(--mono);font-size:19px;font-weight:700;color:${pnlColor(perf.totalPnl)};margin-top:4px;white-space:nowrap">${fmtPnl(perf.totalPnl)}</div>
+        <div class="bet-card-val" data-fit-max="19" style="font-family:var(--mono);font-size:19px;font-weight:700;color:${pnlColor(perf.totalPnl)};margin-top:4px;white-space:nowrap">${fmtPnl(perf.totalPnl)}</div>
         <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:2px">${fmtPnl(perf.realizedPnl)} realized</div>
       </div>
-      <div class="company-card" style="margin:0;min-width:0;overflow:hidden">
+      <div class="company-card" style="margin:0;min-width:0;overflow:hidden;container-type:inline-size">
         <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);letter-spacing:0.1em;text-transform:uppercase">Win Rate</div>
-        <div style="font-family:var(--mono);font-size:19px;font-weight:700;color:var(--ink);margin-top:4px;white-space:nowrap">${perf.winRate != null ? perf.winRate + '%' : '—'}</div>
-        <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:2px">${perf.winCount}W / ${perf.lossCount}L · ${perf.closedCount} closed</div>
+        <div class="bet-card-val" data-fit-max="19" style="font-family:var(--mono);font-size:19px;font-weight:700;color:var(--ink);margin-top:4px;white-space:nowrap">${perf.winRate != null ? perf.winRate + '%' : '—'}</div>
+        <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:2px">${perf.winCount}W / ${perf.lossCount}L${perf.flatCount ? ` / ${perf.flatCount} flat` : ''} · ${perf.closedCount} closed</div>
       </div>
-      <div class="company-card" style="margin:0;min-width:0;overflow:hidden">
+      <div class="company-card" style="margin:0;min-width:0;overflow:hidden;container-type:inline-size">
         <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);letter-spacing:0.1em;text-transform:uppercase">vs SPY</div>
-        <div style="font-family:var(--mono);font-size:19px;font-weight:700;color:${vsSpyColor};margin-top:4px;white-space:nowrap">${perf.vsSpyDiff != null ? (perf.vsSpyDiff >= 0 ? '+' : '') + perf.vsSpyDiff + '%' : '—'}</div>
+        <div class="bet-card-val" data-fit-max="19" style="font-family:var(--mono);font-size:19px;font-weight:700;color:${vsSpyColor};margin-top:4px;white-space:nowrap">${perf.vsSpyDiff != null ? (perf.vsSpyDiff >= 0 ? '+' : '') + perf.vsSpyDiff + '%' : '—'}</div>
         <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:2px">${perf.spyReturn != null ? `SPY ${perf.spyReturn >= 0 ? '+' : ''}${perf.spyReturn}% · you ${perf.totalReturnPct >= 0 ? '+' : ''}${perf.totalReturnPct}%` : 'benchmark'}</div>
       </div>
       ${(() => {
@@ -50084,9 +50131,9 @@ function renderBetsTab() {
         if (!cf) return '';
         const col = cf.conservative ? 'var(--neg)' : cf.aggressive ? 'var(--pos)' : cf.sampleSize < 8 ? 'var(--data-amber)' : 'var(--ink)';
         const mode = cf.conservative ? 'Conservative' : cf.aggressive ? 'Aggressive' : cf.sampleSize < 8 ? 'Warming up' : 'Steady';
-        return `<div class="company-card" style="margin:0;border-left:3px solid ${col};min-width:0;overflow:hidden" title="${escapeHtml(cf.label)}">
+        return `<div class="company-card" style="margin:0;border-left:3px solid ${col};min-width:0;overflow:hidden;container-type:inline-size" title="${escapeHtml(cf.label)}">
           <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);letter-spacing:0.1em;text-transform:uppercase">Confidence</div>
-          <div style="font-family:var(--mono);font-size:15px;font-weight:700;color:${col};margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${mode}</div>
+          <div class="bet-card-val" data-fit-max="15" style="font-family:var(--mono);font-size:15px;font-weight:700;color:${col};margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${mode}</div>
           <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:2px">×${cf.factor.toFixed(2)} sizing · ${cf.sampleSize} settled · PF ${cf.profitFactor}</div>
         </div>`;
       })()}
@@ -50448,6 +50495,7 @@ function renderBetsTab() {
     body.innerHTML = toggle + ledger + note;
   } else {
     body.innerHTML = toggle + summary + betsToolbar + chartHtml + balanceHtml + positionsHtml + activityHtml + insightsHtml + todayHtml + note;
+    _fitBetCardValues(body);   // z127
   }
   // Wire the view toggle.
   body.querySelectorAll('.bets-view-btn').forEach(btn => {
@@ -55384,4 +55432,3 @@ function _ccyLensBar(stock) {
   };
   ['renderSummary', 'renderResults', 'renderProjection', 'renderMonteCarlo', 'renderValuationConfidenceAudit'].forEach(wrapLens);
 })();
-
