@@ -28,6 +28,14 @@
    desk read: 2Y, 10Y, 2s10s, 3m10y, 2s5s10s fly, inversion, and the move
    (bull/bear steepener/flattener, twist, parallel). Catalog: CSV export and the
    surfaces / quad-calls / official-quad files.
+
+   v7 (z126) — "+ Real & breakeven": TIPS real yields beside the nominal curve
+   (FRED DFII where the pipeline has it, else nominal − breakeven, which is FRED's
+   own definition of T5YIE / T10YIE — so 5y and 10y today), with the breakeven as a
+   dotted bracket between the two at each TIPS maturity; 10Y real, 10Y breakeven and
+   the 5y5y forward in the read. Under the scrubber, a strip colours every trading
+   day by its move (vs 1M / 3M / 1Y earlier) with the share of each move type in the
+   range; tap it to jump there. The Regime tab shows the curve as a context card.
    ========================================================================== */
 (function () {
   'use strict';
@@ -371,11 +379,58 @@
     const dates = [...all].sort().filter(d => maps.reduce((c, m) => c + (m.has(d) ? 1 : 0), 0) >= 6);
     return { dates, rows: dates.map(d => maps.map(m => (m.has(d) ? m.get(d) : null))) };
   }
+  // v7: [maturity, TIPS series, breakeven series, index of that maturity in TEN_Y]
+  const REAL_MAT = [[5, 'DFII5', 'T5YIE', 6], [7, 'DFII7', null, 7], [10, 'DFII10', 'T10YIE', 8], [20, 'DFII20', null, 9], [30, 'DFII30', null, 10]];
+  const EXTRA_IDS = ['T5YIE', 'T10YIE', 'T5YIFR', 'DFII5', 'DFII7', 'DFII10', 'DFII20', 'DFII30'];
   async function yieldDaily() {
     const base = `${RAW()}/TRAPP2-1/main/data/macro/`;
-    const series = await Promise.all(MATS.map(async ([id]) => { try { return (await getJSON(base + id + '.json')).observations || []; } catch (e) { return []; } }));
+    const grab = async id => { try { return (await getJSON(base + id + '.json')).observations || []; } catch (e) { return []; } };
+    const [series, extra] = await Promise.all([Promise.all(MATS.map(([id]) => grab(id))), Promise.all(EXTRA_IDS.map(grab))]);
     const D = buildDaily(series);
-    return D.dates.length ? D : { error: 'No FRED yield data (TRAPP2-1 data/macro/DGS*.json) yet.' };
+    if (!D.dates.length) return { error: 'No FRED yield data (TRAPP2-1 data/macro/DGS*.json) yet.' };
+    const ok = o => o && o.date && o.value !== null && o.value !== '' && o.value !== '.' && isFinite(+o.value);
+    const maps = {};
+    EXTRA_IDS.forEach((id, i) => { const m = new Map(); for (const o of extra[i]) if (ok(o)) m.set(o.date, +o.value); maps[id] = m; });
+    D.has = Object.fromEntries(EXTRA_IDS.map(id => [id, maps[id].size > 0]));
+    // real yield: TIPS (DFII) when FRED has it, else nominal − breakeven on the SAME day
+    // (FRED defines T5YIE / T10YIE as DGS − DFII, so the derivation is exact). No carry-forward.
+    D.real = D.dates.map((d, k) => REAL_MAT.map(([, tips, be, ni]) => {
+      if (maps[tips].has(d)) return maps[tips].get(d);
+      const nom = D.rows[k][ni];
+      return (be && maps[be].has(d) && nom != null) ? +(nom - maps[be].get(d)).toFixed(4) : null;
+    }));
+    D.fwd = D.dates.map(d => (maps.T5YIFR.has(d) ? maps.T5YIFR.get(d) : null));
+    return D;
+  }
+  function realStats(D, k) {
+    if (!D || !D.real || !D.real[k]) return null;
+    const r = D.real[k], row = D.rows[k], at = m => { const i = REAL_MAT.findIndex(x => x[0] === m); return i < 0 ? null : r[i]; };
+    const nom = m => row[REAL_MAT.find(x => x[0] === m)[3]];
+    const real10 = at(10), real5 = at(5);
+    return { real10, real5, be10: real10 != null && nom(10) != null ? +(nom(10) - real10).toFixed(4) : null,
+             be5: real5 != null && nom(5) != null ? +(nom(5) - real5).toFixed(4) : null, fwd: D.fwd ? D.fwd[k] : null };
+  }
+  // v7: every trading day's move vs N earlier, as a categorical strip (by trading day, like the scrubber)
+  const MOVE_COL = { 'bull steepener': '#4caf7d', 'bull flattener': '#2f8f83', 'bear steepener': '#d0645a', 'bear flattener': '#e0b04c',
+    'steepening twist': '#9b87f5', 'flattening twist': '#5b8def', 'parallel rally': '#8fc9b4', 'parallel sell-off': '#d79a8f', 'little changed': '#6b6b6b' };
+  function moveLabels(D, start, mode) {
+    const out = [];
+    for (let k = start; k < D.dates.length; k++) { const kc = cmpIndex(D, k, mode, start); const mv = kc == null ? null : classifyMove(D.rows[kc], D.rows[k]); out.push(mv ? mv.label : null); }
+    return out;
+  }
+  function moveStripSvg(labels, mark) {
+    const n = labels.length, H = 12;
+    if (!n) return '';
+    let g = '', i = 0;
+    while (i < n) {
+      let j = i;
+      while (j + 1 < n && labels[j + 1] === labels[i]) j++;
+      const x0 = Math.round(i / n * CW * 1000) / 1000, x1 = Math.round((j + 1) / n * CW * 1000) / 1000;   // shared rounded edges: runs tile exactly
+      g += `<rect x="${x0}" y="0" width="${+(x1 - x0).toFixed(3)}" height="${H}" fill="${labels[i] ? MOVE_COL[labels[i]] : 'transparent'}"><title>${labels[i] || 'no comparison yet'}</title></rect>`;
+      i = j + 1;
+    }
+    if (mark != null && mark >= 0 && mark < n) g += `<rect x="${((mark + 0.5) / n * CW - 0.9).toFixed(3)}" y="0" width="1.8" height="${H}" fill="var(--ink,#e8e2d4)"/>`;
+    return `<svg id="dt-cstrip-svg" viewBox="0 0 ${CW} ${H}" preserveAspectRatio="none" style="width:100%;height:${H}px;display:block;cursor:pointer;border-radius:2px" role="img" aria-label="Each trading day's curve move">${g}</svg>`;
   }
   const bpd = (a, b) => (a == null || b == null ? null : Math.round((a - b) * 100));
   function curveStats(r) {
@@ -419,10 +474,13 @@
     const n = D.dates.length, i = lastOnOrBefore(D, monthsBefore(D.dates[n - 1], months), n - 1);
     return i == null ? 0 : Math.min(n - 1, i + 1);
   }
-  function curveScales(D, start, mode) {
+  function curveScales(D, start, mode, withReal) {
     const n = D.dates.length, from = lastOnOrBefore(D, monthsBefore(D.dates[start], 12), start);
     let lo = Infinity, hi = -Infinity, mx = 0;
-    for (let k = from == null ? 0 : from; k < n; k++) for (const v of D.rows[k]) if (v != null) { if (v < lo) lo = v; if (v > hi) hi = v; }
+    for (let k = from == null ? 0 : from; k < n; k++) {
+      for (const v of D.rows[k]) if (v != null) { if (v < lo) lo = v; if (v > hi) hi = v; }
+      if (withReal && D.real) for (const v of D.real[k]) if (v != null) { if (v < lo) lo = v; if (v > hi) hi = v; }   // v7: one scale for both curves
+    }
     const pad = Math.max(0.1, (hi - lo) * 0.04);
     for (let k = start; k < n; k++) {
       const kc = cmpIndex(D, k, mode, start); if (kc == null) continue;
@@ -459,7 +517,22 @@
     const dots = (r, col, rad) => TEN_Y.map((m, i) => (r[i] == null ? '' : `<circle cx="${X(m)}" cy="${Y(r[i])}" r="${rad}" fill="${col}"/>`)).join('');
     if (kc != null) g += `<path d="${path(D.rows[kc])}" fill="none" stroke="${C_DIM}" stroke-width="1.2" stroke-dasharray="4 3"/>${dots(D.rows[kc], C_DIM, 1.8)}`;
     g += `<path d="${path(D.rows[k])}" fill="none" stroke="${C_AMBER}" stroke-width="2"/>${dots(D.rows[k], C_AMBER, 2.6)}`
-       + `<rect id="dt-curve-hit" x="${CL}" y="${T}" width="${CW - CL - CR}" height="${H - T - B}" fill="transparent" style="cursor:crosshair"/>`;
+;
+    if (o.real && D.real && D.real[k]) {                     // v7: real curve + breakeven brackets
+      const rr = D.real[k], TEAL = 'var(--teal,#4fb3a9)';
+      REAL_MAT.forEach(([m, , , ni], i) => {
+        const nom = D.rows[k][ni];
+        if (rr[i] == null || nom == null) return;
+        const x = X(m), yn = Y(nom), yr = Y(rr[i]);
+        g += `<line x1="${x}" y1="${yn}" x2="${x}" y2="${yr}" stroke="${TEAL}" stroke-width="1" stroke-dasharray="1 2"/>`
+           + `<text x="${(x + 3).toFixed(2)}" y="${((yn + yr) / 2 + 3).toFixed(2)}" font-size="8" fill="${TEAL}">${(nom - rr[i]).toFixed(2)}</text>`;
+      });
+      let d = '', pen = false;
+      REAL_MAT.forEach(([m], i) => { if (rr[i] == null) { pen = false; return; } d += `${pen ? 'L' : 'M'}${X(m)} ${Y(rr[i])} `; pen = true; });
+      g += `<path d="${d.trim()}" fill="none" stroke="${TEAL}" stroke-width="1.6" stroke-dasharray="5 3"/>`
+         + REAL_MAT.map(([m], i) => (rr[i] == null ? '' : `<circle cx="${X(m)}" cy="${Y(rr[i])}" r="2.4" fill="${TEAL}"/>`)).join('');
+    }
+    g += `<rect id="dt-curve-hit" x="${CL}" y="${T}" width="${CW - CL - CR}" height="${H - T - B}" fill="transparent" style="cursor:crosshair"/>`;
     return `<svg viewBox="0 0 ${CW} ${H}" style="width:100%;height:auto;display:block;font-family:var(--mono,monospace)" role="img" aria-label="US Treasury yield curve on ${D.dates[k]}">${g}</svg>`;
   }
   function deltaSvg(D, k, kc, o) {
@@ -489,10 +562,15 @@
     const chgY = (x, y) => { const d = bpd(x, y); return d == null ? '' : ` <span style="color:var(--ink-faint)">(${d > 0 ? '+' : ''}${d} bp)</span>`; };
     const inv = [a.s2s10 != null && a.s2s10 < 0 ? '2s10s' : null, a.s3m10y != null && a.s3m10y < 0 ? '3m10y' : null].filter(Boolean);
     const it = (l, v, c) => `<span>${l} <strong style="color:var(--ink)">${v}</strong>${c || ''}</span>`;
+    const rs = realStats(D, k), rsb = kc == null ? null : realStats(D, kc);
+    const realBits = rs ? [
+      rs.real10 != null ? it('10Y real', pct(rs.real10), rsb && chgY(rs.real10, rsb.real10)) : '',
+      rs.be10 != null ? it('10Y breakeven', pct(rs.be10), rsb && chgY(rs.be10, rsb.be10)) : '',
+      rs.fwd != null ? it('5y5y', pct(rs.fwd), rsb && rsb.fwd != null ? chgY(rs.fwd, rsb.fwd) : '') : ''].join('') : '';
     return `<div style="display:flex;flex-wrap:wrap;gap:4px 14px;font-family:var(--mono);font-size:10.5px;color:var(--ink-dim);margin:6px 2px">
       ${it('2Y', pct(a.y2), b && chgY(a.y2, b.y2))}${it('10Y', pct(a.y10), b && chgY(a.y10, b.y10))}
       ${it('2s10s', bps(a.s2s10), b && chg(a.s2s10, b.s2s10))}${it('3m10y', bps(a.s3m10y), b && chg(a.s3m10y, b.s3m10y))}
-      ${it('2s5s10s fly', bps(a.fly), b && chg(a.fly, b.fly))}
+      ${it('2s5s10s fly', bps(a.fly), b && chg(a.fly, b.fly))}${realBits}
       ${inv.length ? `<span style="color:var(--red)">inverted · ${inv.join(' · ')}</span>` : ''}
       ${mv ? `<span>vs ${esc(lab)}: <strong style="color:var(--ink)">${esc(mv.label)}</strong> <span style="color:var(--ink-faint)">(2Y ${mv.d2 > 0 ? '+' : ''}${mv.d2} · 10Y ${mv.d10 > 0 ? '+' : ''}${mv.d10} bp)</span></span>` : ''}</div>`;
   }
@@ -501,8 +579,16 @@
     const D = S.cache.ydaily || (S.cache.ydaily = await yieldDaily());
     if (!document.getElementById('dt-view')) return;
     if (D.error) { delete S.cache.ydaily; view.innerHTML = `<div style="font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);padding:16px 0">${esc(D.error)}</div>`; return; }
-    const n = D.dates.length, start = rangeStart(D, S.months), skey = `ycs:${S.months}:${S.ccmp}`;
-    const sc = S.cache[skey] || (S.cache[skey] = curveScales(D, start, S.ccmp));
+    const n = D.dates.length, start = rangeStart(D, S.months), skey = `ycs:${S.months}:${S.ccmp}:${S.cr}`;
+    const sc = S.cache[skey] || (S.cache[skey] = curveScales(D, start, S.ccmp, S.cr === 'real'));
+    // v7: the move strip (vs 1M when the comparison is the range start)
+    const sMode = S.ccmp === 'start' ? '1m' : S.ccmp, lkey = `ylab:${S.months}:${sMode}`;
+    const labels = S.cache[lkey] || (S.cache[lkey] = moveLabels(D, start, sMode));
+    const shares = {}; let known = 0;
+    for (const l of labels) if (l) { shares[l] = (shares[l] || 0) + 1; known++; }
+    const stripHtml = k => `<div style="margin:0 0 6px">${moveStripSvg(labels, k - start)}
+        <div style="display:flex;flex-wrap:wrap;gap:2px 10px;font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:3px">
+          <span>each trading day's move vs ${esc(CMP[sMode][1])}:</span>${Object.entries(shares).sort((p, q) => q[1] - p[1]).map(([l, c]) => `<span><span style="display:inline-block;width:8px;height:8px;background:${MOVE_COL[l]};border-radius:1px;vertical-align:middle"></span> ${esc(l)} ${(c / known * 100).toFixed(0)}%</span>`).join('')}</div></div>`;
     $('#dt-title').textContent = 'US Treasury yield curve';
     $('#dt-sub').innerHTML = `${TEN_L.length} maturities · daily · FRED H.15 constant maturity (par, bond-equivalent %) · ${esc(D.dates[start])} → ${esc(D.dates[n - 1])} · <a href="#" id="dt-csv" style="color:var(--ink-faint)">CSV ↓</a>`;
     $('#dt-csv').onclick = e => { e.preventDefault(); downloadCsv({ title: `US Treasury yields daily ${D.dates[start]} to ${D.dates[n - 1]}`, xLabel: 'Maturity', yLabel: 'Date', xs: TEN_L, ys: D.dates.slice(start), z: D.rows.slice(start), xTick: v => v, yTick: v => v }); };
@@ -517,10 +603,12 @@
           <button class="btn btn-ghost" id="dt-cplay" style="padding:2px 8px;font-size:10px" title="Play through the dates">${S.playing ? '❚❚' : '▶'}</button>
           <input type="range" id="dt-cscrub" min="${start}" max="${n - 1}" value="${k}" style="flex:1;min-width:0">
           <span style="color:var(--ink-faint)">${esc(D.dates[n - 1].slice(0, 7))}</span></div>
-        <div style="background:var(--bg-elev);border:1px solid var(--rule);border-radius:6px;padding:4px 2px">${curveSvg(D, k, kc, { xs: S.cx, y: sc.y })}</div>
+        ${stripHtml(k)}
+        <div style="background:var(--bg-elev);border:1px solid var(--rule);border-radius:6px;padding:4px 2px">${curveSvg(D, k, kc, { xs: S.cx, y: sc.y, real: S.cr === 'real' })}</div>
         <div style="display:flex;flex-wrap:wrap;gap:4px 14px;font-family:var(--mono);font-size:9.5px;margin:5px 2px">
           <span>${key(C_AMBER, 2)} <strong style="color:var(--ink)">${esc(D.dates[k])}</strong></span>
-          ${kc != null ? `<span style="color:var(--ink-dim)">${key(C_DIM, 1.2, true)} ${esc(D.dates[kc])} (${esc(lab)})</span>` : `<span style="color:var(--ink-faint)">no ${esc(lab)} curve in the data</span>`}</div>
+          ${kc != null ? `<span style="color:var(--ink-dim)">${key(C_DIM, 1.2, true)} ${esc(D.dates[kc])} (${esc(lab)})</span>` : `<span style="color:var(--ink-faint)">no ${esc(lab)} curve in the data</span>`}
+          ${S.cr === 'real' ? `<span style="color:var(--teal,#4fb3a9)">${key('var(--teal,#4fb3a9)', 1.6, true)} real yield (TIPS) · dotted bracket = breakeven</span>` : ''}</div>
         ${curveStatsHtml(D, k, kc, lab)}
         ${kc != null ? `<div style="font-family:var(--mono);font-size:9.5px;color:var(--ink-faint);margin:8px 2px 2px">Change by maturity vs ${esc(lab)} · bp · up = higher yield</div>
           <div style="background:var(--bg-elev);border:1px solid var(--rule);border-radius:6px;padding:2px">${deltaSvg(D, k, kc, { xs: S.cx, d: sc.d })}</div>` : ''}
@@ -528,6 +616,14 @@
       bind(k, kc, lab);
     };
     const bind = (k, kc, lab) => {
+      const strip = document.getElementById('dt-cstrip-svg');
+      if (strip) strip.onclick = e => {
+        const bb = strip.getBoundingClientRect();
+        if (!bb.width) return;
+        stopPlay();
+        S.ck = start + Math.max(0, Math.min(labels.length - 1, Math.floor((e.clientX - bb.left) / bb.width * labels.length)));
+        paint();
+      };
       const r = $('#dt-cscrub'); if (r) r.oninput = () => { stopPlay(); S.ck = +r.value; paint(); };
       const pb = $('#dt-cplay'); if (pb) pb.onclick = () => {
         if (S.playing) { stopPlay(); paint(); return; }
@@ -690,7 +786,7 @@
       <tbody>${ds.ys.map((y, j) => `<tr><td>${esc(y)}</td>${ds.z[j].map(v => `<td>${esc(ds.cell(v))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
   }
 
-  const S = { dataset: 'iv', view: '3d', ticker: null, months: 36, surf: null, cache: {}, ivMode: 'cm', snap: null, psplit: 'volume', cwin: 63, ck: null, ccmp: '1m', cx: 'log' };
+  const S = { dataset: 'iv', view: '3d', ticker: null, months: 36, surf: null, cache: {}, ivMode: 'cm', snap: null, psplit: 'volume', cwin: 63, ck: null, ccmp: '1m', cx: 'log', cr: 'nom' };
   async function render() {
     const host = document.getElementById('data-tab-body');
     if (!host) return;
@@ -705,7 +801,7 @@
         ${S.dataset === 'corr' ? seg('cwin', [[21, '1M'], [63, '3M'], [126, '6M']]) + seg('months', [[12, '1Y'], [36, '3Y'], [60, '5Y'], [120, '10Y']]) : ''}
         ${S.dataset === 'patterns' ? seg('psplit', [['trend', 'by trend'], ['volume', 'by volume']]) : ''}
         ${S.dataset !== 'catalog' ? seg('view', (S.dataset === 'yield' ? [['curve', 'Curve']] : []).concat([['3d', '3D'], ['heat', 'Heat map'], ['slices', 'Slices'], ['table', 'Table']])) : ''}
-        ${S.dataset === 'yield' && S.view === 'curve' ? seg('ccmp', [['1m', 'vs 1M'], ['3m', 'vs 3M'], ['1y', 'vs 1Y'], ['start', 'vs start']]) + seg('cx', [['log', 'log'], ['lin', 'linear']]) : ''}
+        ${S.dataset === 'yield' && S.view === 'curve' ? seg('ccmp', [['1m', 'vs 1M'], ['3m', 'vs 3M'], ['1y', 'vs 1Y'], ['start', 'vs start']]) + seg('cx', [['log', 'log'], ['lin', 'linear']]) + seg('cr', [['nom', 'Nominal'], ['real', '+ Real & breakeven']]) : ''}
         ${S.dataset === 'iv' ? seg('ivMode', [['cm', 'Constant maturity'], ['exp', 'By expiry']]) : ''}
         ${S.dataset === 'iv' ? `<input id="dt-ticker" value="${esc(S.ticker)}" style="width:80px;background:var(--bg-elev);border:1px solid var(--rule);color:var(--ink);padding:5px 6px;border-radius:4px;font-family:var(--mono);font-size:11px;text-transform:uppercase"><button class="btn" id="dt-go" style="padding:5px 10px;font-size:10px">Load</button>` : ''}
         ${S.dataset === 'yield' ? seg('months', [[12, '1Y'], [36, '3Y'], [60, '5Y'], [120, '10Y']]) : ''}
@@ -717,6 +813,7 @@
     host.querySelectorAll('[data-dt-dataset]').forEach(b => b.onclick = () => { stopPlay(); S.dataset = b.dataset.dtDataset; if (S.dataset === 'yield') S.view = 'curve'; render(); });
     host.querySelectorAll('[data-dt-ccmp]').forEach(b => b.onclick = () => { S.ccmp = b.dataset.dtCcmp; render(); });
     host.querySelectorAll('[data-dt-cx]').forEach(b => b.onclick = () => { S.cx = b.dataset.dtCx; render(); });
+    host.querySelectorAll('[data-dt-cr]').forEach(b => b.onclick = () => { S.cr = b.dataset.dtCr; render(); });
     host.querySelectorAll('[data-dt-view]').forEach(b => b.onclick = () => { S.view = b.dataset.dtView; render(); });
     host.querySelectorAll('[data-dt-months]').forEach(b => b.onclick = () => { S.months = +b.dataset.dtMonths; render(); });
     host.querySelectorAll('[data-dt-psplit]').forEach(b => b.onclick = () => { S.psplit = b.dataset.dtPsplit; render(); });
@@ -822,6 +919,20 @@
     const b = e.target && e.target.closest && e.target.closest('.tab-btn[data-tab="data"]');
     if (b) setTimeout(render, 30);
   }, true);
-  window.DataTab = { render, ivSurface, yieldSurface, Surface3D, colorAt,
-                     _curve: { buildDaily, curveStats, classifyMove, niceScale, monthsBefore, cmpIndex, rangeStart, curveScales, curveSvg, deltaSvg, xMap, TEN_Y, TEN_L } };
+  // v7: the latest curve read for the Regime tab's context card
+  async function curveSnapshot() {
+    const D = S.cache.ydaily || (S.cache.ydaily = await yieldDaily());
+    if (!D || D.error) return null;
+    const k = D.dates.length - 1, kc = cmpIndex(D, k, '1m', 0), a = curveStats(D.rows[k]);
+    return Object.assign({ date: D.dates[k], vs: kc == null ? null : D.dates[kc], move: kc == null ? null : classifyMove(D.rows[kc], D.rows[k]),
+      inverted: (a.s2s10 != null && a.s2s10 < 0) || (a.s3m10y != null && a.s3m10y < 0) }, a, realStats(D, k) || {});
+  }
+  function openCurve() {
+    S.dataset = 'yield'; S.view = 'curve'; S.ck = null;
+    if (typeof switchTab === 'function') switchTab('data');
+    setTimeout(render, 40);
+  }
+  window.DataTab = { render, ivSurface, yieldSurface, Surface3D, colorAt, curveSnapshot, openCurve,
+                     _curve: { buildDaily, curveStats, classifyMove, niceScale, monthsBefore, cmpIndex, rangeStart, curveScales, curveSvg, deltaSvg, xMap, TEN_Y, TEN_L,
+                               realStats, moveLabels, moveStripSvg, REAL_MAT, MOVE_COL, yieldDaily } };
 })();
