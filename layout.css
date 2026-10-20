@@ -81,7 +81,19 @@ html[data-theme="light"] .nav-group-btn.active { color: var(--ink); border-botto
 .sub-nav .tab-btn .tab-label { font-size: 12px; }
 .sub-nav .tab-btn.active { border-color: var(--amber); background: rgba(212,162,76,0.10); }
 @media (max-width: 600px) {
-  .nav-group-btn { padding: 12px 12px 10px; }
-  .nav-group-btn .tab-label { font-size: 13px; }
   .sub-nav { padding: 8px 12px; }
+}
+/* z129 — every top-level tab the same: News · Bets · Review (.tab-btn) and the three groups
+   (.nav-group-btn) share one label size and padding at every width. The old .tab-btn steps
+   (14 → 13 → 12 → 11 px) were for sixteen tabs; with six, 14 px desktop / 13 px below 1400 px
+   fits everywhere and the bar still scrolls if it must. */
+.tab-nav .tab-btn, .tab-nav .nav-group-btn { padding: 14px 18px 12px; gap: 8px; }
+.tab-nav .tab-btn .tab-label, .tab-nav .nav-group-btn .tab-label { font-family: var(--sans); font-size: 14px; font-weight: 500; letter-spacing: 0.02em; }
+.tab-nav .tab-btn.active .tab-label, .tab-nav .nav-group-btn.active .tab-label { font-weight: 600; }
+@media (max-width: 1400px) {
+  .tab-nav .tab-btn, .tab-nav .nav-group-btn { padding: 12px 14px 10px; }
+  .tab-nav .tab-btn .tab-label, .tab-nav .nav-group-btn .tab-label { font-size: 13px; }
+}
+@media (max-width: 900px) {
+  .tab-nav .tab-btn, .tab-nav .nav-group-btn { padding: 11px 12px 9px; }
 }
