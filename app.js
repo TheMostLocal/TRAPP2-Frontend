@@ -48878,9 +48878,41 @@ function _botPriceOf(tic) {
 //   sales; total unrealized = Σ over OPEN positions. Options / leveraged ETFs are
 //   non-linear, so each such bet stays standalone (its own pnl/realizedPL).
 // ============================================================
+// z130: every sell a trade made - the runner's trims[] (shares, price) and the app's partialSells[]
+// (fraction, realized; counted once - a partial sell the runner mirrored is skipped) - and the size
+// it opened with. Walking back from the shares held now, a fractional sell's size is exact
+// (f × shares-after ÷ (1 − f)) and its price is back-solved from its recorded P/L. A 100 % sell
+// with no share count (the device's Rebalance Cash) leaves the size unknowable: the trade is
+// "unsized" - its legs carry no shares or price, only the exact realized P/L. Nothing is invented.
+function _betSellList(b) {
+  const d10 = x => String(x || '').slice(0, 10);
+  const tr = (Array.isArray(b.trims) ? b.trims : []).filter(x => x && x.date);
+  const mirrored = p => tr.some(t => t.origin === 'app' && d10(t.date) === d10(p.date) && Math.abs((+t.realized || 0) - (+p.realized || 0)) <= 0.05);
+  return tr.map(x => ({ date: d10(x.date), shares: +x.shares > 0 ? +x.shares : null, fraction: +x.fraction > 0 ? +x.fraction : null, price: +x.price > 0 ? +x.price : null, realized: +x.realized || 0 }))
+    .concat((Array.isArray(b.partialSells) ? b.partialSells : []).filter(p => p && p.date && !mirrored(p))
+      .map(p => ({ date: d10(p.date), shares: +p.shares > 0 ? +p.shares : null, fraction: +p.fraction > 0 ? +p.fraction : null, price: +p.price > 0 ? +p.price : null, realized: +p.realized || 0 })))
+    .sort((a, z) => (a.date < z.date ? -1 : a.date > z.date ? 1 : 0));
+}
+function _betLegs(b) {
+  const dir = b.direction === 'short' ? -1 : 1, entry = +b.entryPrice, evs = _betSellList(b);
+  let after = +b.shares || 0;
+  for (let i = evs.length - 1; i >= 0; i--) {
+    const e = evs[i];
+    const sold = e.shares > 0 ? e.shares : (e.fraction > 0 && e.fraction < 1 ? after * e.fraction / (1 - e.fraction) : null);
+    if (!(sold > 0)) return { unsized: true, sells: evs, realized: +(evs.reduce((s, x) => s + x.realized, 0) + _betExitRealized(b)).toFixed(2) };
+    e.sold = +sold.toFixed(6);
+    e.derived = !(e.shares > 0);
+    if (!(e.price > 0) && entry > 0) e.price = +(entry + e.realized / (sold * dir)).toFixed(6);
+    after += sold;
+  }
+  if (!(after > 0)) return { unsized: true, sells: evs, realized: +_betExitRealized(b).toFixed(2) };
+  return { orig: +after.toFixed(6), sells: evs };
+}
+if (typeof window !== 'undefined') { window._betLegs = _betLegs; window._betSellList = _betSellList; }
 function botTickerLedger(bets, priceOf) {
   priceOf = priceOf || (() => null);
   const num = (v) => { const n = Number(v); return isFinite(n) ? n : null; };
+  const _noFill = [];
   const isLinear = (b) => b.instrument !== 'option' && b.instrument !== 'leveraged_etf';
   const books = {};
   const push = (key, meta, txn) => { (books[key] = books[key] || Object.assign({ txns: [] }, meta)).txns.push(txn); };
@@ -48889,13 +48921,22 @@ function botTickerLedger(bets, priceOf) {
     const tic = String(b.ticker).toUpperCase();
     const dir = b.direction === 'short' ? -1 : 1;
     if (isLinear(b)) {
-      const key = `${tic}|${dir}|shares`;
-      const trims = Array.isArray(b.trims) ? b.trims : [];
-      const trimShares = trims.reduce((x, t) => x + (num(t.shares) || 0), 0);
+      // z130: the opening fill, every sell (trims[] + partialSells[], once) and the exit - the SAME
+      // legs the Daily Activity lists, so the two views can't disagree.
       const curShares = num(b.shares) || 0;
-      const origShares = +(curShares + trimShares).toFixed(6);
-      if (origShares > 0 && num(b.entryPrice) != null) push(key, { ticker: tic, dir, linear: true }, { betId: b.id, side: 'buy', date: b.entryDate, price: num(b.entryPrice), shares: origShares });
-      for (const t of trims) if ((num(t.shares) || 0) > 0 && num(t.price) != null) push(key, { ticker: tic, dir, linear: true }, { betId: b.id, side: 'sell', date: t.date || b.exitDate || b.entryDate, price: num(t.price), shares: num(t.shares) });
+      const lg = _betLegs(b);
+      if (lg.unsized) {
+        if (!lg.realized) { _noFill.push(b); continue; }                 // never held a share, booked $0
+        const key = `unsized:${b.id}`;                                    // its own book: size unknowable
+        push(key, { ticker: tic, dir, linear: true, unsized: true }, { betId: b.id, side: 'buy', date: b.entryDate, price: num(b.entryPrice), shares: null, unsized: true });
+        const sells = lg.sells.length ? lg.sells : [{ date: String(b.exitDate || b.entryDate).slice(0, 10), realized: lg.realized }];
+        sells.forEach((e, i) => push(key, { ticker: tic, dir, linear: true, unsized: true }, { betId: b.id, side: 'sell', date: e.date, price: null, shares: null, unsized: true,
+          fixedPl: i === sells.length - 1 ? +(e.realized + (lg.sells.length ? _betExitRealized(b) : 0)).toFixed(2) : e.realized, last: i === sells.length - 1 }));
+        continue;
+      }
+      const key = `${tic}|${dir}|shares`;
+      if (num(b.entryPrice) != null) push(key, { ticker: tic, dir, linear: true }, { betId: b.id, side: 'buy', date: b.entryDate, price: num(b.entryPrice), shares: lg.orig });
+      for (const e of lg.sells) push(key, { ticker: tic, dir, linear: true }, { betId: b.id, side: 'sell', date: e.date || b.exitDate || b.entryDate, price: e.price, shares: e.sold, derived: e.derived });
       if (b.status === 'closed' && num(b.exitPrice) != null && curShares > 0) push(key, { ticker: tic, dir, linear: true }, { betId: b.id, side: 'sell', date: b.exitDate || b.entryDate, price: num(b.exitPrice), shares: curShares });
     } else {
       const key = `bet:${b.id}`;
@@ -48906,6 +48947,7 @@ function botTickerLedger(bets, priceOf) {
   }
   const legs = [];
   const byTicker = {};
+  const noFill = _noFill;                    // z130: records that never held a share and booked $0
   for (const key of Object.keys(books)) {
     const bk = books[key];
     const txns = bk.txns.slice().sort((a, b) => {
@@ -48916,6 +48958,12 @@ function botTickerLedger(bets, priceOf) {
     let shares = 0, avgCost = 0, realized = 0;
     for (const t of txns) {
       let label, pl = null, statusAfter;
+      if (t.unsized) {                                   // z130: size unknowable - the realized P/L is exact
+        if (t.side === 'buy') { label = 'BUY'; statusAfter = 'open'; }
+        else { pl = t.fixedPl; realized += pl || 0; label = t.last ? 'SELL' : 'TRIM'; statusAfter = t.last ? 'closed' : 'open'; }
+        legs.push({ ticker: bk.ticker, dir: bk.dir, betId: t.betId, date: t.date, side: t.side, label, price: t.price, shares: null, value: null, pl, statusAfter, unsized: true });
+        continue;
+      }
       if (t.side === 'buy') {
         label = shares > 1e-6 ? 'ADD' : 'BUY';
         const ns = +(shares + t.shares).toFixed(6);
@@ -48931,7 +48979,7 @@ function botTickerLedger(bets, priceOf) {
         label = closed ? 'SELL' : 'TRIM';
         statusAfter = closed ? 'closed' : 'open';
       }
-      legs.push({ ticker: bk.ticker, dir: bk.dir, betId: t.betId, date: t.date, side: t.side, label, price: t.price, shares: t.shares, value: (t.price != null ? +(t.price * t.shares).toFixed(2) : null), pl, statusAfter });
+      legs.push({ ticker: bk.ticker, dir: bk.dir, betId: t.betId, date: t.date, side: t.side, label, price: t.price, shares: t.shares, value: (t.price != null ? +(t.price * t.shares).toFixed(2) : null), pl, statusAfter, derived: !!t.derived });
     }
     const open = shares > 1e-6;
     const live = open ? priceOf(bk.ticker) : null;
@@ -48984,7 +49032,7 @@ function botTickerLedger(bets, priceOf) {
   const unpricedPositions = openPositions.filter(p => p.unpriced);
   const unpricedCostBasis = +unpricedPositions.reduce((x, p) => x + (p.costBasis || 0), 0).toFixed(2);
   return { legs, positions, openPositions, totalRealized, totalUnrealized,
-           unpricedPositions, unpricedCount: unpricedPositions.length, unpricedCostBasis };
+           unpricedPositions, unpricedCount: unpricedPositions.length, unpricedCostBasis, noFill: _noFill };
 }
 
 // NET EXTERNAL CAPITAL — the only thing the all-time return is measured against.
@@ -49323,13 +49371,14 @@ function _botIsTradingDay(ds) {
 }
 if (typeof window !== 'undefined') window._botIsTradingDay = _botIsTradingDay;
 // z129: the market calendar per asset. Equities trade NYSE sessions only (a weekend / holiday
-// carries Friday's close); FX (=X) and futures (=F) trade every weekday, NYSE holidays included;
-// crypto (-USD) trades every day. A day off the NYSE calendar gets an equity point ONLY if a
+// carries Friday's close); spot FX (=X) trades every weekday, US holidays included; crypto (-USD)
+// every day. Futures (=F) follow the exchange's US holiday calendar - their daily settlements fall
+// on NYSE trading days (z130: they had added Juneteenth, Jul 3 and Labor Day points). A day off the NYSE calendar gets an equity point ONLY if a
 // position held that day trades then - an equity-only book never moves on a Saturday.
 function _botMarket24(tic, ds) {
   const t = String(tic || '').toUpperCase(), w = new Date(String(ds).slice(0, 10) + 'T12:00:00Z').getUTCDay();
   if (/-USD$/.test(t)) return true;                                   // crypto: 24/7
-  if (/=X$/.test(t) || /=F$/.test(t)) return w !== 0 && w !== 6;       // FX / futures: 24x5
+  if (/=X$/.test(t)) return w !== 0 && w !== 6;                        // spot FX: 24x5
   return false;
 }
 function _botHeld24h(bets, ds) {
@@ -50356,44 +50405,46 @@ function renderBetsTab() {
 
   // ---- DAILY ACTIVITY: trades grouped by day (opens, adds, closes). Shows the
   // bot's actual cadence — including days it did nothing. ----
+  // z130: the SAME legs as the Transaction Ledger (botTickerLedger), grouped by day - so a buy, add,
+  // trim or close appears on the same date with the same amount in both. It used to list each
+  // record's entry and exit dates with its CURRENT notional / pnl, which read "$0" / "+$0.00" for a
+  // trade the device's Rebalance Cash had sold (the P/L sits in its partial sell), while the ledger
+  // dropped that trade entirely.
+  const _actLedger = perf._acct || botTickerLedger(perf.bets, _botPriceOf);
   const byDay = new Map();
-  for (const b of (perf.bets || [])) {
-    if (b.entryDate) {
-      const e = byDay.get(b.entryDate) || { opens: [], closes: [] };
-      e.opens.push(b); byDay.set(b.entryDate, e);
-    }
-    if (b.exitDate) {
-      const e = byDay.get(b.exitDate) || { opens: [], closes: [] };
-      e.closes.push(b); byDay.set(b.exitDate, e);
-    }
+  for (const L of _actLedger.legs) {
+    const d = String(L.date || '').slice(0, 10);
+    if (!d) continue;
+    (byDay.get(d) || byDay.set(d, []).get(d)).push(L);
   }
   const days = Array.from(byDay.keys()).sort().reverse().slice(0, 14);  // last 14 active days
-  // Detect adds: an open on a ticker we already held an open lot of on an earlier date.
-  const heldBefore = (ticker, dir, beforeDate) => (perf.bets || []).some(b =>
-    b.ticker === ticker && b.direction === dir && b.entryDate < beforeDate &&
-    (!b.exitDate || b.exitDate >= beforeDate));
+  const _dayTag = d => (typeof _botIsTradingDay === 'function' && !_botIsTradingDay(d))
+    ? ` <span title="Not an NYSE trading day: stamped by a UTC clock (an action taken the evening before, ET) - priced at the last session's close; the equity chart books it on the next session." style="color:var(--amber)">†</span>` : '';
+  const _noFillNote = (_actLedger.noFill || []).length
+    ? ` ${_actLedger.noFill.length} record${_actLedger.noFill.length === 1 ? '' : 's'} with no fill (0 shares, $0) not shown: ${_actLedger.noFill.map(b => `${b.ticker} ${String(b.entryDate || '').slice(5)}`).join(', ')}.` : '';
   const activityHtml = days.length ? `
     <div class="company-card">
-      <h4>Daily Activity <span style="color:var(--ink-faint);font-size:9px;text-transform:none;letter-spacing:0;font-weight:400">· last ${days.length} active day${days.length !== 1 ? 's' : ''} · opens, adds &amp; closes</span></h4>
+      <h4>Daily Activity <span style="color:var(--ink-faint);font-size:9px;text-transform:none;letter-spacing:0;font-weight:400">· last ${days.length} active day${days.length !== 1 ? 's' : ''} · opens, adds, trims &amp; closes · the Transaction Ledger's legs, by day</span></h4>
       <div style="display:flex;flex-direction:column;gap:8px">
         ${days.map(day => {
-          const e = byDay.get(day);
+          const legsToday = byDay.get(day);
           const items = [];
-          for (const b of e.opens) {
-            const isAdd = heldBefore(b.ticker, b.direction, day);
-            items.push(`<span style="font-family:var(--mono);font-size:10px;color:${b.direction === 'short' ? 'var(--neg)' : 'var(--pos)'}">${isAdd ? '➕ ADD' : (b.direction === 'short' ? '▼ SHORT' : '▲ LONG')} ${b.ticker} $${(b.notional||0).toFixed(0)}</span>`);
-          }
-          for (const b of e.closes) {
-            items.push(`<span style="font-family:var(--mono);font-size:10px;color:var(--ink-dim)">✕ CLOSE ${b.ticker} ${fmtPnl(b.pnl)}</span>`);
+          for (const L of legsToday) {
+            const col = L.side === 'buy' ? (L.dir < 0 ? 'var(--neg)' : 'var(--pos)') : 'var(--ink-dim)';
+            const amt = L.side === 'buy'
+              ? (L.value != null ? '$' + L.value.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '<span title="The device sold this trade without recording a share count - its size is unknowable; its realized P/L is exact.">size not recorded</span>')
+              : (L.pl != null ? fmtPnl(L.pl) : '—');
+            const verb = L.label === 'BUY' ? (L.dir < 0 ? '▼ SHORT' : '▲ LONG') : L.label === 'ADD' ? '➕ ADD' : L.label === 'TRIM' ? '✂ TRIM' : '✕ CLOSE';
+            items.push(`<span style="font-family:var(--mono);font-size:10px;color:${col}">${verb} ${escapeHtml(L.ticker)} ${amt}</span>`);
           }
           return `
             <div style="display:flex;gap:12px;align-items:flex-start;padding:6px 0;border-bottom:1px solid var(--rule)">
-              <span style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);min-width:78px">${day}</span>
+              <span style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);min-width:78px">${day}${_dayTag(day)}</span>
               <div style="display:flex;flex-wrap:wrap;gap:8px;flex:1">${items.join('') || '<span style="font-family:var(--mono);font-size:10px;color:var(--ink-faint)">— no activity —</span>'}</div>
             </div>`;
         }).join('')}
       </div>
-      <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:8px;line-height:1.6">The bot has no daily quota — days with no activity are normal and expected. It trades (long or short), adds to a position, or sits out based purely on conviction.</div>
+      <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:8px;line-height:1.6">The bot has no daily quota — days with no activity are normal and expected. It trades (long or short), adds to a position, or sits out based purely on conviction.${_noFillNote}${days.some(d => _dayTag(d)) ? ' † = not an NYSE trading day: stamped by a UTC clock for an action taken the evening before (ET), priced at that session\'s close.' : ''}</div>
     </div>` : '';
 
   // Today's bets for the highlight card. (This was referenced below but never
@@ -50452,7 +50503,7 @@ function renderBetsTab() {
   // closed position reads SELL; a partial would stay OPEN but is tagged SELL too.
   const _betType = (b) => (b.status === 'closed' || b.exitPrice != null || b._partialSold) ? 'SELL' : 'BUY';
 
-  const _acct = perf._acct || botTickerLedger(perf.bets, _botPriceOf);
+  const _acct = _actLedger;   // z130: the one ledger the Daily Activity already used
 
   const _ledgerCols = [
     { key: 'date',    label: 'Date',         type: 'date', get: L => L.date || '' },
@@ -50486,11 +50537,11 @@ function renderBetsTab() {
     const dirTxt = L.dir < 0 ? 'SHORT' : 'LONG';
     return `
     <tr class="bot-receipt-row" data-bet-id="${L.betId || ''}" style="cursor:pointer" title="Tap for the bot's decision receipt">
-      <td style="font-family:var(--mono);font-size:11px">${L.date || '\u2014'}</td>
+      <td style="font-family:var(--mono);font-size:11px">${L.date || '\u2014'}${L.date ? _dayTag(String(L.date).slice(0, 10)) : ''}</td>
       <td style="font-family:var(--mono);font-weight:700"><span class="bot-ticker-link" data-ticker="${L.ticker}" style="cursor:pointer;color:var(--amber);text-decoration:underline;text-decoration-style:dotted" title="Open ${L.ticker}">${L.ticker}</span> <span style="color:var(--ink-faint);font-size:9px">${dirTxt}</span></td>
       <td><span class="leg-badge leg-badge--${badgeClass}">${L.label}</span></td>
-      <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">${L.shares ? L.shares.toLocaleString(undefined,{maximumFractionDigits:2}) : '\u2014'}</td>
-      <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">${L.price != null ? '$' + L.price.toFixed(2) : '\u2014'}</td>
+      <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)"${L.derived ? ' title="Shares from the recorded fraction of the position; price back-solved from the recorded P/L"' : ''}>${L.unsized ? '<span title="Sold by the device without a share count - size unknowable; the P/L is exact" style="color:var(--ink-faint)">not recorded</span>' : L.shares ? (L.derived ? '≈' : '') + L.shares.toLocaleString(undefined,{maximumFractionDigits:2}) : '\u2014'}</td>
+      <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">${L.price != null ? (L.derived ? '≈' : '') + '$' + L.price.toFixed(2) : '\u2014'}</td>
       <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">${L.value != null ? '$' + L.value.toLocaleString(undefined,{maximumFractionDigits:0}) : '\u2014'}</td>
       <td style="font-family:var(--mono);font-size:11px;font-weight:700;color:${isSell && L.pl != null ? pnlColor(L.pl) : 'var(--ink-faint)'}" title="${isSell ? 'Realized vs average cost' : 'Buys/adds book cost basis — P/L is realized on the sell'}">${isSell && L.pl != null ? fmtPnl(L.pl) : '\u2014'}</td>
       <td style="font-family:var(--mono);font-size:10px;color:${st === 'OPEN' ? 'var(--amber)' : 'var(--ink-faint)'}">${st}${isSell ? '' : ' \u203a'}</td>
@@ -50547,6 +50598,7 @@ function renderBetsTab() {
           <tbody>${ledgerRows}</tbody>
         </table>
       </div>
+      <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:8px;line-height:1.6">Every leg once: opening fills, the runner's trims, the device's partial sells and exits — the same legs the Daily Activity lists by day. ≈ = shares from the recorded fraction of the position, price back-solved from the recorded P/L.${_acct.legs.some(L => L.unsized) ? ' "not recorded" = the device sold the whole trade without a share count; its realized P/L is exact.' : ''}${_noFillNote}${_acct.legs.some(L => L.date && _dayTag(String(L.date).slice(0, 10))) ? ' † = not an NYSE trading day (UTC stamp of an evening-before action, ET).' : ''}</div>
     </div>` : `<div class="company-card"><div style="font-family:var(--mono);font-size:11px;color:var(--ink-faint);padding:12px 0">No transactions yet. Run the scan to place the bot's first trades.</div></div>`;
 
   // ---- Honesty note ----
