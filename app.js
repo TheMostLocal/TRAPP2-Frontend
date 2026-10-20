@@ -48309,6 +48309,10 @@ function botMarkToMarket() {
     // notional×leverage, then shares×entryPrice, so a bet missing one field never
     // produces NaN P&L (which would silently corrupt the compounding bankroll).
     let exposure = bet.dollars;
+    // z129: a share position's P/L is the shares it holds NOW x the price move - the runner's formula.
+    // `dollars` keeps the pre-trim size (BCAB 6.6x, PARA 2.1x its remaining cost), which overstated
+    // the open P/L of trimmed positions.
+    if ((!bet.instrument || bet.instrument === 'shares' || bet.instrument === 'stock') && +bet.shares > 0 && +bet.entryPrice > 0) exposure = +bet.shares * +bet.entryPrice * (bet.leverage || 1);
     if (!isFinite(exposure)) exposure = (bet.notional || 0) * (bet.leverage || 1);
     if (!isFinite(exposure) || exposure === 0) exposure = (bet.shares || 0) * (bet.entryPrice || 0) * (bet.leverage || 1);
     let pnl;
@@ -48604,6 +48608,7 @@ function botMarkToMarket() {
       }
       bot.equityCurve.push({ date: anchorDate, value: BOT_STARTING_BANKROLL, _seed: true });
     }
+    if (typeof _botIsTradingDay === 'function' && !_botIsTradingDay(today)) return bot;   // z129: no Saturday points
     const last = bot.equityCurve[bot.equityCurve.length - 1];
     if (last && last.date === today) {
       // Update today's point in place (price moved during the day).
@@ -48621,8 +48626,17 @@ function botBookValue() {
   const bot = botMarkToMarket();
   const open = bot.bets.filter(b => b.status === 'open');
   const openNotional = open.reduce((s, b) => s + (b.notional || 0), 0);
-  const openExposure = open.reduce((s, b) => s + (b.dollars || 0), 0);
-  const openPnl = open.reduce((s, b) => s + (b.pnl || 0), 0);
+  // z129: unrealized = the per-ticker ledger at live USD prices (FX-normalised, bad-mark guarded) -
+  // the same number the Total P/L card and the equity chart's live point use, so Portfolio value =
+  // capital + Total P/L = Cash + Open positions. Gross exposure = |shares x live price| at market.
+  let openPnl = null, openExposure = null;
+  try {
+    const led = botTickerLedger(open, _botPriceOf);
+    openPnl = led.totalUnrealized;
+    openExposure = led.openPositions.reduce((s, p) => s + (p.live != null && isFinite(p.live) ? Math.abs(p.shares * p.live) : (p.costBasis || 0)), 0);
+  } catch (e) {}
+  if (openPnl == null || !isFinite(openPnl)) openPnl = open.reduce((s, b) => s + (b.pnl || 0), 0);
+  if (openExposure == null || !isFinite(openExposure)) openExposure = open.reduce((s, b) => s + (b.dollars || 0), 0);
   // Cash = bankroll minus capital tied up in open positions (pre-leverage).
   const cash = +(bot.bankroll - openNotional).toFixed(2);
   // Fees paid across ALL trades. Use the explicit per-bet fee if present; else
@@ -48658,7 +48672,7 @@ function botBookValue() {
     // performance — it naturally "resets" as positions close and new ones open,
     // separate from the fixed-$100k all-time number.
     openReturnPct: openNotional > 0 ? +((openPnl / openNotional) * 100).toFixed(2) : null,
-    grossLeverage: bot.bankroll > 0 ? +(openExposure / bot.bankroll).toFixed(2) : 0,
+    grossLeverage: (bot.bankroll + openPnl) > 0 ? +(openExposure / (bot.bankroll + openPnl)).toFixed(2) : 0,   // z129: ÷ equity
   };
 }
 if (typeof window !== 'undefined') window.botBookValue = botBookValue;
@@ -49213,18 +49227,26 @@ if (typeof window !== 'undefined') window.botConfidenceFactor = botConfidenceFac
 //   skipped (same guard the backend runner uses).
 // ============================================================================
 const _botCloseCache = {};        // TICKER -> sorted [{d, c}]
+const _botFxHist = {};            // z129: CCY -> daily [{d, v}] USD per unit (foreign listings mark at their day's rate)
 let _botClosesLoading = false;
 async function loadBotPriceHistories() {
   if (_botClosesLoading || typeof window === 'undefined' || !window.VChart) return false;
   let bot; try { bot = botMarkToMarket(); } catch { return false; }
-  const tks = [...new Set((bot.bets || []).map(b => String(b.ticker || '').toUpperCase()).filter(Boolean))]
-    .filter(t => !(t in _botCloseCache));
-  if (!tks.length) return false;
+  const allTks = [...new Set((bot.bets || []).map(b => String(b.ticker || '').toUpperCase()).filter(Boolean))];
+  const tks = allTks.filter(t => !(t in _botCloseCache));
+  const ccys = new Set();
+  for (const t of allTks) {
+    try { const r = getStockbookRow(t); if (r) { ensureRowNormalized(r); if (r._localCurrency && r._localCurrency !== 'USD') ccys.add(r._localCurrency); } } catch (e) {}
+  }
+  const needFx = [...ccys].filter(c => !(c in _botFxHist));
+  if (!tks.length && !needFx.length) return false;
   _botClosesLoading = true;
   try {
     await Promise.all(tks.map(async t => {
       try { _botCloseCache[t] = (await window.VChart.fetchDaily(t)) || []; } catch { _botCloseCache[t] = []; }
-    }));
+    }).concat(needFx.map(async c => {
+      try { _botFxHist[c] = (typeof fxHistoryUsdPer === 'function' ? await fxHistoryUsdPer(c) : null) || []; } catch { _botFxHist[c] = []; }
+    })));
   } finally { _botClosesLoading = false; }
   try { if (document.getElementById('bets-body') && typeof renderBetsTab === 'function') renderBetsTab(); } catch {}
   return true;
@@ -49293,6 +49315,64 @@ function botLedgerBankroll(bot) {
 }
 if (typeof window !== 'undefined') window.botLedgerBankroll = botLedgerBankroll;
 
+// z129: NYSE trading day (weekends + the exchange's holidays), the same calendar as lastTradingDate.
+function _botIsTradingDay(ds) {
+  const s = String(ds || '').slice(0, 10), d = new Date(s + 'T12:00:00Z'), w = d.getUTCDay();
+  if (!s || isNaN(d) || w === 0 || w === 6) return false;
+  try { return !(typeof marketHolidays === 'function' && marketHolidays(d.getUTCFullYear()).has(s)); } catch (e) { return true; }
+}
+if (typeof window !== 'undefined') window._botIsTradingDay = _botIsTradingDay;
+// z129: the market calendar per asset. Equities trade NYSE sessions only (a weekend / holiday
+// carries Friday's close); FX (=X) and futures (=F) trade every weekday, NYSE holidays included;
+// crypto (-USD) trades every day. A day off the NYSE calendar gets an equity point ONLY if a
+// position held that day trades then - an equity-only book never moves on a Saturday.
+function _botMarket24(tic, ds) {
+  const t = String(tic || '').toUpperCase(), w = new Date(String(ds).slice(0, 10) + 'T12:00:00Z').getUTCDay();
+  if (/-USD$/.test(t)) return true;                                   // crypto: 24/7
+  if (/=X$/.test(t) || /=F$/.test(t)) return w !== 0 && w !== 6;       // FX / futures: 24x5
+  return false;
+}
+function _botHeld24h(bets, ds) {
+  return (bets || []).some(b => b && b.entryDate && b.entryDate <= ds && (b.status === 'open' || (b.exitDate && b.exitDate > ds))
+    && _botMarket24(b.markTicker || b.ticker, ds));
+}
+if (typeof window !== 'undefined') { window._botMarket24 = _botMarket24; window._botHeld24h = _botHeld24h; }
+// z129: shares held at the close of `ds`. The journal stores the shares REMAINING after trims, so
+// walk the later trims back: a trim of fraction f had left (1 − f); one with a share count gives it
+// back. A full exit by trim with no size recorded makes the earlier size unknowable → null (that
+// position then counts only when its P/L is realized - nothing is invented).
+function _botSharesOn(b, ds) {
+  let sh = +b.shares || 0;
+  const tr = (Array.isArray(b.trims) ? b.trims : []).filter(x => x && x.date);
+  const mirrored = p => tr.some(t => t.origin === 'app' && String(t.date).slice(0, 10) === String(p.date).slice(0, 10) && Math.abs((+t.realized || 0) - (+p.realized || 0)) <= 0.05);
+  const evs = tr.map(x => ({ d: String(x.date).slice(0, 10), f: +x.fraction, s: +x.shares }))
+    .concat((Array.isArray(b.partialSells) ? b.partialSells : []).filter(x => x && x.date && !mirrored(x)).map(x => ({ d: String(x.date).slice(0, 10), f: +x.fraction, s: +x.shares })))
+    .sort((a, z) => (a.d < z.d ? 1 : a.d > z.d ? -1 : 0));
+  for (const e of evs) {
+    if (e.d <= ds) break;
+    if (e.s > 0) sh += e.s;
+    else if (e.f > 0 && e.f < 1) sh = sh / (1 - e.f);
+    else return null;
+  }
+  return sh;
+}
+// z129: USD per local unit at a past date - today's factor (incl. sub-units) scaled by the
+// currency's move between that date and now. USD listings: 1.
+function _botFxAt(tic, ds) {
+  const f0 = _botUsdFactor(tic);
+  if (f0 === 1) return 1;
+  try {
+    const row = getStockbookRow(tic), ccy = row && row._localCurrency, h = ccy && _botFxHist[ccy];
+    if (h && h.length) { const now = _fxRateToUSD(ccy), at = fxRateAt(h, ds, 0); if (now > 0 && at > 0) return f0 * at / now; }
+  } catch (e) {}
+  return f0;
+}
+// z129: THE equity series - the journal marked at every NYSE close since the first trade:
+//   value(d) = $100,000 + capital in by d + realized by d (exits + trims)
+//            + Σ open positions × (close(d) × FX(d) − entry), with the shares held that day.
+// A position is marked only by a close on/after its entry (until then it counts at cost); a
+// weekend trade, trim or deposit lands on the next trading day. The day before the first trade
+// is the starting bankroll. `flow` = capital that arrived since the previous point.
 function botReconstructEquityCurve(bot) {
   try {
     const bets = (bot && Array.isArray(bot.bets)) ? bot.bets : [];
@@ -49301,46 +49381,49 @@ function botReconstructEquityCurve(bot) {
     for (const b of bets) if (b.entryDate && (!minDate || b.entryDate < minDate)) minDate = b.entryDate;
     if (!minDate) return [];
     const today = (typeof lastTradingDate === 'function') ? lastTradingDate() : new Date().toISOString().slice(0, 10);
-    // per-ticker pointer walk over its sorted closes
-    const ptr = {}, lastC = {}, fx = {};
+    const ptr = {}, lastC = {}, lastD = {};
     const closeOn = (tic, ds) => {
       const h = _botCloseCache[tic];
       if (!h || !h.length) return null;
       let i = ptr[tic] || 0;
-      while (i < h.length && h[i].d <= ds) { lastC[tic] = h[i].c; i++; }
+      while (i < h.length && h[i].d <= ds) { lastC[tic] = h[i].c; lastD[tic] = h[i].d; i++; }
       ptr[tic] = i;
-      return lastC[tic] != null ? lastC[tic] : null;
+      return lastC[tic] != null ? { c: lastC[tic], d: lastD[tic] } : null;
     };
-    const out = [];
-    const start = new Date(minDate + 'T00:00:00Z'), end = new Date(today + 'T00:00:00Z');
-    for (let t = start.getTime(); t <= end.getTime(); t += 86400000) {
-      const cur = new Date(t), dow = cur.getUTCDay();
-      if (dow === 0 || dow === 6) continue;                          // markets closed
-      const ds = cur.toISOString().slice(0, 10);
-      let realized = 0, openMark = 0;
-      // z98: capital the user added/withdrew (bot.transactions deposit/withdrawal)
-      for (const t of (bot.transactions || [])) if ((t.type === 'deposit' || t.type === 'withdrawal' || t.type === 'adjustment') && String(t.ts || '').slice(0, 10) <= ds) realized += (+t.amount || 0);
+    const flows = ((bot && bot.transactions) || []).filter(t => t.type === 'deposit' || t.type === 'withdrawal' || t.type === 'adjustment')
+      .map(t => ({ d: String(t.ts || t.date || '').slice(0, 10), a: +t.amount || 0 })).filter(f => f.d && f.a);
+    const capitalBy = ds => flows.reduce((s, f) => s + (f.d <= ds ? f.a : 0), 0);
+    const out = [], unknown = new Set();
+    let prev = null;
+    for (let t = Date.parse(minDate + 'T12:00:00Z') - 864e5, k = 0; k < 10; k++, t -= 864e5) {
+      const s = new Date(t).toISOString().slice(0, 10);
+      if (_botIsTradingDay(s)) { out.push({ date: s, value: +(BOT_STARTING_BANKROLL + capitalBy(s)).toFixed(2), flow: 0, basis: true }); prev = s; break; }
+    }
+    for (let t = Date.parse(minDate + 'T12:00:00Z'); t <= Date.parse(today + 'T12:00:00Z'); t += 864e5) {
+      const ds = new Date(t).toISOString().slice(0, 10);
+      if (!_botIsTradingDay(ds) && !_botHeld24h(bets, ds)) continue;   // z129: NYSE days, + weekends / holidays only while a 24h asset is held
+      let realized = capitalBy(ds), openMark = 0;
+      const flowNow = flows.reduce((s, f) => s + (f.d <= ds && (prev == null || f.d > prev) ? f.a : 0), 0);
       for (const b of bets) {
         if (!b.entryDate || b.entryDate > ds) continue;
-        // z98: partial sells (trims) realize P/L into the bankroll and shrink
-        // bet.pnl to the remaining fraction - count them on their own dates, or
-        // the ledger undercounts every trimmed position.
         for (const ps of _betTrimEvents(b)) if (ps.date <= ds) realized += ps.realized;
         const closed = b.status === 'closed' && b.exitDate && b.exitDate <= ds;
         if (closed) { realized += _betExitRealized(b); continue; }
         if (!(b.status === 'open' || (b.exitDate && b.exitDate > ds))) continue;
+        const sh = _botSharesOn(b, ds);
+        if (sh == null) { unknown.add(b.id || (b.ticker + b.entryDate)); continue; }
         const tic = String(b.ticker || '').toUpperCase();
-        const c = closeOn(tic, ds);
-        const entry = +b.entryPrice, sh = +b.shares;
-        if (c == null || !(entry > 0) || !(sh > 0)) continue;           // no history yet: no invented mark
-        if (!(tic in fx)) fx[tic] = _botUsdFactor(tic);
-        const px = c * fx[tic];
-        if (px / entry > 10 || px / entry < 0.1) continue;               // unit mismatch guard
+        const cl = closeOn(tic, ds), entry = +b.entryPrice;
+        if (!(sh > 0) || !cl || !(entry > 0) || cl.d < b.entryDate) continue;   // no close since entry yet: at cost
+        const px = cl.c * _botFxAt(tic, cl.d);
+        if (px / entry > 10 || px / entry < 0.1) continue;                     // unit mismatch guard
         const dir = (b.direction === 'short') ? -1 : 1;
         openMark += dir * sh * (px - entry) * (b.instrument === 'option' || b.optionType ? 100 : 1);
       }
-      out.push({ date: ds, value: +(BOT_STARTING_BANKROLL + realized + openMark).toFixed(2) });
+      out.push({ date: ds, value: +(BOT_STARTING_BANKROLL + realized + openMark).toFixed(2), flow: +flowNow.toFixed(2) });
+      prev = ds;
     }
+    out.unknownSize = unknown.size;
     return out;
   } catch (e) { console.warn('[bot] reconstruct failed', e); return []; }
 }
@@ -49520,46 +49603,26 @@ const BOT_GRAN_LABEL = { daily: 'D', weekly: 'W', monthly: 'M' };
 // point per day, with a live final point (bankroll + unrealized).
 function _botDailySeries() {
   const bot = botMarkToMarket();
-  let curve = Array.isArray(bot.equityCurve) ? bot.equityCurve.slice() : [];
-  // z89: once real closes are loaded, the mark-to-market reconstruction is the
-  // book of record for every past day; stored snapshots (taken whenever the app
-  // happened to be open, some before the USD fix) only fill days it can't cover.
+  // z129: past days come ONLY from the journal marked at each NYSE close (botReconstructEquityCurve).
+  // Device snapshots (taken whenever the app was open - Saturdays included - with an older formula
+  // that missed capital and trims and read re-marked closed trades) and the runner's 30-min tape
+  // (its older points carry the pre-correction ledger) no longer fill in: the reconstruction covers
+  // every trading day since the first trade. Until the closes load, the tape's last value per
+  // trading day stands in.
   try { if (typeof loadBotPriceHistories === 'function') loadBotPriceHistories(); } catch {}
-  let _reconDates = null;
-  try {
-    const recon = (typeof botReconstructEquityCurve === 'function') ? botReconstructEquityCurve(bot) : [];
-    if (recon && recon.length) {
-      const haveCloses = Object.keys(_botCloseCache).length > 0;
-      const byDate = new Map();
-      if (!haveCloses) for (const p of curve) byDate.set(p.date, { date: p.date, value: p.value });
-      for (const p of recon) byDate.set(p.date, { date: p.date, value: p.value });
-      if (haveCloses) for (const p of curve) if (!byDate.has(p.date)) byDate.set(p.date, { date: p.date, value: p.value });
-      curve = Array.from(byDate.values());
-      if (haveCloses) _reconDates = new Set(recon.map(p => p.date));
+  const haveCloses = Object.keys(_botCloseCache).length > 0;
+  const _reconDates = haveCloses ? true : null;
+  let series = [];
+  if (haveCloses) {
+    series = botReconstructEquityCurve(bot).map(p => ({ date: p.date, value: p.value, flow: p.flow || 0, basis: !!p.basis }));
+  } else {
+    const byD = new Map();
+    for (const pt of (Array.isArray(_botEquityTape) ? _botEquityTape : [])) {
+      const d = pt && pt.t ? String(pt.t).slice(0, 10) : '';
+      if (d && _botIsTradingDay(d) && isFinite(pt.value)) byD.set(d, +pt.value);
     }
-  } catch {}
-  const byDay = new Map();
-  for (const p of curve) { if (p && p.date && isFinite(p.value)) byDay.set(String(p.date).slice(0, 10), +p.value); }
-  const series = Array.from(byDay.entries()).map(([date, value]) => ({ date, value })).sort((a, b) => a.date < b.date ? -1 : 1);
-  // FOLD IN THE BACKEND 30-MINUTE EQUITY TAPE.
-  // Without this the daily series is reconstruction-only, so "1D" collapsed to
-  // two points (yesterday's close vs a single live mark) and no amount of
-  // granularity toggling could draw an intraday line. The tape carries a real
-  // mark every 30 minutes; its LAST value on each date is that date's close.
-  try {
-    const tape = Array.isArray(_botEquityTape) ? _botEquityTape : null;
-    if (tape && tape.length) {
-      const byD = new Map(series.map(p => [p.date, p.value]));
-      for (const pt of tape) {
-        if (!pt || !pt.t || !isFinite(pt.value)) continue;
-        const d = String(pt.t).slice(0, 10);
-        if (_reconDates && _reconDates.has(d)) continue;   // real closes win for past days (no spikes)
-        byD.set(d, +pt.value);   // tape is ascending ⇒ last wins
-      }
-      series = Array.from(byD.entries()).map(([date, value]) => ({ date, value }))
-        .sort((a, b) => a.date < b.date ? -1 : 1);
-    }
-  } catch {}
+    series = [...byD.entries()].sort((a, z) => (a[0] < z[0] ? -1 : 1)).map(([date, value]) => ({ date, value, flow: 0 }));
+  }
   // LIVE ENDPOINT. Use the SAME per-ticker average-cost ledger the headline
   // uses, not a raw sum of b.pnl: raw pnl is un-normalized for FX and skips the
   // bad-mark guard, so the chart's last point could disagree with the value
@@ -49593,8 +49656,8 @@ function _botDailySeries() {
   // date. On a Saturday the old code appended a Saturday point, which invented
   // a session and made every weekend chart end on a phantom bar.
   const todayISO = (typeof lastTradingDate === 'function') ? lastTradingDate() : new Date().toISOString().slice(0, 10);
-  if (series.length && series[series.length - 1].date === todayISO) series[series.length - 1] = { date: todayISO, value: liveVal };
-  else series.push({ date: todayISO, value: liveVal });
+  if (series.length && series[series.length - 1].date === todayISO) series[series.length - 1] = Object.assign({}, series[series.length - 1], { value: liveVal });
+  else series.push({ date: todayISO, value: liveVal, flow: 0 });
   return series;
 }
 
@@ -50014,6 +50077,39 @@ function _fitBetCardValues(root) {
     const max = +el.dataset.fitMax || 19, n = Math.max(4, (el.textContent || '').trim().length);
     el.style.fontSize = max + 'px';
     el.style.fontSize = `min(${max}px, ${(100 / (0.62 * n)).toFixed(2)}cqi)`;
+  });
+}
+// z129: Bot equity on the shared flow chart. Daily points = the reconstruction (NYSE closes);
+// 1D = the runner's 30-min marks for the latest session, from the previous close.
+async function _botIntraday() {
+  const series = _botDailySeries(), day = series.length ? series[series.length - 1].date : null;
+  if (!day) return null;
+  const prev = series.filter(p => p.date < day);
+  if (!prev.length) return null;
+  const base = prev[prev.length - 1].value;
+  let tape = null;
+  try { tape = await loadBotEquityTape(); } catch (e) {}
+  const pts = (tape || []).filter(p => String(p.t).slice(0, 10) === day && isFinite(p.value)).map(p => ({ t: p.t, v: +p.value }));
+  pts.push({ t: new Date().toISOString(), v: series[series.length - 1].value });     // the live mark
+  pts.sort((a, z) => (a.t < z.t ? -1 : 1));
+  const t0 = new Date(Date.parse(pts[0].t) - 60000).toISOString();
+  return { points: [{ t: t0, v: base, twr: 1, cumFlow: 0, _base: true }, ...pts.map(p => ({ t: p.t, v: p.v, twr: p.v / base, cumFlow: 0 }))], date: day, base };
+}
+function _mountBotEquityChart() {
+  const host = document.getElementById('bot-eq-mount');
+  if (!host || !window.VChart || !window.VChart.mountFlowChart) return;
+  const series = _botDailySeries();
+  const recon = Object.keys(_botCloseCache).length > 0;
+  let unknown = 0;
+  try { unknown = recon ? (botReconstructEquityCurve(botMarkToMarket()).unknownSize || 0) : 0; } catch (e) {}
+  const flows = series.filter(p => p.flow).map(p => ({ t: p.date, amount: p.flow, label: 'capital' }));
+  window.VChart.mountFlowChart(host, {
+    key: 'bot-equity', title: 'Bot equity', range: 'ALL',
+    series: { points: series.map(p => ({ t: p.date, v: p.value, flow: p.flow || 0 })), flows },
+    intraday: _botIntraday,
+    footnote: recon
+      ? `The journal marked at every NYSE close since the first trade — trading days only; a weekend fill, trim or deposit lands on the next session; each position marked with the shares it held that day, by a close on or after its entry, foreign listings at that day's FX · 1D: the runner's 30-min marks · dotted line = capital put in${unknown ? ` · ${unknown} position(s) exited by a trim with no recorded size count only when realized` : ''}`
+      : 'Loading price history — showing the runner\'s daily marks until the closes arrive.',
   });
 }
 function renderBetsTab() {
@@ -50500,8 +50596,15 @@ function renderBetsTab() {
   if (view === 'ledger') {
     body.innerHTML = toggle + ledger + note;
   } else {
+    // z129: the equity chart is the same chart as the account value / GoodGlobe (header that follows
+    // the scrub, 1D…ALL, D / W / M, whole chart red below the capital put in). The canvas chart stays
+    // only as a fallback for an older charts.js; a selected position still shows its own chart.
+    if (!_selPos && window.VChart && window.VChart.mountFlowChart && wp && wp.curve.length >= 2) {
+      chartHtml = `<div class="company-card" style="margin:0 0 18px"><div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);letter-spacing:0.1em;text-transform:uppercase">Bot equity</div><div id="bot-eq-mount"></div></div>`;
+    }
     body.innerHTML = toggle + summary + betsToolbar + chartHtml + balanceHtml + positionsHtml + activityHtml + insightsHtml + todayHtml + note;
     _fitBetCardValues(body);   // z127
+    _mountBotEquityChart();    // z129
   }
   // Wire the view toggle.
   body.querySelectorAll('.bets-view-btn').forEach(btn => {
@@ -55438,3 +55541,4 @@ function _ccyLensBar(stock) {
   };
   ['renderSummary', 'renderResults', 'renderProjection', 'renderMonteCarlo', 'renderValuationConfidenceAudit'].forEach(wrapLens);
 })();
+
