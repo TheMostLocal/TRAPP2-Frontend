@@ -146,6 +146,7 @@
 
   // ---------------- windows & resampling ----------------
   const RANGES = [['1D', null], ['1W', 7], ['1M', 31], ['3M', 92], ['YTD', 'ytd'], ['1Y', 366], ['ALL', 'all']];
+  const EXTRA_RANGES = { '6M': 183, '5Y': 1827 };   // z131: offered by the Valuation price chart
   function windowed(points, r) {
     if (!points.length) return points;
     const lastT = new Date(points[points.length - 1].t);
@@ -219,7 +220,7 @@
     const line = points.map((p, i) => (i ? 'L' : 'M') + X(i).toFixed(1) + ',' + Y(p.v).toFixed(1)).join('');
     const grid = [0, 1, 2, 3].map(k => { const v = lo + (hi - lo) * (k + 0.5) / 4, y = Y(v);
       return `<line x1="0" x2="${W - padR}" y1="${y}" y2="${y}" stroke="var(--rule,#2d2d33)" stroke-width="0.6" vector-effect="non-scaling-stroke"/>` +
-             `<text x="${W - padR + 6}" y="${y + 3.5}" font-size="10" fill="var(--ink-faint,#6e6a5f)" font-family="var(--mono,monospace)">${opts.money === false ? (Math.abs(v) >= 100 ? Math.round(v).toLocaleString() : v.toFixed(2)) : fmtMoney(v)}</text>`; }).join('');
+             `<text x="${W - padR + 6}" y="${y + 3.5}" font-size="10" fill="var(--ink-faint,#6e6a5f)" font-family="var(--mono,monospace)">${opts.axisFmt ? esc(opts.axisFmt(v)) : opts.money === false ? (Math.abs(v) >= 100 ? Math.round(v).toLocaleString() : v.toFixed(2)) : fmtMoney(v)}</text>`; }).join('');
     const intraday = String(points[0].t).includes('T');
     const lab = t => intraday ? new Date(t).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
                               : new Date(t + 'T12:00:00Z').toLocaleDateString(undefined, points.length > 300 ? { year: '2-digit', month: 'short' } : { month: 'short', day: 'numeric' });
@@ -615,31 +616,174 @@
     if (!tapeDate) return null;
     const prev = daily.filter(p => p.t < tapeDate);
     if (!prev.length) return null;
-    const ticks = tp.snapshots.filter(s => s.p && s.p[ticker] != null).map(s => ({ t: s.t, v: +s.p[ticker] })).sort((a, z) => (a.t < z.t ? -1 : 1));
+    // z131: the tape records the REGULAR price all day (04:00-20:00 ET), so outside 09:30-16:00 it is not an
+    // extended-hours trade - keep only regular-session ticks (extended hours come from the 5-minute bars)
+    const ticks = tp.snapshots.filter(s => s.p && s.p[ticker] != null && sessionOf(Date.parse(s.t)) === 'reg').map(s => ({ t: s.t, v: +s.p[ticker] })).sort((a, z) => (a.t < z.t ? -1 : 1));
+    if (!ticks.length) return null;
     const t0 = new Date(Date.parse(ticks[0].t) - 60000).toISOString();
     return { points: [{ t: t0, v: prev[prev.length - 1].v, _base: true }, ...ticks], date: tapeDate };
   }
+  // ---------------- today's 5-minute bars (z131) ----------------
+  // data/bars/<date>/<TICKER>.json in the ticker's book (pipeline/fetch_intraday_bars.py, one ~10 KB
+  // file per ticker): [[t, o, h, l, c, v]], t = bar start (epoch s); pre-market 04:00-09:30 ET and
+  // after hours 16:00-20:00 ET where the symbol trades them. Re-read every 2 minutes.
+  const _barsLatest = {}, _barsT = {};
+  async function fetchBars(ticker) {
+    const t = String(ticker || '').toUpperCase();
+    if (!_book[t]) { try { await fetchDaily(t); } catch (e) {} }
+    const b = _book[t];
+    if (!b) return null;
+    const now = Date.now(), v = Math.floor(now / 60000);
+    if (!_barsLatest[b] || now - _barsLatest[b].at > 120000) {
+      let latest = null;
+      try { latest = await getJSON(`${raw()}/${b}/main/data/bars/latest.json?_=${v}`); } catch (e) {}
+      _barsLatest[b] = { at: now, latest };
+    }
+    const latest = _barsLatest[b].latest;
+    if (!latest || !latest.date || (Array.isArray(latest.tickers) && !latest.tickers.includes(t))) return null;
+    const key = `${b}|${latest.date}|${t}`;
+    if (!_barsT[key] || now - _barsT[key].at > 120000) {
+      let rec = null;
+      try { rec = await getJSON(`${raw()}/${b}/main/data/bars/${latest.date}/${encodeURIComponent(t)}.json?_=${v}`); } catch (e) {}
+      _barsT[key] = { at: now, rec };
+    }
+    const rec = _barsT[key].rec;
+    if (!rec || !Array.isArray(rec.b) || rec.b.length < 2) return null;
+    return { date: rec.date || latest.date, interval: 5, updatedAt: rec.updatedAt || null, prevClose: rec.pc != null && +rec.pc > 0 ? +rec.pc : null,
+             bars: rec.b.map(x => ({ t: x[0] * 1000, o: +x[1], h: +x[2], l: +x[3], c: +x[4], v: +x[5] || 0 })),
+             ext: (latest.ext && latest.ext[t]) || null };
+  }
+  const _etFmt = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false });
+  const etMin = ms => { const [h, m] = _etFmt.format(new Date(ms)).split(':').map(Number); return (h % 24) * 60 + m; };
+  const sessionOf = ms => { const m = etMin(ms); return m < 570 ? 'pre' : m < 960 ? 'reg' : 'post'; };
+  const SESSION_NAME = { pre: 'pre-market', reg: 'regular session', post: 'after hours' };
+  const etClock = ms => new Date(ms).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }) + ' ET';
+  // A US stock / ETF trades 04:00-20:00 ET; indices (^), FX (=X), futures (=F), crypto (-USD) and foreign
+  // listings keep their own clocks, so they get no pre / after-hours bands.
+  const usExtended = t => !/^\^|=X$|=F$|-USD$|\.[A-Z]{1,3}$/.test(String(t || '').toUpperCase());
+
+  // Candles + volume on a CLOCK-TIME axis: a US listing that trades extended hours spans 04:00-20:00 ET
+  // (the day's future stays empty, as on a broker's 1D chart); one that doesn't, 09:30-16:00. Candle width
+  // = 70 % of one 5-minute slot; a missing bar is a gap, never bridged.
+  function drawCandleChart(host, data, opts = {}) {
+    const bars = (data && data.bars) || [];
+    const W = Math.max(280, Math.round(host.clientWidth || (host.parentElement && host.parentElement.clientWidth) || 600));
+    const H = opts.height || 236, padR = 56, padB = 18, padT = 18, volH = Math.round((H - padT - padB) * 0.18), gap = 6;
+    if (bars.length < 2) { host.innerHTML = `<div style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);padding:24px 0;text-align:center">${esc(opts.empty || 'No intraday bars yet')}</div>`; return; }
+    const iv = (data.interval || 5) * 60000;
+    const first = bars[0].t, day0 = first - etMin(first) * 60000;          // 00:00 ET of the session day
+    const hasPre = bars.some(b => sessionOf(b.t) === 'pre'), hasPost = bars.some(b => sessionOf(b.t) === 'post');
+    const ext = opts.us && (hasPre || hasPost);
+    const t0 = opts.us ? day0 + (ext ? 240 : 570) * 60000 : first;
+    const t1 = opts.us ? day0 + (ext ? 1200 : 960) * 60000 : bars[bars.length - 1].t + iv;
+    const plotW = W - padR, X = t => ((t - t0) / (t1 - t0)) * plotW;
+    let lo = Math.min(...bars.map(b => b.l)), hi = Math.max(...bars.map(b => b.h));
+    if (data.prevClose > 0) { lo = Math.min(lo, data.prevClose); hi = Math.max(hi, data.prevClose); }
+    const pad = (hi - lo) * 0.08 || hi * 0.01 || 1; lo -= pad; hi += pad;
+    const priceBottom = H - padB - volH - gap;
+    const Y = v => padT + (hi - v) / (hi - lo) * (priceBottom - padT);
+    const maxV = Math.max(0, ...bars.map(b => b.v || 0));
+    const VY = v => H - padB - (maxV > 0 ? (v / maxV) * volH : 0);
+    const bw = Math.max(1, Math.min(9, 0.7 * (X(t0 + iv) - X(t0))));
+    const UP = 'var(--pos,#5b8a72)', DN = 'var(--neg,#c25a4a)';
+    const axis = opts.axisFmt || fmtMoney;
+    const band = (a, b, label) => { const xa = X(a), xb = X(b);
+      return `<rect x="${xa.toFixed(1)}" y="${padT - 14}" width="${(xb - xa).toFixed(1)}" height="${(H - padB - padT + 14).toFixed(1)}" fill="var(--ink-faint,#6e6a5f)" opacity="0.07"/>` +
+             `<text x="${((xa + xb) / 2).toFixed(1)}" y="${padT - 5}" font-size="8.5" text-anchor="middle" fill="var(--ink-faint,#6e6a5f)" font-family="var(--mono,monospace)" letter-spacing="0.08em">${label}</text>`; };
+    const bands = ext ? band(day0 + 240 * 60000, day0 + 570 * 60000, 'PRE-MARKET') + band(day0 + 960 * 60000, day0 + 1200 * 60000, 'AFTER HOURS') : '';
+    const grid = [0, 1, 2, 3].map(k => { const v = lo + (hi - lo) * (k + 0.5) / 4, y = Y(v);
+      return `<line x1="0" x2="${plotW}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}" stroke="var(--rule,#2d2d33)" stroke-width="0.6"/>` +
+             `<text x="${plotW + 6}" y="${(y + 3.5).toFixed(1)}" font-size="10" fill="var(--ink-faint,#6e6a5f)" font-family="var(--mono,monospace)">${esc(axis(v))}</text>`; }).join('');
+    const pc = data.prevClose > 0 ? `<line x1="0" x2="${plotW}" y1="${Y(data.prevClose).toFixed(1)}" y2="${Y(data.prevClose).toFixed(1)}" stroke="var(--ink-dim,#b8b1a4)" stroke-width="1" stroke-dasharray="2,4" opacity="0.75"><title>previous close ${esc(axis(data.prevClose))}</title></line>` : '';
+    const candles = bars.map(b => {
+      const x = X(b.t + iv / 2), col = b.c >= b.o ? UP : DN, yo = Y(b.o), yc = Y(b.c), top = Math.min(yo, yc), hgt = Math.max(1, Math.abs(yc - yo));
+      return `<line x1="${x.toFixed(2)}" x2="${x.toFixed(2)}" y1="${Y(b.h).toFixed(2)}" y2="${Y(b.l).toFixed(2)}" stroke="${col}" stroke-width="1"/>` +
+             `<rect x="${(x - bw / 2).toFixed(2)}" y="${top.toFixed(2)}" width="${bw.toFixed(2)}" height="${hgt.toFixed(2)}" fill="${col}"/>` +
+             (b.v > 0 ? `<rect x="${(x - bw / 2).toFixed(2)}" y="${VY(b.v).toFixed(2)}" width="${bw.toFixed(2)}" height="${(H - padB - VY(b.v)).toFixed(2)}" fill="${col}" opacity="0.45"/>` : '');
+    }).join('');
+    const ticks = (opts.us ? (ext ? [240, 570, 720, 960, 1200] : [570, 720, 840, 960]).map(m => day0 + m * 60000)
+                           : [first, (first + t1) / 2, t1]).map((t, k, arr) =>
+      `<text x="${X(t).toFixed(1)}" y="${H - 4}" font-size="10" fill="var(--ink-faint,#6e6a5f)" text-anchor="${k === 0 ? 'start' : k === arr.length - 1 ? 'end' : 'middle'}" font-family="var(--mono,monospace)">${esc(new Date(t).toLocaleTimeString('en-US', { timeZone: opts.us ? 'America/New_York' : undefined, hour: 'numeric', minute: '2-digit' }).replace(':00', ''))}</text>`).join('');
+    host.innerHTML = `<div style="position:relative">
+      <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="max-width:100%;height:auto;display:block;overflow:visible" role="img" aria-label="${esc(opts.label || 'intraday candles')}">
+        ${bands}${grid}${pc}
+        <line x1="0" x2="${plotW}" y1="${H - padB}" y2="${H - padB}" stroke="var(--rule,#2d2d33)" stroke-width="0.6"/>
+        ${candles}
+        <line class="vc-x" x1="0" x2="0" y1="${padT - 14}" y2="${H - padB}" stroke="var(--ink-dim,#b8b1a4)" stroke-dasharray="3,3" opacity="0"/>
+        <circle class="vc-dot" r="3.5" fill="var(--ink,#e8e2d4)" opacity="0"/>
+        ${ticks}
+      </svg>
+      <div class="vc-hit" style="position:absolute;left:0;top:0;bottom:${padB}px;right:${(padR / W) * 100}%;cursor:crosshair;touch-action:pan-y"></div>
+    </div>`;
+    const hit = host.querySelector('.vc-hit'), xl = host.querySelector('.vc-x'), dot = host.querySelector('.vc-dot');
+    const move = cx => {
+      const r = hit.getBoundingClientRect(); if (!r.width) return;
+      const tt = t0 + Math.max(0, Math.min(1, (cx - r.left) / r.width)) * (t1 - t0);
+      let k = 0; for (let n = 1; n < bars.length; n++) if (Math.abs(bars[n].t + iv / 2 - tt) < Math.abs(bars[k].t + iv / 2 - tt)) k = n;
+      const b = bars[k], x = X(b.t + iv / 2);
+      xl.setAttribute('x1', x); xl.setAttribute('x2', x); xl.setAttribute('opacity', '0.7');
+      dot.setAttribute('cx', x); dot.setAttribute('cy', Y(b.c)); dot.setAttribute('fill', b.c >= b.o ? UP : DN); dot.setAttribute('opacity', '1');
+      opts.onScrub && opts.onScrub(b, k);
+    };
+    const reset = () => { xl.setAttribute('opacity', '0'); dot.setAttribute('opacity', '0'); opts.onReset && opts.onReset(); };
+    hit.addEventListener('mousemove', e => move(e.clientX));
+    hit.addEventListener('mouseleave', reset);
+    hit.addEventListener('touchstart', e => e.touches[0] && move(e.touches[0].clientX), { passive: true });
+    hit.addEventListener('touchmove', e => e.touches[0] && move(e.touches[0].clientX), { passive: true });
+    hit.addEventListener('touchend', reset);
+  }
+
+  // The 1D header for bars: the last price against the prior close, then the regular session's move and
+  // the extended-hours move separately (as a broker shows "Today" and "After hours").
+  function barsSummary(bd, fmtV) {
+    const bars = bd.bars, pc = bd.prevClose, last = bars[bars.length - 1];
+    const reg = bars.filter(b => sessionOf(b.t) === 'reg'), regClose = reg.length ? reg[reg.length - 1].c : null;
+    const seg = (a, b, name) => { if (!(a > 0) || !(b > 0)) return ''; const d = b - a, p = d / a * 100;
+      return `<span style="color:${d >= 0 ? 'var(--pos)' : 'var(--neg)'}">${d >= 0 ? '▲' : '▼'} ${d >= 0 ? '+' : '−'}${fmtV(Math.abs(d)).replace(/^-/, '')} (${p >= 0 ? '+' : ''}${p.toFixed(2)}%)</span> ${name}`; };
+    const parts = [];
+    const ls = sessionOf(last.t);
+    if (regClose != null) parts.push(seg(pc, regClose, 'Today'));
+    if (ls === 'post' && regClose != null) parts.push(seg(regClose, last.c, 'After hours'));
+    if (ls === 'pre') parts.push(seg(pc, last.c, 'Pre-market'));
+    return parts.filter(Boolean).join(' · ') + ` <span style="color:var(--ink-faint)">· ${esc(etClock(last.t + 5 * 60000))}</span>`;
+  }
+
   async function mountSeriesChart(host, cfg) {
     if (!host) return;
-    const st = SC[cfg.key] || (SC[cfg.key] = { range: cfg.range || '1Y', interval: 'D', intraday: undefined });
+    const st = SC[cfg.key] || (SC[cfg.key] = { range: cfg.range || '1Y', interval: 'D', intraday: undefined, barsAt: 0 });
+    if (st.ticker !== cfg.ticker) { st.ticker = cfg.ticker; st.intraday = undefined; st.bars = undefined; st.barsAt = 0; }
     const daily = (cfg.daily || []).filter(b => b && b.d && b.c > 0).map(b => ({ t: b.d, v: +b.c }));
     if (!daily.length) { host.innerHTML = '<div style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);padding:16px 0">No price history.</div>'; return; }
+    // z131: today's price when the daily history lags (it is written after the close)
+    if (cfg.live && cfg.live.v > 0 && cfg.live.d && cfg.live.d > daily[daily.length - 1].t) daily.push({ t: cfg.live.d, v: +cfg.live.v, _live: cfg.live.label || 'latest quote' });
     const fmtV = cfg.fmt || (v => '$' + v.toFixed(2));
+    const keys = cfg.ranges || RANGES.map(x => x[0]);
+    const span = k => (RANGES.find(x => x[0] === k) || [k, EXTRA_RANGES[k]])[1];
+    if (!keys.includes(st.range)) st.range = cfg.range && keys.includes(cfg.range) ? cfg.range : keys[keys.length - 1];
     const draw = async () => {
       if (!host.isConnected) return;
       const avail = ivalsFor(st.range), ivl = effInterval(st.interval, avail);
-      let pts, label;
+      let pts = [], label = '', bd = null;
       if (st.range === '1D') {
-        if (st.intraday === undefined) st.intraday = cfg.ticker ? await seriesIntraday(cfg.ticker, daily) : null;
-        pts = st.intraday ? st.intraday.points : [];
-        label = st.intraday ? `${st.intraday.date} · intraday (15-min tape)` : 'no intraday tape for the latest session';
+        if (cfg.bars !== false && cfg.ticker && (st.bars === undefined || Date.now() - st.barsAt > 120000)) {
+          try { st.bars = await fetchBars(cfg.ticker); } catch (e) { st.bars = null; }
+          st.barsAt = Date.now();
+        }
+        bd = st.bars || null;
+        if (bd && cfg.tx) bd = Object.assign({}, bd, { prevClose: bd.prevClose > 0 ? cfg.tx(bd.prevClose) : null,
+          bars: bd.bars.map(b => { const o = cfg.tx(b.o), c = cfg.tx(b.c), h1 = cfg.tx(b.h), l1 = cfg.tx(b.l); return { t: b.t, o, c, h: Math.max(h1, l1), l: Math.min(h1, l1), v: b.v }; }) });
+        if (!bd) {
+          if (st.intraday === undefined) st.intraday = cfg.ticker ? await seriesIntraday(cfg.ticker, daily) : null;
+          pts = st.intraday ? st.intraday.points : [];
+          label = st.intraday ? `${st.intraday.date} · regular session (15-min tape)` : 'no intraday data for the latest session';
+        }
       } else {
-        const r = RANGES.find(x => x[0] === st.range)[1];
-        pts = windowed(daily, r);
+        pts = windowed(daily, span(st.range));
         if (ivl !== 'D') pts = resample(pts, ivl);
         label = st.range === 'ALL' ? `since ${daily[0].t}` : st.range;
+        if (cfg.onWindow) { try { cfg.onWindow(pts, st.range, ivl); } catch (e) {} }
       }
-      const bar = RANGES.map(([k]) => `<button class="seg-btn ${st.range === k ? 'active' : ''}" data-vcr="${k}" style="font-size:10px">${k}</button>`).join('');
+      const bar = keys.map(k => `<button class="seg-btn ${st.range === k ? 'active' : ''}" data-vcr="${k}" style="font-size:10px">${k}</button>`).join('');
       host.innerHTML = `<div>
           <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);letter-spacing:0.1em;text-transform:uppercase">${esc(cfg.title || cfg.ticker || '')}</div>
           <div style="display:flex;align-items:baseline;gap:10px;margin-top:3px;flex-wrap:wrap">
@@ -649,23 +793,32 @@
         <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0 4px"><span class="seg-control" style="font-size:10px">${bar}</span>${ivlBar(avail, ivl, 'data-vci')}</div>
         <div class="vc-chart"></div>${cfg.note ? `<div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:4px">${cfg.note}</div>` : ''}`;
       const pe = host.querySelector('[data-vc-price]'), ce = host.querySelector('[data-vc-pct]'), se = host.querySelector('[data-vc-sub]');
-      const setHeader = (p, base, sub) => {
-        if (!p || !base) return;
-        const ch = (p.v / base.v - 1) * 100, c = ch >= 0 ? 'var(--pos)' : 'var(--neg)';
-        pe.textContent = fmtV(p.v); pe.style.color = c;
+      const setHeader = (v, base, sub, html) => {
+        if (!(v > 0) || !(base > 0)) return;
+        const ch = (v / base - 1) * 100, c = ch >= 0 ? 'var(--pos)' : 'var(--neg)';
+        pe.textContent = fmtV(v); pe.style.color = c;
         ce.textContent = (ch >= 0 ? '+' : '') + ch.toFixed(2) + '%'; ce.style.color = c;
-        se.textContent = sub;
+        if (html) se.innerHTML = sub; else se.textContent = sub;
       };
-      const resetHeader = () => (pts.length ? setHeader(pts[pts.length - 1], pts[0], label + ' · scrub the chart') : null);
-      drawStockChart(host.querySelector('.vc-chart'), pts, { label: cfg.title || cfg.ticker, empty: label,
-        onScrub: (p, base) => setHeader(p, base, whenLabel(p, ivl, st.range === '1D')), onReset: resetHeader });
-      resetHeader();
+      if (bd) {
+        const last = bd.bars[bd.bars.length - 1], base = bd.prevClose > 0 ? bd.prevClose : bd.bars[0].o;
+        const rest = () => setHeader(last.c, base, barsSummary(bd, fmtV) + ' · scrub the chart', true);
+        drawCandleChart(host.querySelector('.vc-chart'), bd, { us: usExtended(cfg.ticker), axisFmt: cfg.axisFmt, label: (cfg.title || cfg.ticker) + ' today',
+          onScrub: b => setHeader(b.c, base, `${etClock(b.t)} · ${SESSION_NAME[sessionOf(b.t)]} · O ${fmtV(b.o)} H ${fmtV(b.h)} L ${fmtV(b.l)} C ${fmtV(b.c)}${b.v ? ' · vol ' + b.v.toLocaleString() : ''}`), onReset: rest });
+        rest();
+      } else {
+        const resetHeader = () => (pts.length ? setHeader(pts[pts.length - 1].v, pts[0].v, (pts[pts.length - 1]._live ? `${pts[pts.length - 1].t} · ${pts[pts.length - 1]._live} · ` : '') + label + ' · scrub the chart') : null);
+        drawStockChart(host.querySelector('.vc-chart'), pts, { label: cfg.title || cfg.ticker, empty: label, axisFmt: cfg.axisFmt,
+          onScrub: p => setHeader(p.v, pts[0].v, (p._live ? `${p.t} · ${p._live}` : whenLabel(p, ivl, st.range === '1D'))), onReset: resetHeader });
+        resetHeader();
+      }
       host.querySelectorAll('[data-vcr]').forEach(b => b.onclick = () => { st.range = b.dataset.vcr; draw(); });
       host.querySelectorAll('[data-vci]').forEach(b => b.onclick = () => { st.interval = b.dataset.vci; draw(); });
     };
     await draw();
   }
 
-  window.VChart = { fetchDaily, fetchTapeDay, drawStockChart, mountSeriesChart, mountFlowChart, withReturns, windowed, resample, indexDaily, indexIntraday, mountGoodGlobeChart, mountSparks, accountSeries, mountAccountChart,
+
+  window.VChart = { fetchDaily, fetchTapeDay, drawStockChart, mountSeriesChart, drawCandleChart, fetchBars, usExtended, sessionOf, mountFlowChart, withReturns, windowed, resample, indexDaily, indexIntraday, mountGoodGlobeChart, mountSparks, accountSeries, mountAccountChart,
                     accountIntraday, withReturns, ivalsFor, effInterval, whenLabel, _gg: GG, _acc: ACC };
 })();
