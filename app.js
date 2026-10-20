@@ -13312,9 +13312,72 @@ function getRangedHistory() {
   return h.filter(p => p.date >= cutISO);
 }
 
+// ============================================================
+//   z131 — VALUATION PRICE CHART = the shared chart (GoodGlobe / account value / Regime):
+//   header that follows the scrub, 1D 1W 1M 3M 6M YTD 1Y 5Y ALL, D / W / M intervals,
+//   today's price appended when the daily history lags (it is written after the close),
+//   and 1D = today's 5-minute candles + volume from the books' bars (pre-market and
+//   after hours shaded and labelled, only for listings that trade them), else the
+//   15-minute tape. Values in the listing's own unit: a currency symbol for prices,
+//   none for index levels, the market quote for FX (inverted when that toggle is on).
+// ============================================================
+function _priceChartFormat(tk, inv, axis = false) {   // axis: whole units above 1,000
+  const kind = (typeof rowUnitKind === 'function') ? rowUnitKind({ ticker: tk }) : 'money';
+  const row = (typeof getStockbookRow === 'function') ? getStockbookRow(tk) : null;
+  if (kind === 'fx') return v => (inv ? (+v).toPrecision(5) : fmtFxRate(v));
+  if (kind === 'index') return v => (+v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const raw = String((row && row.currency) || 'USD');          // the history's unit: the TRADING currency (GBp stays pence)
+  if (raw === 'GBp' || raw === 'GBX') return v => (+v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + 'p';
+  const ccy = raw.toUpperCase();
+  const sym = ccy === 'USD' ? '$' : (typeof ccySymbol === 'function' ? ccySymbol(ccy) : ccy + ' ');
+  return v => { const a = Math.abs(+v), s = axis && a >= 1000 ? a.toLocaleString('en-US', { maximumFractionDigits: 0 }) : a.toLocaleString('en-US', { minimumFractionDigits: a < 1 ? 4 : 2, maximumFractionDigits: a < 1 ? 4 : 2 }); return (+v < 0 ? '−' : '') + sym + s; };
+}
+function _priceChartLive(tk, tx, lastDate) {
+  const row = (typeof getStockbookRow === 'function') ? getStockbookRow(tk) : null;
+  if (!row) return null;
+  const px = +(row._usdNormalized && row._localPrice != null ? row._localPrice : row.price);   // the history's own unit
+  if (!(px > 0)) return null;
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date()).split(':').map(Number);
+  const min = (parts[0] % 24) * 60 + parts[1];
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  let d = typeof lastTradingDate === 'function' ? lastTradingDate() : todayET;
+  let label;
+  if (d === todayET && min < 570) {                       // before the open: the latest price is the last close
+    d = typeof lastTradingDate === 'function' ? lastTradingDate(new Date(Date.now() - 864e5)) : d;   // the session before today
+    label = 'last close';
+  } else label = (d === todayET && min < 960) ? 'today, live (15-min quotes)' : (d === todayET ? "today's close" : 'last close');
+  if (lastDate && d <= lastDate) return null;
+  return { d, v: tx(px), label };
+}
+function _renderPriceChartShared() {
+  const sec = document.getElementById('price-chart-section'), wrap = sec && sec.querySelector('.price-chart-wrap');
+  const h = state.priceChart.history;
+  if (!wrap || !h || h.length < 2 || !(window.VChart && window.VChart.mountSeriesChart)) return false;
+  const tk = String(state.priceChart.ticker || (state.stock && state.stock.ticker) || '').toUpperCase();
+  const isFx = /=X$/.test(tk), inv = isFx && state.priceChart.fxInvert !== false;
+  const invBtn = document.getElementById('fx-invert-toggle');
+  if (invBtn) { invBtn.style.display = isFx ? '' : 'none'; invBtn.classList.toggle('active', inv); }
+  const tx = v => (inv && v > 0 ? 1 / v : v);
+  const daily = h.filter(p => p && p.date && +p.price > 0).map(p => ({ d: String(p.date).slice(0, 10), c: tx(+p.price) })).sort((a, b) => (a.d < b.d ? -1 : 1));
+  if (daily.length < 2) return false;
+  let mount = document.getElementById('price-vchart');
+  if (!mount) { mount = document.createElement('div'); mount.id = 'price-vchart'; mount.style.cssText = 'padding:4px 2px'; wrap.appendChild(mount); }
+  ['price-chart-canvas', 'price-chart-tooltip', 'price-range-control'].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
+  const fmt = _priceChartFormat(tk, inv), axisFmt = _priceChartFormat(tk, inv, true);
+  const row = (typeof getStockbookRow === 'function') ? getStockbookRow(tk) : null;
+  window.VChart.mountSeriesChart(mount, {
+    key: 'valuation-price', ticker: tk, title: `${tk}${row && row.name ? ' · ' + row.name : ''}${inv ? ' · inverted (value vs the dollar)' : ''}`,
+    daily, range: '1Y', ranges: ['1D', '1W', '1M', '3M', '6M', 'YTD', '1Y', '5Y', 'ALL'],
+    live: _priceChartLive(tk, tx, daily[daily.length - 1].d), fmt, axisFmt, tx: inv ? tx : null,
+    onWindow: pts => { try { if (pts && pts.length >= 2) renderPriceChartStats(pts.map(p => ({ date: p.t, price: p.v })), inv, fmt); } catch (e) {} },
+  });
+  return true;
+}
 function renderPriceChart() {
+  try { if (_renderPriceChartShared()) return; } catch (e) { console.warn('[price chart] shared chart failed, using the canvas', e); }
   const canvas = document.getElementById('price-chart-canvas');
   if (!canvas) return;
+  canvas.style.display = '';
   const ctx = canvas.getContext('2d');
   const dpr = window.devicePixelRatio || 1;
   const W = canvas.clientWidth, H = canvas.clientHeight;
@@ -13507,7 +13570,7 @@ function renderPriceChart() {
   renderPriceChartStats(data, _fxInverted);
 }
 
-function renderPriceChartStats(data, fxInverted = false) {
+function renderPriceChartStats(data, fxInverted = false, fmtFn = null) {
   const wrap = document.getElementById('price-chart-stats');
   if (!wrap) return;
   const first = data[0].price, last = data[data.length - 1].price;
@@ -13518,7 +13581,7 @@ function renderPriceChartStats(data, fxInverted = false) {
   const dir = change >= 0 ? 'up' : 'down';
   // For inverted FX (tiny decimals), use significant-figure formatting rather
   // than fmt$ which would collapse to "$0.00".
-  const fv = (v) => fxInverted ? v.toPrecision(4) : fmt$(v);
+  const fv = fmtFn ? (v => (v < 0 ? '−' + fmtFn(-v) : fmtFn(v))) : ((v) => fxInverted ? v.toPrecision(4) : fmt$(v));   // z131: the listing's own unit
   wrap.innerHTML = `
     <div><div class="l">Last</div><div class="v">${fv(last)}</div></div>
     <div><div class="l">Change</div><div class="v ${dir}">${change >= 0 ? '+' : ''}${fv(change)}</div></div>
@@ -21501,7 +21564,7 @@ function renderTodayStrip(stock) {
   const last = stock.price ?? parseNum(raw['last price'] || raw['price'] || raw['close']);
   const change = parseNum(raw['change']);
   const changePct = parsePctCell(raw['changepct']);
-  const open = parseNum(raw['price open'] || raw['open']);
+  const open = parseNum(raw['priceopen'] || raw['price open'] || raw['open']);   // z134: the pipeline writes priceopen (Yahoo's official open)
   const high = parseNum(raw['high']);
   const low = parseNum(raw['low']);
   const prevClose = parseNum(raw['closeyest'] || raw['prev close']);
@@ -21516,7 +21579,9 @@ function renderTodayStrip(stock) {
 
   strip.style.display = 'block';
 
-  const fmtPrice = (v) => v != null ? fmt$(v) : '—';
+  // z134: an index is a level (no "$"); an FX pair its market quote
+  const _kind = (typeof rowUnitKind === 'function' && stock && stock.ticker) ? rowUnitKind({ ticker: stock.ticker }) : 'money';
+  const fmtPrice = (v) => v == null ? '—' : _kind === 'index' ? (+v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : _kind === 'fx' && typeof fmtFxRate === 'function' ? fmtFxRate(v) : fmt$(v);
   const fmtChange = (v) => v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(2);
   const fmtPct = (v) => v == null ? '—' : (v >= 0 ? '+' : '') + (v * 100).toFixed(2) + '%';
   const fmtVol = (v) => {
@@ -21612,9 +21677,64 @@ function _tapeChangePct(ticker) {
 
 // Build the composite ticker list. Honors dedupe so the same ticker never
 // appears twice. Order matters — earlier sources win when there's overlap.
+// z131: pre-market (04:00–09:30 ET) and after-hours (16:00–20:00 ET) movers for the tape, from each
+// book's data/bars/latest.json (extended-hours price vs the prior close / today's 16:00 close). Shown
+// ONLY during those sessions on NYSE trading days, and only for listings that traded then.
+let _extMovers = { at: 0, rows: null, busy: false };
+function _extSessionNow(now = new Date()) {
+  const etDate = now.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  if (typeof _botIsTradingDay === 'function' && !_botIsTradingDay(etDate)) return null;
+  const [h, m] = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false }).format(now).split(':').map(Number);
+  const mm = (h % 24) * 60 + m;
+  return mm >= 240 && mm < 570 ? 'pre' : mm >= 960 && mm < 1200 ? 'post' : null;
+}
+async function _refreshExtMovers() {
+  if (_extMovers.busy) return;
+  _extMovers.busy = true;
+  try {
+    const rawBase = (typeof GH_RAW !== 'undefined' ? GH_RAW : 'https://raw.githubusercontent.com/TheMostLocal');
+    const all = {}, v = Math.floor(Date.now() / 60000);
+    await Promise.all(['TRAPP2', 'TRAPP2-1', 'TRAPP2-2', 'TRAPP2-3'].map(async b => {
+      try {
+        const r = await fetch(`${rawBase}/${b}/main/data/bars/latest.json?_=${v}`, { cache: 'no-store' });
+        if (!r.ok) return;
+        const j = await r.json();
+        for (const [t, x] of Object.entries((j && j.ext) || {})) if (x && (!all[t] || x.t > all[t].t)) all[t] = x;
+      } catch (e) {}
+    }));
+    _extMovers = { at: Date.now(), rows: all, busy: false };
+    if (typeof renderTickerTape === 'function') renderTickerTape();
+  } catch (e) { _extMovers.busy = false; }
+}
+function _extMoversNow() {
+  const s = _extSessionNow();
+  if (!s) return null;
+  if (Date.now() - _extMovers.at > 5 * 60000) _refreshExtMovers();
+  if (!_extMovers.rows) return null;
+  const nowS = Date.now() / 1000;
+  return { session: s, rows: Object.entries(_extMovers.rows).filter(([, x]) => x.s === s && nowS - (+x.t || 0) < 3 * 3600).map(([t, x]) => Object.assign({ ticker: t }, x)) };
+}
+if (typeof window !== 'undefined') { window._extSessionNow = _extSessionNow; window._extMoversNow = _extMoversNow; }
+
 function buildTickerTapeContent() {
   const seen = new Set();
   const out = [];
+  // z131: extended-hours movers lead the tape during pre-market / after hours only
+  try {
+    const em = _extMoversNow();
+    if (em && em.rows.length) {
+      const big = em.rows.filter(x => { const r = _tapeRow(x.ticker); return r && r.marketCap > 1e9 && isFinite(x.pct) && Math.abs(x.pct) >= 0.005; });
+      const ups = big.filter(x => x.pct > 0).sort((a, b) => b.pct - a.pct).slice(0, 6);
+      const dns = big.filter(x => x.pct < 0).sort((a, b) => a.pct - b.pct).slice(0, 6);
+      const label = em.session === 'pre' ? 'PRE-MARKET MOVERS' : 'AFTER-HOURS MOVERS';
+      [...ups, ...dns].forEach((x, i) => {
+        if (seen.has(x.ticker)) return;
+        seen.add(x.ticker);
+        const row = _tapeRow(x.ticker) || {};
+        out.push({ ticker: x.ticker, name: row.name || x.ticker, price: x.px, changePct: x.pct, groupLabel: i === 0 ? label : null, tag: 'ext-' + em.session });
+      });
+    }
+  } catch (e) {}
 
   const addItem = (ticker, opts = {}) => {
     if (!ticker || seen.has(ticker)) return;
@@ -55593,4 +55713,3 @@ function _ccyLensBar(stock) {
   };
   ['renderSummary', 'renderResults', 'renderProjection', 'renderMonteCarlo', 'renderValuationConfidenceAudit'].forEach(wrapLens);
 })();
-
