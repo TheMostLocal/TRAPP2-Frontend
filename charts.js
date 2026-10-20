@@ -194,13 +194,27 @@
     const W = Math.max(280, Math.round(host.clientWidth || (host.parentElement && host.parentElement.clientWidth) || 600));
     const H = opts.height || 190, padR = 56, padB = 18, padT = 8;
     if (!points || points.length < 2) { host.innerHTML = `<div style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);padding:24px 0;text-align:center">${esc(opts.empty || 'Not enough history yet')}</div>`; return; }
-    const vals = points.map(p => p.v);
+    // z129: an optional baseline (a number, or a value per point - e.g. the capital put in, which
+    // steps up on a deposit) drawn dotted, kept in frame; and ONE colour for the whole chart -
+    // line, area and dot - decided by opts.isUp(point, first) (default: above the first point).
+    // While you scrub it follows the point under your finger; at rest, the last point.
+    const baseAt = opts.baseline == null ? null : (typeof opts.baseline === 'function' ? i => opts.baseline(points[i], i) : () => +opts.baseline);
+    const vals = points.map(p => p.v).concat(baseAt ? points.map((p, i) => baseAt(i)).filter(v => v != null && isFinite(v)) : []);
     let lo = Math.min(...vals), hi = Math.max(...vals);
     const pad = (hi - lo) * 0.08 || hi * 0.01 || 1; lo -= pad; hi += pad;
     const X = i => (i / (points.length - 1)) * (W - padR);
     const Y = v => padT + (hi - v) / (hi - lo) * (H - padT - padB);
-    const up = points[points.length - 1].v >= points[0].v;
-    const col = up ? 'var(--pos,#5b8a72)' : 'var(--neg,#c25a4a)';
+    const isUp = p => (opts.isUp ? !!opts.isUp(p, points[0]) : p.v >= points[0].v);
+    const COL = u => (u ? 'var(--pos,#5b8a72)' : 'var(--neg,#c25a4a)');
+    const up = isUp(points[points.length - 1]);
+    const col = COL(up);
+    let basePath = '';
+    if (baseAt) {                            // a step line: flat until the day the capital changes
+      let d = '';
+      points.forEach((p, i) => { const v = baseAt(i); if (v == null || !isFinite(v)) return; const y = Y(v).toFixed(1);
+        d += d ? ` L${X(i).toFixed(1)},${d.split(',').pop()} L${X(i).toFixed(1)},${y}` : `M${X(i).toFixed(1)},${y}`; });
+      basePath = `<path class="vc-base" d="${d}" fill="none" stroke="var(--ink-dim,#b8b1a4)" stroke-width="1" stroke-dasharray="2,4" opacity="0.6" vector-effect="non-scaling-stroke"><title>${esc(opts.baselineLabel || 'baseline')}</title></path>`;
+    }
     const gid = 'vc' + Math.random().toString(36).slice(2, 7);
     const line = points.map((p, i) => (i ? 'L' : 'M') + X(i).toFixed(1) + ',' + Y(p.v).toFixed(1)).join('');
     const grid = [0, 1, 2, 3].map(k => { const v = lo + (hi - lo) * (k + 0.5) / 4, y = Y(v);
@@ -214,10 +228,11 @@
       `<text x="${X(i)}" y="${H - 4}" font-size="10" fill="var(--ink-faint,#6e6a5f)" text-anchor="${k === 0 ? 'start' : k === 2 ? 'end' : 'middle'}" font-family="var(--mono,monospace)">${esc(lab(points[i].t))}</text>`).join('');
     host.innerHTML = `<div style="position:relative">
       <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="max-width:100%;height:auto;display:block;overflow:visible" role="img" aria-label="${esc(opts.label || 'chart')}">
-        <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${col}" stop-opacity="0.25"/><stop offset="100%" stop-color="${col}" stop-opacity="0"/></linearGradient></defs>
+        <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1"><stop class="vc-s0" offset="0%" stop-color="${col}" stop-opacity="0.25"/><stop class="vc-s1" offset="100%" stop-color="${col}" stop-opacity="0"/></linearGradient></defs>
         ${grid}
+        ${basePath}
         <path d="${line} L${X(points.length - 1)},${H - padB} L0,${H - padB} Z" fill="url(#${gid})"/>
-        <path d="${line}" fill="none" stroke="${col}" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>
+        <path class="vc-line" d="${line}" fill="none" stroke="${col}" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>
         <line class="vc-x" x1="0" x2="0" y1="${padT}" y2="${H - padB}" stroke="var(--ink-dim,#b8b1a4)" stroke-dasharray="3,3" vector-effect="non-scaling-stroke" opacity="0"/>
         <circle class="vc-dot" r="3.5" fill="${col}" opacity="0"/>
         ${(opts.markers || []).map(m => { const i = points.findIndex(p => p.t >= m.t); if (i < 0) return '';
@@ -228,14 +243,19 @@
       <div class="vc-hit" style="position:absolute;left:0;top:0;bottom:${padB}px;right:${(padR / W) * 100}%;cursor:crosshair;touch-action:pan-y"></div>
     </div>`;
     const hit = host.querySelector('.vc-hit'), xl = host.querySelector('.vc-x'), dot = host.querySelector('.vc-dot');
+    const lineEl = host.querySelector('.vc-line'), stops = host.querySelectorAll('.vc-s0, .vc-s1');
+    let painted = up;
+    const paint = u => { if (u === painted) return; painted = u; const c = COL(u);
+      lineEl.setAttribute('stroke', c); dot.setAttribute('fill', c); stops.forEach(s => s.setAttribute('stop-color', c)); };
     const move = cx => {
       const r = hit.getBoundingClientRect(); const f = Math.max(0, Math.min(1, (cx - r.left) / r.width));
       const i = Math.round(f * (points.length - 1)), p = points[i];
       xl.setAttribute('x1', X(i)); xl.setAttribute('x2', X(i)); xl.setAttribute('opacity', '0.7');
       dot.setAttribute('cx', X(i)); dot.setAttribute('cy', Y(p.v)); dot.setAttribute('opacity', '1');
+      paint(isUp(p));
       opts.onScrub && opts.onScrub(p, points[0], intraday ? new Date(p.t).toLocaleString() : p.t);
     };
-    const reset = () => { xl.setAttribute('opacity', '0'); dot.setAttribute('opacity', '0'); opts.onReset && opts.onReset(); };
+    const reset = () => { xl.setAttribute('opacity', '0'); dot.setAttribute('opacity', '0'); paint(up); opts.onReset && opts.onReset(); };
     hit.addEventListener('mousemove', e => move(e.clientX));
     hit.addEventListener('mouseleave', reset);
     hit.addEventListener('touchstart', e => e.touches[0] && move(e.touches[0].clientX), { passive: true });
@@ -512,6 +532,71 @@
     host.querySelectorAll('[data-aci]').forEach(b => b.onclick = () => { ACC.interval = b.dataset.aci; renderAccount(); });
   }
 
+  // ---------------- a value series with capital flows (z129: Bot equity) ----------------
+  // The account-value chart, generalised: the same header, 1D…ALL bar, D / W / M rule and flow
+  // markers, for any daily value series carrying capital flows ({t, v, flow}). P/L is market P/L
+  // (flows out); % = P/L ÷ capital at work (the window's opening value + the flows inside it), so
+  // ALL reads exactly the all-time return on capital. The dotted line is that capital at each
+  // point (it steps up on a deposit), and the whole chart is green while P/L ≥ 0 at the point under
+  // your finger - red whenever the value is below what was put in.
+  const FC = {};
+  async function mountFlowChart(host, cfg) {
+    if (!host) return;
+    const st = FC[cfg.key] || (FC[cfg.key] = { range: cfg.range || 'ALL', interval: 'D', intraday: undefined, at: 0 });
+    if (cfg.fresh) { st.intraday = undefined; }
+    const s = cfg.series || {};
+    const all = (s.points || []).filter(p => p && p.t && isFinite(p.v));
+    if (all.length < 2) { host.innerHTML = '<div style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);padding:16px 0">Not enough history yet.</div>'; return; }
+    const flows = (s.flows || []).filter(f => f && f.t && f.amount);
+    const money2 = v => '$' + v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const moneyS = v => `${v >= 0 ? '+' : '−'}$${Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const draw = async () => {
+      if (!host.isConnected) return;
+      const avail = ivalsFor(st.range), ivl = effInterval(st.interval, avail), intra = st.range === '1D';
+      let pts, label;
+      if (intra) {
+        if (st.intraday === undefined) { try { st.intraday = cfg.intraday ? await cfg.intraday() : null; } catch (e) { st.intraday = null; } }
+        if (!host.isConnected) return;
+        pts = st.intraday ? st.intraday.points : [];
+        label = st.intraday ? `${st.intraday.date} · intraday` : 'no intraday marks for the latest session';
+      } else {
+        pts = withReturns(windowed(all, RANGES.find(x => x[0] === st.range)[1]));
+        if (ivl !== 'D') pts = resample(pts, ivl);
+        label = st.range === 'ALL' ? `since ${whenLabel(Object.assign({}, all[0], { _base: false }), 'D', false)}` : st.range;
+      }
+      const fromDay = pts.length ? String(pts[0].t).slice(0, 10) : '';
+      const flowsIn = flows.filter(f => (intra ? false : f.t > fromDay));
+      const bar = RANGES.map(([k]) => `<button class="seg-btn ${st.range === k ? 'active' : ''}" data-vcr="${k}" style="font-size:10px">${k}</button>`).join('');
+      host.innerHTML = `<div>
+          <div style="display:flex;align-items:baseline;gap:10px;margin-top:3px;flex-wrap:wrap">
+            <span data-vc-price style="font-family:var(--mono);font-size:30px;font-weight:800;line-height:1"></span>
+            <span data-vc-pct style="font-family:var(--mono);font-size:14px;font-weight:700"></span></div>
+          <div data-vc-sub style="font-family:var(--mono);font-size:10px;color:var(--ink-dim);margin-top:2px"></div></div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0 4px"><span class="seg-control" style="font-size:10px">${bar}</span>${ivlBar(avail, ivl, 'data-vci')}</div>
+        <div class="vc-chart"></div>
+        ${cfg.footnote ? `<div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:4px;line-height:1.5">${cfg.footnote}</div>` : ''}`;
+      const pe = host.querySelector('[data-vc-price]'), ce = host.querySelector('[data-vc-pct]'), se = host.querySelector('[data-vc-sub]');
+      const pnlOf = (p, base) => p.v - base.v - (p.cumFlow || 0);
+      const capOf = (p, base) => base.v + (p.cumFlow || 0);
+      const setHeader = (p, base, sub) => {
+        if (!p || !base) return;
+        const pnl = pnlOf(p, base), cap = capOf(p, base), pct = cap > 0 ? pnl / cap * 100 : 0, c = pnl >= 0 ? 'var(--pos)' : 'var(--neg)';
+        pe.textContent = money2(p.v); pe.style.color = c;
+        ce.textContent = `${moneyS(pnl)} (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%)`; ce.style.color = c;
+        se.textContent = `${sub} · put in ${money2(cap)}`;
+      };
+      const resetHeader = () => (pts.length ? setHeader(pts[pts.length - 1], pts[0], `${label} · scrub the chart`) : null);
+      drawStockChart(host.querySelector('.vc-chart'), pts, { label: cfg.title || 'Value', empty: label,
+        isUp: (p, base) => pnlOf(p, base) >= 0, baseline: (p) => capOf(p, pts[0]), baselineLabel: 'capital put in (opening value + deposits)',
+        markers: flowsIn.map(f => ({ t: f.t, kind: f.amount >= 0 ? 'in' : 'out', label: `${f.t}: ${f.label || (f.amount >= 0 ? 'capital in' : 'capital out')} ${moneyS(f.amount)}` })),
+        onScrub: (p, base) => setHeader(p, base, whenLabel(p, ivl, intra)), onReset: resetHeader });
+      resetHeader();
+      host.querySelectorAll('[data-vcr]').forEach(b => b.onclick = () => { st.range = b.dataset.vcr; draw(); });
+      host.querySelectorAll('[data-vci]').forEach(b => b.onclick = () => { st.interval = b.dataset.vci; draw(); });
+    };
+    await draw();
+  }
+
   // ---------------- any one series, the GoodGlobe way (z127) ----------------
   // The same chart as the GoodGlobe index and the account value - large value + % that follow
   // the scrub, the 1D 1W 1M 3M YTD 1Y ALL bar and the D / W / M interval rule - for any one
@@ -581,6 +666,6 @@
     await draw();
   }
 
-  window.VChart = { fetchDaily, fetchTapeDay, drawStockChart, mountSeriesChart, windowed, resample, indexDaily, indexIntraday, mountGoodGlobeChart, mountSparks, accountSeries, mountAccountChart,
+  window.VChart = { fetchDaily, fetchTapeDay, drawStockChart, mountSeriesChart, mountFlowChart, withReturns, windowed, resample, indexDaily, indexIntraday, mountGoodGlobeChart, mountSparks, accountSeries, mountAccountChart,
                     accountIntraday, withReturns, ivalsFor, effInterval, whenLabel, _gg: GG, _acc: ACC };
 })();
