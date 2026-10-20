@@ -795,9 +795,9 @@
       const pe = host.querySelector('[data-vc-price]'), ce = host.querySelector('[data-vc-pct]'), se = host.querySelector('[data-vc-sub]');
       const setHeader = (v, base, sub, html) => {
         if (!(v > 0) || !(base > 0)) return;
-        const ch = (v / base - 1) * 100, c = ch >= 0 ? 'var(--pos)' : 'var(--neg)';
+        const ch = (v / base - 1) * 100, good = cfg.upIsBad ? ch <= 0 : ch >= 0, c = good ? 'var(--pos)' : 'var(--neg)';   // z132: a spread or yield rising is bad news
         pe.textContent = fmtV(v); pe.style.color = c;
-        ce.textContent = (ch >= 0 ? '+' : '') + ch.toFixed(2) + '%'; ce.style.color = c;
+        ce.textContent = cfg.changeFmt ? cfg.changeFmt(v, base) : (ch >= 0 ? '+' : '') + ch.toFixed(2) + '%'; ce.style.color = c;   // z132: bp for spreads
         if (html) se.innerHTML = sub; else se.textContent = sub;
       };
       if (bd) {
@@ -808,7 +808,7 @@
         rest();
       } else {
         const resetHeader = () => (pts.length ? setHeader(pts[pts.length - 1].v, pts[0].v, (pts[pts.length - 1]._live ? `${pts[pts.length - 1].t} · ${pts[pts.length - 1]._live} · ` : '') + label + ' · scrub the chart') : null);
-        drawStockChart(host.querySelector('.vc-chart'), pts, { label: cfg.title || cfg.ticker, empty: label, axisFmt: cfg.axisFmt,
+        drawStockChart(host.querySelector('.vc-chart'), pts, { label: cfg.title || cfg.ticker, empty: label, axisFmt: cfg.axisFmt, isUp: cfg.upIsBad ? ((p, f) => p.v <= f.v) : undefined,
           onScrub: p => setHeader(p.v, pts[0].v, (p._live ? `${p.t} · ${p._live}` : whenLabel(p, ivl, st.range === '1D'))), onReset: resetHeader });
         resetHeader();
       }
