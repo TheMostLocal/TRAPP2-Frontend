@@ -17,7 +17,7 @@
   'use strict';
   const GROUPS = [
     { id: 'book', label: 'Stock Book & Valuation', icon: '📒', tabs: [['stockbook', 'Stock Book'], ['valuation', 'Valuation'], ['options', 'Options']] },
-    { id: 'macro', label: 'Macro Data', icon: '🌐', tabs: [['regime', 'Regime'], ['macro', 'Macro Quad'], ['bonds', 'Bonds & Treasuries'], ['fed', 'Fed'], ['supplychain', 'Supply Chains'], ['globaltrade', 'Global Trade']] },
+    { id: 'macro', label: 'Macro Data', icon: '🌐', tabs: [['regime', 'Regime'], ['macro', 'Macro Quad'], ['bonds', 'Bonds & Treasuries'], ['credit', 'Credit'], ['fed', 'Fed'], ['supplychain', 'Supply Chains'], ['globaltrade', 'Global Trade']] },
     { id: 'lab', label: 'Data & Research', icon: '🔬', tabs: [['data', 'Data'], ['research', 'Research'], ['scenarios', 'Scenarios'], ['risk', 'Risk Calculator'], ['probability', 'Probability']] },
   ];
   const LAST = 'valuatio.nav.lastTab.v1';
@@ -81,6 +81,12 @@
     const w = function (tab) {
       const r = orig.apply(this, arguments);
       try { paint(tab); } catch (e) {}
+      if (tab === 'credit') {                                   // z132: junk & corporate bonds
+        const sub = document.getElementById('masthead-sub');
+        if (sub) sub.textContent = 'Credit · junk & corporate bond spreads by rating, yields, TRACE breadth';
+        const host = document.getElementById('credit-mount');
+        if (host && window.CreditTab) window.CreditTab.render(host);
+      }
       if (tab === 'options') {
         const sub = document.getElementById('masthead-sub');
         if (sub) sub.textContent = 'Options · every ticker with a chain · IV, expected move, skew, term structure · tap one for its chain';
