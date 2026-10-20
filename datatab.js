@@ -140,11 +140,12 @@
         for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
           const v = ds.z[j][i]; if (v == null) continue;
           const x = X(i), y = Y(j), h = Z(v), t = (v - zmin) / (zmax - zmin || 1);
-          boxes.push({ x, y, h, t, d: proj(x, y, h / 2).d });
+          boxes.push({ i, x, y, h, t, d: proj(x, y, h / 2).d });
         }
         boxes.sort((a, b) => b.d - a.d);
         for (const bx of boxes) {
-          const c = colorAt(bx.t), sh = f => rgb(c.map(k => Math.round(k * f)), 0.95);
+          const dim = st.focus != null && bx.i !== st.focus;            // z133: focus one category
+          const c = colorAt(bx.t), sh = f => rgb(c.map(k => Math.round(k * f)), dim ? 0.12 : 0.95);
           const P = (sx, sy, z) => proj(bx.x + sx * hx, bx.y + sy * hy, z);
           const faces = [
             { pts: [P(-1, -1, 0), P(1, -1, 0), P(1, -1, bx.h), P(-1, -1, bx.h)], f: 0.78 },
@@ -153,7 +154,7 @@
             { pts: [P(1, -1, 0), P(1, 1, 0), P(1, 1, bx.h), P(1, -1, bx.h)], f: 0.62 },
           ].map(fc => ({ ...fc, d: fc.pts.reduce((s2, q) => s2 + q.d, 0) / 4 })).sort((a, b) => b.d - a.d);
           for (const fc of faces) poly(fc.pts, sh(fc.f), 'rgba(0,0,0,0.35)');
-          poly([P(-1, -1, bx.h), P(1, -1, bx.h), P(1, 1, bx.h), P(-1, 1, bx.h)], rgb(c, 0.97), 'rgba(0,0,0,0.35)');
+          poly([P(-1, -1, bx.h), P(1, -1, bx.h), P(1, 1, bx.h), P(-1, 1, bx.h)], rgb(c, dim ? 0.14 : 0.97), dim ? null : 'rgba(0,0,0,0.35)');
         }
       }
       // CATEGORICAL x CONTINUOUS (ds.ribbons): one "fence" per category running
@@ -166,10 +167,15 @@
           const a = ds.z[j][i], b2 = ds.z[j + 1][i];
           if (a == null || b2 == null) continue;
           const pts = [proj(X(i), Y(j), z0), proj(X(i), Y(j + 1), z0), proj(X(i), Y(j + 1), Z(b2)), proj(X(i), Y(j), Z(a))];
-          fences.push({ pts, d: pts.reduce((s2, q) => s2 + q.d, 0) / 4, t: ((a + b2) / 2 - zmin) / (zmax - zmin || 1), top: [pts[3], pts[2]] });
+          fences.push({ i, pts, d: pts.reduce((s2, q) => s2 + q.d, 0) / 4, t: ((a + b2) / 2 - zmin) / (zmax - zmin || 1), top: [pts[3], pts[2]] });
         }
         fences.sort((a, b) => b.d - a.d);
-        for (const f of fences) { poly(f.pts, rgb(colorAt(f.t), 0.55), null); line(f.top[0], f.top[1], rgb(colorAt(f.t), 1)); }
+        for (const f of fences) {                                            // z133: a focused category stays solid, the rest fade
+          const dim = st.focus != null && f.i !== st.focus;
+          poly(f.pts, rgb(colorAt(f.t), dim ? 0.07 : st.focus != null ? 0.7 : 0.55), null);
+          if (dim) { ctx.save(); ctx.globalAlpha = 0.22; line(f.top[0], f.top[1], rgb(colorAt(f.t), 1)); ctx.restore(); }
+          else { ctx.save(); ctx.lineWidth = st.focus != null ? 2 : 1; line(f.top[0], f.top[1], rgb(colorAt(f.t), 1)); ctx.restore(); }
+        }
       }
       // mesh quads, far to near
       const quads = [];
@@ -186,14 +192,80 @@
       const xEdgeY = -yWall, yEdgeX = -xWall;
       ctx.fillStyle = label;
       const tick = (p, txt, dx, dy, align) => { ctx.textAlign = align; ctx.fillText(txt, p.x + dx, p.y + dy); };
-      const xStep = Math.max(1, Math.ceil(nx / 6)), yStep = Math.max(1, Math.ceil(ny / 7));
-      for (let i = 0; i < nx; i += xStep) tick(proj(X(i), xEdgeY * 1.08, 0), ds.xTick(ds.xs[i]), 0, 12, 'center');
+      const yStep = Math.max(1, Math.ceil(ny / 7));
+      if (ds.ribbons || ds.bars || ds.xCategorical) {
+        // z133: a CATEGORY axis labels EVERY category (it showed every 3rd: 5 of 14 assets). Try 10 → 9 → 8 px
+        // on one row, then two staggered rows, until no two label boxes overlap at this rotation; if
+        // nothing fits, still draw them all at 8 px staggered - a category is never dropped.
+        const fam = css('--mono', 'monospace') || 'monospace';
+        const items = ds.xs.map((x, i) => ({ i, txt: String(ds.xTick(x)), p: proj(X(i), xEdgeY * 1.08, 0) }));
+        const clash = (sz, rows) => {
+          ctx.font = sz + 'px ' + fam;
+          const bx = items.map((it, k) => { const w = ctx.measureText(it.txt).width, dy = 12 + (rows === 2 && k % 2 ? sz + 3 : 0);
+            return { x0: it.p.x - w / 2 - 2, x1: it.p.x + w / 2 + 2, y0: it.p.y + dy - sz, y1: it.p.y + dy + 2 }; });
+          for (let a = 0; a < bx.length; a++) for (let b = a + 1; b < bx.length; b++)
+            if (bx[a].x0 < bx[b].x1 && bx[b].x0 < bx[a].x1 && bx[a].y0 < bx[b].y1 && bx[b].y0 < bx[a].y1) return true;
+          return false;
+        };
+        let fit = null;
+        for (const sz of [10, 9, 8]) if (!clash(sz, 1)) { fit = { sz, rows: 1 }; break; }
+        if (fit) {
+          st.labelFit = fit;
+          items.forEach(it => {
+            const on = st.focus === it.i;
+            ctx.font = (on ? 'bold ' : '') + fit.sz + 'px ' + fam;
+            ctx.fillStyle = on ? css('--amber', '#e0b04c') : st.focus != null ? ink : label;
+            tick(it.p, it.txt, 0, 12, 'center');
+          });
+        } else {
+          // Too dense for upright labels at this rotation: turn every label PERPENDICULAR to the
+          // projected axis, reading outward from the box. Each then needs only its text HEIGHT of
+          // axis length (font = tick spacing − 2 px, 7-10 px), so all of them fit side by side.
+          const a = items[0].p, b = items[items.length - 1].p, len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+          const ux = (b.x - a.x) / len, uy = (b.y - a.y) / len;
+          // perspective spaces the ticks unevenly - size the text by the TIGHTEST pair, not the average
+          const along = items.map(it => it.p.x * ux + it.p.y * uy);
+          let gap = Infinity; for (let k = 1; k < along.length; k++) gap = Math.min(gap, Math.abs(along[k] - along[k - 1]));
+          // still too tight (a near edge-on view): alternate labels step outward past their neighbours,
+          // so only every SECOND label shares a lane
+          const stagger = Math.floor(gap - 1) < 7;
+          const sz = Math.max(7, Math.min(10, Math.floor((stagger ? 2 * gap : gap) - 1)));
+          const mid = proj(0, 0, 0), am = proj(0, xEdgeY * 1.08, 0);
+          let nx2 = -uy, ny2 = ux;                                            // a normal to the axis...
+          if (nx2 * (am.x - mid.x) + ny2 * (am.y - mid.y) < 0) { nx2 = -nx2; ny2 = -ny2; }   // ...pointing away from the box
+          let ang = Math.atan2(ny2, nx2), align = 'left';
+          if (Math.cos(ang) < 0) { ang += Math.PI; align = 'right'; }          // keep text upright
+          ctx.font = sz + 'px ' + fam;
+          const maxW = Math.max(...items.map(it => ctx.measureText(it.txt).width));
+          st.labelFit = { sz, rows: 0, rotated: true, ang, gap, ux, uy, out: [nx2, ny2], maxW: stagger ? 2 * maxW + 6 : maxW, stagger };
+          items.forEach((it, k) => {
+            const on = st.focus === it.i, off = 4 + (stagger && k % 2 ? maxW + 6 : 0);
+            ctx.save();
+            ctx.translate(it.p.x + nx2 * off, it.p.y + ny2 * off);
+            ctx.rotate(ang);
+            ctx.font = (on ? 'bold ' : '') + sz + 'px ' + fam;
+            ctx.fillStyle = on ? css('--amber', '#e0b04c') : st.focus != null ? ink : label;
+            ctx.textAlign = align; ctx.textBaseline = 'middle';
+            ctx.fillText(it.txt, 0, 0);
+            ctx.restore();
+          });
+        }
+        ctx.font = '10px ' + fam; ctx.fillStyle = label; ctx.textBaseline = 'alphabetic';
+      } else {
+        const xStep = Math.max(1, Math.ceil(nx / 6));
+        for (let i = 0; i < nx; i += xStep) tick(proj(X(i), xEdgeY * 1.08, 0), ds.xTick(ds.xs[i]), 0, 12, 'center');
+      }
       for (let j = 0; j < ny; j += yStep) tick(proj(yEdgeX * 1.06, Y(j), 0), ds.yTick(ds.ys[j]), yEdgeX > 0 ? 4 : -4, 4, yEdgeX > 0 ? 'left' : 'right');
       for (const v of zt) { const p = proj(xWall, -yWall * 1.04, Z(v)); tick(p, ds.zFmt(v), xWall < 0 ? -4 : 4, 3, xWall < 0 ? 'right' : 'left'); }
       ctx.fillStyle = ink; ctx.font = '10px ' + (css('--mono', 'monospace') || 'monospace');
       // axis titles sit past the ends of their tick rows, never on top of them
       const xl = proj(0, xEdgeY * 1.32, 0), yl = proj(yEdgeX * 1.06, yWall * 1.3, 0);
-      tick(xl, ds.xLabel, 0, 14, 'center'); tick(yl, ds.yLabel, yEdgeX > 0 ? 4 : -4, 0, yEdgeX > 0 ? 'left' : 'right');
+      const lf = st.labelFit;
+      if (lf && lf.rotated && (ds.ribbons || ds.bars || ds.xCategorical)) {   // z133: past the rotated labels, not on them
+        const m = proj(0, xEdgeY * 1.08, 0);
+        tick({ x: m.x + lf.out[0] * (lf.maxW + 16), y: m.y + lf.out[1] * (lf.maxW + 16) }, ds.xLabel, 0, 4, 'center');
+      } else tick(xl, ds.xLabel, 0, 14, 'center');
+      tick(yl, ds.yLabel, yEdgeX > 0 ? 4 : -4, 0, yEdgeX > 0 ? 'left' : 'right');
       tick(proj(xWall, -yWall * 1.04, H * 1.08), ds.zLabel, 0, 0, 'center');
       // picked point
       if (st.picked) {
@@ -212,7 +284,11 @@
         const p = proj(X(i), Y(j), Z(v)), d = (p.x - px) ** 2 + (p.y - py) ** 2;
         if (!best || d < best.d) best = { i, j, d };
       }
-      if (best && best.d < 900) { st.picked = best; onPick && onPick(ds.xs[best.i], ds.ys[best.j], ds.z[best.j][best.i]); draw(); }
+      if (best && best.d < 900) {
+        st.picked = best;
+        if (ds.ribbons || ds.bars || ds.xCategorical) st.focus = best.i;          // z133: tapping a point focuses its category
+        onPick && onPick(ds.xs[best.i], ds.ys[best.j], ds.z[best.j][best.i], best.i); draw();
+      }
     }
     // interaction: drag to rotate, tap to read a point
     let drag = null;
@@ -234,7 +310,8 @@
     size(); draw();
     const ro = window.ResizeObserver ? new ResizeObserver(() => { size(); draw(); }) : null;
     if (ro) ro.observe(canvas);
-    return { reset() { st.yaw = -0.62; st.pitch = 0.52; draw(); }, redraw: draw, state: st };
+    return { reset() { st.yaw = -0.62; st.pitch = 0.52; draw(); }, redraw: draw, state: st,
+             setFocus(i) { st.focus = (i == null || i === st.focus) ? null : i; st.picked = null; draw(); return st.focus; } };
   }
 
   // --------------------------------------------------------------- datasets --
@@ -709,8 +786,8 @@
     const z = ends.map(iEnd => maps.map(m => corrAt(m, iEnd)));
     return { title: `Rolling ${win}-day correlation with SPY`, sub: `${assets.length} assets · ${ends.length} month-ends · ${esc(spy[ends[0]].d)} → ${esc(spy[ends[ends.length - 1]].d)} · daily returns, Pearson`,
       ribbons: true, xs: assets, ys: ends.map(i => spy[i].d), z, zRange: [-1, 1], xScale: 'index', xLabel: 'Asset', yLabel: 'Date', zLabel: 'Correlation', zStep: 0.5,
-      xTick: v => v, yTick: v => new Date(v + 'T12:00:00Z').toLocaleDateString(undefined, { month: 'short', year: '2-digit' }),
-      zFmt: v => v.toFixed(1), cell: v => v == null ? '—' : v.toFixed(2) };
+      xTick: v => v, yTick: v => { const d = new Date(v + 'T12:00:00Z'); return d.toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' }) + " '" + String(d.getUTCFullYear()).slice(2); },
+      yRead: v => v, zFmt: v => v.toFixed(1), cell: v => v == null ? '—' : v.toFixed(2) };   // z133: "May '26", never read as May 26th
   }
 
   const CATALOG = [
@@ -866,13 +943,28 @@
         <canvas id="dt-canvas" style="width:100%;height:${window.innerWidth < 600 ? 340 : 460}px;display:block"></canvas>
         <button class="btn btn-ghost" id="dt-reset" style="position:absolute;right:8px;top:8px;padding:3px 8px;font-size:9px">Reset view</button></div>
       ${legendHtml(ds)}
-      <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:4px">Drag / swipe to rotate · tap a point for its value · colour = value (green low → red high)</div>`;
+      ${(ds.ribbons || ds.bars || ds.xCategorical) ? `<div id="dt-cats" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:8px">${ds.xs.map((x, i) => `<button class="seg-btn" data-dt-cat="${i}" style="font-size:10px;padding:3px 8px;border:1px solid var(--rule);border-radius:3px">${esc(ds.xTick(x))}</button>`).join('')}</div>` : ''}
+      <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:4px">Drag / swipe to rotate · tap a point for its value${(ds.ribbons || ds.bars || ds.xCategorical) ? ' · tap a name to isolate it (tap again for all)' : ''} · colour = value (green low → red high)</div>`;
     if (scrub) { view.insertAdjacentHTML('afterbegin', scrub); bindScrub(); }
     const ro = $('#dt-readout');
     S.camera = S.camera || { yaw: -0.62, pitch: 0.52, D: 4.2, picked: null };
     S.camera.picked = null;
-    S.surf = Surface3D($('#dt-canvas'), ds, (x, y, v) => { ro.innerHTML = `${esc(ds.xLabel)} <strong>${esc(ds.xTick(x))}</strong> · ${esc(ds.yLabel)} <strong>${esc(ds.yTick(y))}</strong> · ${esc(ds.zLabel)} <strong style="color:var(--ink)">${esc(ds.cell(v))}</strong>`; }, S.camera);
+    let paintChipsLater = ci => document.querySelectorAll('[data-dt-cat]').forEach(b => { const on = +b.dataset.dtCat === ci; b.classList.toggle('active', on); b.style.borderColor = on ? 'var(--amber)' : 'var(--rule)'; });
+    if (S.camera.focusKey !== ds.title) { S.camera.focus = null; S.camera.focusKey = ds.title; }   // z133: a new dataset starts unfocused
+    S.surf = Surface3D($('#dt-canvas'), ds, (x, y, v, ci) => { if (ci != null && typeof paintChipsLater === 'function') paintChipsLater(ci); ro.innerHTML = `${esc(ds.xLabel)} <strong>${esc(ds.xTick(x))}</strong> · ${esc(ds.yLabel)} <strong>${esc(ds.yRead ? ds.yRead(y) : ds.yTick(y))}</strong> · ${esc(ds.zLabel)} <strong style="color:var(--ink)">${esc(ds.cell(v))}</strong>`; }, S.camera);
     $('#dt-reset').onclick = () => S.surf.reset();
+    // z133: one chip per category - isolate it, with its own latest value and range in the readout
+    const catRead = i => {
+      if (i == null) return '';
+      const col = ds.z.map((row, j) => ({ y: ds.ys[j], v: row[i] })).filter(o => o.v != null && isFinite(o.v));
+      if (!col.length) return `${esc(ds.xTick(ds.xs[i]))}: no values`;
+      const last = col[col.length - 1], lo = col.reduce((a, b) => (b.v < a.v ? b : a)), hi = col.reduce((a, b) => (b.v > a.v ? b : a));
+      const rd = y => esc(ds.yRead ? ds.yRead(y) : ds.yTick(y));
+      return `<strong style="color:var(--amber)">${esc(ds.xTick(ds.xs[i]))}</strong> · latest ${esc(ds.cell(last.v))} (${rd(last.y)}) · low ${esc(ds.cell(lo.v))} (${rd(lo.y)}) · high ${esc(ds.cell(hi.v))} (${rd(hi.y)})`;
+    };
+    const paintChips = f => document.querySelectorAll('[data-dt-cat]').forEach(b => { const on = +b.dataset.dtCat === f; b.classList.toggle('active', on); b.style.borderColor = on ? 'var(--amber)' : 'var(--rule)'; });
+    document.querySelectorAll('[data-dt-cat]').forEach(b => b.onclick = () => { const f = S.surf.setFocus(+b.dataset.dtCat); paintChips(f); if (ro) ro.innerHTML = f == null ? '' : catRead(f); });
+    if (S.camera.focus != null) { paintChips(S.camera.focus); if (ro) ro.innerHTML = catRead(S.camera.focus); }
   }
   function stopPlay() { if (S.timer) clearInterval(S.timer); S.timer = null; S.playing = false; }
   function downloadCsv(ds) {
