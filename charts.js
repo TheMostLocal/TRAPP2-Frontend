@@ -53,6 +53,9 @@
     _daily[t] = [];
     return _daily[t];
   }
+  // z134: the ET calendar date `back` days ago (tape files are named by it; the UTC date runs a day
+  // ahead from 20:00 ET in summer / 19:00 ET in winter)
+  const etDay = back => new Date(Date.now() - back * 864e5).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   async function fetchTapeDay(book, date) {
     const k = book + '|' + date;
     if (k in _tape) return _tape[k];
@@ -120,7 +123,7 @@
     let tapeDate = null;
     const books = [...new Set(ms.map(m => _book[m.ticker]).filter(Boolean))];
     for (let back = 0; back < 8 && !tapeDate; back++) {
-      const dt = new Date(Date.now() - back * 864e5).toISOString().slice(0, 10);
+      const dt = etDay(back);   // z134: tape files are named by the ET trading date
       for (const b of books) { const tp = await fetchTapeDay(b, dt); if (tp && tp.snapshots && tp.snapshots.length) { tapeDate = dt; break; } }
     }
     if (!tapeDate) return null;
@@ -131,17 +134,29 @@
     const series = [];
     const times = new Set();
     const perBook = {};
-    for (const b of books) { const tp = await fetchTapeDay(b, tapeDate); perBook[b] = (tp && tp.snapshots) || []; perBook[b].forEach(s => times.add(s.t)); }
-    const last = {};
+    // z134: official open at 09:30 ET → regular-session ticks → official close; members' prices
+    // start from their official opens (not the previous close) and the index's change is still
+    // measured from the previous close level L0 (dotted line).
+    const docs = {};
+    for (const b of books) { const tp = await fetchTapeDay(b, tapeDate); docs[b] = tp || {}; }
+    const closeMin = Math.min(...books.map(b => +docs[b].closeMinuteET || 960));
+    for (const b of books) { perBook[b] = (docs[b].snapshots || []).filter(s => regMinute(s, closeMin)); perBook[b].forEach(s => times.add(s.t)); }
+    const offOpen = {}, offClose = {};
+    for (const m of ms) { const d = docs[_book[m.ticker]] || {}; if (d.open && +d.open[m.ticker] > 0) offOpen[m.ticker] = +d.open[m.ticker]; if (d.close && +d.close[m.ticker] > 0) offClose[m.ticker] = +d.close[m.ticker]; }
+    const level = px => { let sum = 0, n = 0; for (const m of ms) { const pc = prevClose[m.ticker], p = px[m.ticker]; if (pc && p) { sum += m.dir * (p / pc - 1); n++; } } return n ? +(L0 * (1 + sum / n)).toFixed(4) : null; };
+    const half = Math.ceil(ms.length / 2), t930 = etInstant(tapeDate, 570);
+    const last = Object.assign({}, offOpen);
+    const opened = Object.keys(offOpen).length >= half;
+    if (opened) series.push({ t: t930, v: level(offOpen), _open: true });
     for (const t of [...times].sort()) {
+      if (opened && t <= t930) continue;
       for (const b of books) for (const s of perBook[b]) if (s.t === t) for (const m of ms) if (_book[m.ticker] === b && s.p && s.p[m.ticker] != null) last[m.ticker] = +s.p[m.ticker];
-      let sum = 0, n = 0;
-      for (const m of ms) { const pc = prevClose[m.ticker], px = last[m.ticker]; if (pc && px) { sum += m.dir * (px / pc - 1); n++; } }
-      if (n) series.push({ t, v: +(L0 * (1 + sum / n)).toFixed(4) });
+      const v = level(last);
+      if (v != null) series.push({ t, v });
     }
+    if (Object.keys(offClose).length >= half) { const v = level(Object.assign({}, last, offClose)); if (v != null) series.push({ t: etInstant(tapeDate, closeMin), v, _close: true }); }
     if (!series.length) return null;
-    const t0 = new Date(Date.parse(series[0].t) - 60000).toISOString();   // the previous close, just before the first tick
-    return { points: [{ t: t0, v: L0, _base: true }, ...series], date: tapeDate, base: L0 };
+    return { points: series, date: tapeDate, base: L0, prevClose: L0 };
   }
 
   // ---------------- windows & resampling ----------------
@@ -169,6 +184,7 @@
   function whenLabel(p, ivl, intraday) {
     if (!p) return '';
     if (p._base) return intraday ? 'previous close' : 'start of range';
+    if (p._open || p._close) return (p._open ? 'official open' : 'official close') + ' (Yahoo) · ' + new Date(p.t).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }) + ' ET';   // z134
     if (intraday) return new Date(p.t).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
     const d = new Date(p.t + 'T12:00:00Z'), f = o => d.toLocaleDateString(undefined, Object.assign({ timeZone: 'UTC' }, o));
     if (ivl === 'W' && p._k) return 'week ending ' + f({ weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
@@ -302,9 +318,12 @@
       if (pctEl) { pctEl.textContent = (ch >= 0 ? '+' : '') + ch.toFixed(2) + '%'; pctEl.style.color = c; }
       if (subEl) subEl.textContent = sub;
     };
-    const resetHeader = () => pts.length ? setHeader(pts[pts.length - 1], pts[0], label + ' · scrub the chart') : null;
-    drawStockChart(host.querySelector('.vc-chart'), pts, { label: 'GoodGlobe Index', empty: label,
-      onScrub: (p, base) => setHeader(p, base, whenLabel(p, ivl, GG.range === '1D')), onReset: resetHeader });
+    // z134: on 1D the change is from the previous close (dotted), while the line itself starts at the official open
+    const prevPt = GG.range === '1D' && GG.intraday && GG.intraday.base ? { v: GG.intraday.base, t: '' } : null;
+    const resetHeader = () => pts.length ? setHeader(pts[pts.length - 1], prevPt || pts[0], label + ' · scrub the chart') : null;
+    drawStockChart(host.querySelector('.vc-chart'), pts, Object.assign({ label: 'GoodGlobe Index', empty: label,
+      onScrub: (p, base) => setHeader(p, prevPt || base, whenLabel(p, ivl, GG.range === '1D')), onReset: resetHeader },
+      prevPt ? { isUp: p => p.v >= prevPt.v, baseline: prevPt.v, baselineLabel: 'previous close' } : {}));
     resetHeader();
     host.querySelectorAll('[data-vcr]').forEach(b => b.onclick = () => { GG.range = b.dataset.vcr; render(); });
     host.querySelectorAll('[data-vci]').forEach(b => b.onclick = () => { GG.interval = b.dataset.vci; render(); });
@@ -451,7 +470,7 @@
     const books = [...new Set(held.map(T => _book[T]).filter(Boolean))];
     let tapeDate = null;
     for (let back = 0; back < 8 && !tapeDate; back++) {
-      const dt = new Date(Date.now() - back * 864e5).toISOString().slice(0, 10);
+      const dt = etDay(back);   // z134: tape files are named by the ET trading date
       for (const b of books) { const tp = await fetchTapeDay(b, dt); if (tp && tp.snapshots && tp.snapshots.length) { tapeDate = dt; break; } }
     }
     if (!tapeDate) return null;
@@ -609,20 +628,29 @@
     if (!b) return null;
     let tp = null, tapeDate = null;
     for (let back = 0; back < 8 && !tapeDate; back++) {
-      const dt = new Date(Date.now() - back * 864e5).toISOString().slice(0, 10);
+      const dt = etDay(back);   // z134: tape files are named by the ET trading date
       const x = await fetchTapeDay(b, dt);
       if (x && x.snapshots && x.snapshots.some(s => s.p && s.p[ticker] != null)) { tp = x; tapeDate = dt; }
     }
     if (!tapeDate) return null;
     const prev = daily.filter(p => p.t < tapeDate);
     if (!prev.length) return null;
-    // z131: the tape records the REGULAR price all day (04:00-20:00 ET), so outside 09:30-16:00 it is not an
-    // extended-hours trade - keep only regular-session ticks (extended hours come from the 5-minute bars)
-    const ticks = tp.snapshots.filter(s => s.p && s.p[ticker] != null && sessionOf(Date.parse(s.t)) === 'reg').map(s => ({ t: s.t, v: +s.p[ticker] })).sort((a, z) => (a.t < z.t ? -1 : 1));
-    if (!ticks.length) return null;
-    const t0 = new Date(Date.parse(ticks[0].t) - 60000).toISOString();
-    return { points: [{ t: t0, v: prev[prev.length - 1].v, _base: true }, ...ticks], date: tapeDate };
+    // z134: the day's line = Yahoo's OFFICIAL open at 09:30 ET → the regular-session 15-min ticks →
+    // Yahoo's OFFICIAL close at 16:00 ET (13:00 on an early close). Pre-market is not on the line
+    // (the tape repeats the regular price then; extended hours live in the 5-minute bars), and the
+    // official prints trump whatever the 15-minute pulls caught at those two minutes. The change
+    // is still measured from the previous close (dotted line).
+    const closeMin = +tp.closeMinuteET || 960, inReg = s => regMinute(s, closeMin);
+    const ticks = tp.snapshots.filter(s => s.p && s.p[ticker] != null && inReg(s)).map(s => ({ t: s.t, v: +s.p[ticker] })).sort((a, z) => (a.t < z.t ? -1 : 1));
+    const oo = tp.open && +tp.open[ticker] > 0 ? +tp.open[ticker] : null, oc = tp.close && +tp.close[ticker] > 0 ? +tp.close[ticker] : null;
+    const points = [];
+    if (oo) points.push({ t: etInstant(tapeDate, 570), v: oo, _open: true });
+    points.push(...ticks.filter(p => !oo || p.t > etInstant(tapeDate, 570)));
+    if (oc) points.push({ t: etInstant(tapeDate, closeMin), v: oc, _close: true });
+    if (!points.length) return null;
+    return { points, date: tapeDate, prevClose: prev[prev.length - 1].v, open: oo, close: oc, closeMin };
   }
+
   // ---------------- today's 5-minute bars (z131) ----------------
   // data/bars/<date>/<TICKER>.json in the ticker's book (pipeline/fetch_intraday_bars.py, one ~10 KB
   // file per ticker): [[t, o, h, l, c, v]], t = bar start (epoch s); pre-market 04:00-09:30 ET and
@@ -654,6 +682,14 @@
              ext: (latest.ext && latest.ext[t]) || null };
   }
   const _etFmt = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false });
+  // z134: Eastern-time helpers - DST-correct via the browser's tz database, never a fixed UTC offset.
+  // etInstant('2026-10-19', 570) = 09:30 ET that day as a UTC ISO time (13:30Z in EDT, 14:30Z in EST).
+  function etInstant(ds, minET) {
+    const noon = Date.parse(ds + 'T12:00:00Z'), off = etMin(noon) - 720;         // ET minus UTC, minutes
+    return new Date(Date.parse(ds + 'T00:00:00Z') + (minET - off) * 60000).toISOString().replace('.000Z', 'Z');
+  }
+  // a tape snapshot inside the regular session: its ET bucket (b) when present, else its time in ET
+  const regMinute = (s, closeMin) => { const m = s.b != null ? +s.b : etMin(Date.parse(s.t)); return m >= 570 && m < (closeMin || 960); };
   const etMin = ms => { const [h, m] = _etFmt.format(new Date(ms)).split(':').map(Number); return (h % 24) * 60 + m; };
   const sessionOf = ms => { const m = etMin(ms); return m < 570 ? 'pre' : m < 960 ? 'reg' : 'post'; };
   const SESSION_NAME = { pre: 'pre-market', reg: 'regular session', post: 'after hours' };
@@ -775,7 +811,7 @@
         if (!bd) {
           if (st.intraday === undefined) st.intraday = cfg.ticker ? await seriesIntraday(cfg.ticker, daily) : null;
           pts = st.intraday ? st.intraday.points : [];
-          label = st.intraday ? `${st.intraday.date} · regular session (15-min tape)` : 'no intraday data for the latest session';
+          label = st.intraday ? `${st.intraday.date} · regular session, 09:30–${st.intraday.closeMin === 780 ? '13:00' : '16:00'} ET (15-min tape)` : 'no intraday data for the latest session';
         }
       } else {
         pts = windowed(daily, span(st.range));
@@ -807,9 +843,14 @@
           onScrub: b => setHeader(b.c, base, `${etClock(b.t)} · ${SESSION_NAME[sessionOf(b.t)]} · O ${fmtV(b.o)} H ${fmtV(b.h)} L ${fmtV(b.l)} C ${fmtV(b.c)}${b.v ? ' · vol ' + b.v.toLocaleString() : ''}`), onReset: rest });
         rest();
       } else {
-        const resetHeader = () => (pts.length ? setHeader(pts[pts.length - 1].v, pts[0].v, (pts[pts.length - 1]._live ? `${pts[pts.length - 1].t} · ${pts[pts.length - 1]._live} · ` : '') + label + ' · scrub the chart') : null);
-        drawStockChart(host.querySelector('.vc-chart'), pts, { label: cfg.title || cfg.ticker, empty: label, axisFmt: cfg.axisFmt, isUp: cfg.upIsBad ? ((p, f) => p.v <= f.v) : undefined,
-          onScrub: p => setHeader(p.v, pts[0].v, (p._live ? `${p.t} · ${p._live}` : whenLabel(p, ivl, st.range === '1D'))), onReset: resetHeader });
+        // z134: on 1D the line starts at the official open but the change is from the previous close (dotted)
+        const pc1d = st.range === '1D' && st.intraday && st.intraday.prevClose > 0 ? (cfg.tx ? cfg.tx(st.intraday.prevClose) : st.intraday.prevClose) : null;
+        const baseV = () => pc1d || (pts[0] && pts[0].v);
+        const offNote = st.range === '1D' && st.intraday ? [st.intraday.open ? `open ${fmtV(cfg.tx ? cfg.tx(st.intraday.open) : st.intraday.open)}` : '', st.intraday.close ? `close ${fmtV(cfg.tx ? cfg.tx(st.intraday.close) : st.intraday.close)}` : ''].filter(Boolean).join(' · ') : '';
+        const resetHeader = () => (pts.length ? setHeader(pts[pts.length - 1].v, baseV(), (pts[pts.length - 1]._live ? `${pts[pts.length - 1].t} · ${pts[pts.length - 1]._live} · ` : '') + label + (offNote ? ` · official ${offNote} (Yahoo)` : '') + ' · scrub the chart') : null);
+        drawStockChart(host.querySelector('.vc-chart'), pts, Object.assign({ label: cfg.title || cfg.ticker, empty: label, axisFmt: cfg.axisFmt, isUp: cfg.upIsBad ? ((p, f) => p.v <= f.v) : undefined,
+          onScrub: p => setHeader(p.v, baseV(), (p._live ? `${p.t} · ${p._live}` : whenLabel(p, ivl, st.range === '1D'))), onReset: resetHeader },
+          pc1d ? { isUp: p => (cfg.upIsBad ? p.v <= pc1d : p.v >= pc1d), baseline: pc1d, baselineLabel: 'previous close' } : {}));
         resetHeader();
       }
       host.querySelectorAll('[data-vcr]').forEach(b => b.onclick = () => { st.range = b.dataset.vcr; draw(); });
