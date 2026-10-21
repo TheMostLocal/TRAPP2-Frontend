@@ -53,13 +53,18 @@
     _daily[t] = [];
     return _daily[t];
   }
+  // z135: times are 24-hour Eastern ("0930", "1600"), from the tz database (EDT / EST automatic)
+  const _hhmm = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false });
+  const hhmmET = ms => { const [h, m] = _hhmm.format(new Date(ms)).split(':'); return String(+h % 24).padStart(2, '0') + m; };
   // z134: the ET calendar date `back` days ago (tape files are named by it; the UTC date runs a day
   // ahead from 20:00 ET in summer / 19:00 ET in winter)
   const etDay = back => new Date(Date.now() - back * 864e5).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const _tapeAt = {};
   async function fetchTapeDay(book, date) {
     const k = book + '|' + date;
-    if (k in _tape) return _tape[k];
-    try { _tape[k] = await getJSON(`${raw()}/${book}/main/data/intraday/${date}.json`); } catch (e) { _tape[k] = null; }
+    if (k in _tape && !(date === etDay(0) && Date.now() - (_tapeAt[k] || 0) > 55000)) return _tape[k];   // z135: today's tape stays fresh
+    _tapeAt[k] = Date.now();
+    try { _tape[k] = await getJSON(`${raw()}/${book}/main/data/intraday/${date}.json${date === etDay(0) ? '?_=' + Math.floor(Date.now() / 60000) : ''}`); } catch (e) { _tape[k] = null; }
     return _tape[k];
   }
 
@@ -145,6 +150,26 @@
     for (const m of ms) { const d = docs[_book[m.ticker]] || {}; if (d.open && +d.open[m.ticker] > 0) offOpen[m.ticker] = +d.open[m.ticker]; if (d.close && +d.close[m.ticker] > 0) offClose[m.ticker] = +d.close[m.ticker]; }
     const level = px => { let sum = 0, n = 0; for (const m of ms) { const pc = prevClose[m.ticker], p = px[m.ticker]; if (pc && p) { sum += m.dir * (p / pc - 1); n++; } } return n ? +(L0 * (1 + sum / n)).toFixed(4) : null; };
     const half = Math.ceil(ms.length / 2), t930 = etInstant(tapeDate, 570);
+    // z135: the members' 5-minute bars when (nearly) all have them - 0930 official opens → every 5-min close →
+    // 1600 official closes; otherwise the 15-min tape below
+    const barsBy = {};
+    await Promise.all(ms.map(async m => { try { const bd = await fetchBars(m.ticker); if (bd && bd.date === tapeDate && bd.bars.some(b => sessionOf(b.t) === 'reg')) barsBy[m.ticker] = bd; } catch (e) {} }));
+    if (Object.keys(barsBy).length >= Math.ceil(ms.length * 0.8)) {
+      const px = {}, ends = new Set(), out = [];
+      for (const m of ms) { const bd = barsBy[m.ticker]; const o = bd && bd.oo > 0 ? bd.oo : offOpen[m.ticker]; if (o) px[m.ticker] = o; }
+      if (Object.keys(px).length >= half) out.push({ t: t930, v: level(px), _open: true });
+      const reg = {};
+      for (const [T, bd] of Object.entries(barsBy)) { reg[T] = bd.bars.filter(b => sessionOf(b.t) === 'reg'); reg[T].forEach(b => ends.add(b.t + 300000)); }
+      const ptr = {};
+      for (const t of [...ends].sort((a, z) => a - z)) {
+        for (const T of Object.keys(reg)) { let k = ptr[T] || 0; while (k < reg[T].length && reg[T][k].t + 300000 <= t) { px[T] = reg[T][k].c; k++; } ptr[T] = k; }
+        const v = level(px);
+        if (v != null) out.push({ t: new Date(t).toISOString().replace('.000Z', 'Z'), v });
+      }
+      const lastPt = out[out.length - 1];
+      if (lastPt && etMin(Date.parse(lastPt.t)) >= closeMin && Object.values(barsBy).every(bd => bd.oc > 0)) lastPt._close = true;
+      if (out.length >= 2) return { points: out, date: tapeDate, base: L0, prevClose: L0, source: '5-min bars' };
+    }
     const last = Object.assign({}, offOpen);
     const opened = Object.keys(offOpen).length >= half;
     if (opened) series.push({ t: t930, v: level(offOpen), _open: true });
@@ -184,8 +209,8 @@
   function whenLabel(p, ivl, intraday) {
     if (!p) return '';
     if (p._base) return intraday ? 'previous close' : 'start of range';
-    if (p._open || p._close) return (p._open ? 'official open' : 'official close') + ' (Yahoo) · ' + new Date(p.t).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }) + ' ET';   // z134
-    if (intraday) return new Date(p.t).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    if (p._open || p._close) return (p._open ? 'official open' : 'official close') + ' (Yahoo) · ' + hhmmET(Date.parse(p.t)) + ' ET';   // z134 / z135: 24-hour ET
+    if (intraday) return new Date(p.t).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric' }) + ' · ' + hhmmET(Date.parse(p.t)) + ' ET';   // z135
     const d = new Date(p.t + 'T12:00:00Z'), f = o => d.toLocaleDateString(undefined, Object.assign({ timeZone: 'UTC' }, o));
     if (ivl === 'W' && p._k) return 'week ending ' + f({ weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
     if (ivl === 'M' && p._k) return f({ month: 'long', year: 'numeric' }) + ' (to ' + f({ month: 'short', day: 'numeric' }) + ')';
@@ -238,7 +263,7 @@
       return `<line x1="0" x2="${W - padR}" y1="${y}" y2="${y}" stroke="var(--rule,#2d2d33)" stroke-width="0.6" vector-effect="non-scaling-stroke"/>` +
              `<text x="${W - padR + 6}" y="${y + 3.5}" font-size="10" fill="var(--ink-faint,#6e6a5f)" font-family="var(--mono,monospace)">${opts.axisFmt ? esc(opts.axisFmt(v)) : opts.money === false ? (Math.abs(v) >= 100 ? Math.round(v).toLocaleString() : v.toFixed(2)) : fmtMoney(v)}</text>`; }).join('');
     const intraday = String(points[0].t).includes('T');
-    const lab = t => intraday ? new Date(t).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+    const lab = t => intraday ? hhmmET(Date.parse(t))                                         // z135: 24-hour ET
                               : new Date(t + 'T12:00:00Z').toLocaleDateString(undefined, points.length > 300 ? { year: '2-digit', month: 'short' } : { month: 'short', day: 'numeric' });
     const xi = [...new Set([0, Math.floor((points.length - 1) / 2), points.length - 1])];
     const xt = xi.map((i, k) => ({ i, k: i === 0 ? 0 : i === points.length - 1 ? 2 : 1 })).map(({ i, k }) =>
@@ -301,7 +326,7 @@
     if (GG.range === '1D') {
       if (GG.intraday === undefined) GG.intraday = await indexIntraday(GG.daily);
       pts = GG.intraday ? GG.intraday.points : [];
-      label = GG.intraday ? `${GG.intraday.date} · intraday (15-min tape)` : 'no intraday tape for the latest session';
+      label = GG.intraday ? `${GG.intraday.date} · 0930–1600 ET · ${GG.intraday.source || '15-min tape'}` : 'no intraday data for the latest session';
     } else {
       const r = RANGES.find(x => x[0] === GG.range)[1];
       pts = windowed(all, r);
@@ -327,6 +352,8 @@
     resetHeader();
     host.querySelectorAll('[data-vcr]').forEach(b => b.onclick = () => { GG.range = b.dataset.vcr; render(); });
     host.querySelectorAll('[data-vci]').forEach(b => b.onclick = () => { GG.interval = b.dataset.vci; render(); });
+    clearTimeout(GG.timer);                                    // z135: 1D re-reads every minute while on screen
+    if (GG.range === '1D') GG.timer = setTimeout(() => { if (!host.isConnected || GG.range !== '1D') return; const m = etMin(Date.now()); if (document.visibilityState === 'visible' && m >= 240 && m <= 1205) GG.intraday = undefined; render(); }, 60000);
   }
 
   // ---------------- mini charts (Global Trade logistics cards) ----------------
@@ -662,7 +689,7 @@
     const b = _book[t];
     if (!b) return null;
     const now = Date.now(), v = Math.floor(now / 60000);
-    if (!_barsLatest[b] || now - _barsLatest[b].at > 120000) {
+    if (!_barsLatest[b] || now - _barsLatest[b].at > 55000) {
       let latest = null;
       try { latest = await getJSON(`${raw()}/${b}/main/data/bars/latest.json?_=${v}`); } catch (e) {}
       _barsLatest[b] = { at: now, latest };
@@ -670,7 +697,7 @@
     const latest = _barsLatest[b].latest;
     if (!latest || !latest.date || (Array.isArray(latest.tickers) && !latest.tickers.includes(t))) return null;
     const key = `${b}|${latest.date}|${t}`;
-    if (!_barsT[key] || now - _barsT[key].at > 120000) {
+    if (!_barsT[key] || now - _barsT[key].at > 55000) {
       let rec = null;
       try { rec = await getJSON(`${raw()}/${b}/main/data/bars/${latest.date}/${encodeURIComponent(t)}.json?_=${v}`); } catch (e) {}
       _barsT[key] = { at: now, rec };
@@ -679,7 +706,22 @@
     if (!rec || !Array.isArray(rec.b) || rec.b.length < 2) return null;
     return { date: rec.date || latest.date, interval: 5, updatedAt: rec.updatedAt || null, prevClose: rec.pc != null && +rec.pc > 0 ? +rec.pc : null,
              bars: rec.b.map(x => ({ t: x[0] * 1000, o: +x[1], h: +x[2], l: +x[3], c: +x[4], v: +x[5] || 0 })),
+             oo: rec.oo != null && +rec.oo > 0 ? +rec.oo : null, oc: rec.oc != null && +rec.oc > 0 ? +rec.oc : null,   // z134 / z135
              ext: (latest.ext && latest.ext[t]) || null };
+  }
+  // z135: the day's LINE from the 5-minute bars - the official open at 0930 ET, then each regular bar's close
+  // at the bar's END (the 0930 bar's close is the price at 0935), the last ending 1600 at the official close.
+  // Pre-market and after hours stay off the line (the header quotes them).
+  function barsLine(bd) {
+    const reg = (bd.bars || []).filter(b => sessionOf(b.t) === 'reg');
+    if (!reg.length) return [];
+    const pts = [];
+    const oo = bd.oo > 0 ? bd.oo : (etMin(reg[0].t) === 570 ? reg[0].o : null);
+    if (oo > 0) pts.push({ t: etInstant(bd.date, 570), v: oo, _open: true });
+    for (const b of reg) pts.push({ t: new Date(b.t + 300000).toISOString().replace('.000Z', 'Z'), v: b.c });
+    const last = pts[pts.length - 1];
+    if (bd.oc > 0 && Math.abs(last.v - bd.oc) < 1e-9 && etMin(Date.parse(last.t)) >= 960) last._close = true;
+    return pts;
   }
   const _etFmt = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false });
   // z134: Eastern-time helpers - DST-correct via the browser's tz database, never a fixed UTC offset.
@@ -693,7 +735,7 @@
   const etMin = ms => { const [h, m] = _etFmt.format(new Date(ms)).split(':').map(Number); return (h % 24) * 60 + m; };
   const sessionOf = ms => { const m = etMin(ms); return m < 570 ? 'pre' : m < 960 ? 'reg' : 'post'; };
   const SESSION_NAME = { pre: 'pre-market', reg: 'regular session', post: 'after hours' };
-  const etClock = ms => new Date(ms).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }) + ' ET';
+  const etClock = ms => hhmmET(ms) + ' ET';                                                    // z135: 24-hour ET
   // A US stock / ETF trades 04:00-20:00 ET; indices (^), FX (=X), futures (=F), crypto (-USD) and foreign
   // listings keep their own clocks, so they get no pre / after-hours bands.
   const usExtended = t => !/^\^|=X$|=F$|-USD$|\.[A-Z]{1,3}$/.test(String(t || '').toUpperCase());
@@ -739,7 +781,7 @@
     }).join('');
     const ticks = (opts.us ? (ext ? [240, 570, 720, 960, 1200] : [570, 720, 840, 960]).map(m => day0 + m * 60000)
                            : [first, (first + t1) / 2, t1]).map((t, k, arr) =>
-      `<text x="${X(t).toFixed(1)}" y="${H - 4}" font-size="10" fill="var(--ink-faint,#6e6a5f)" text-anchor="${k === 0 ? 'start' : k === arr.length - 1 ? 'end' : 'middle'}" font-family="var(--mono,monospace)">${esc(new Date(t).toLocaleTimeString('en-US', { timeZone: opts.us ? 'America/New_York' : undefined, hour: 'numeric', minute: '2-digit' }).replace(':00', ''))}</text>`).join('');
+      `<text x="${X(t).toFixed(1)}" y="${H - 4}" font-size="10" fill="var(--ink-faint,#6e6a5f)" text-anchor="${k === 0 ? 'start' : k === arr.length - 1 ? 'end' : 'middle'}" font-family="var(--mono,monospace)">${esc(hhmmET(t))}</text>`).join('');
     host.innerHTML = `<div style="position:relative">
       <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="max-width:100%;height:auto;display:block;overflow:visible" role="img" aria-label="${esc(opts.label || 'intraday candles')}">
         ${bands}${grid}${pc}
@@ -806,12 +848,19 @@
           st.barsAt = Date.now();
         }
         bd = st.bars || null;
-        if (bd && cfg.tx) bd = Object.assign({}, bd, { prevClose: bd.prevClose > 0 ? cfg.tx(bd.prevClose) : null,
+        if (bd && cfg.tx) bd = Object.assign({}, bd, { prevClose: bd.prevClose > 0 ? cfg.tx(bd.prevClose) : null, oo: bd.oo > 0 ? cfg.tx(bd.oo) : null, oc: bd.oc > 0 ? cfg.tx(bd.oc) : null,
           bars: bd.bars.map(b => { const o = cfg.tx(b.o), c = cfg.tx(b.c), h1 = cfg.tx(b.h), l1 = cfg.tx(b.l); return { t: b.t, o, c, h: Math.max(h1, l1), l: Math.min(h1, l1), v: b.v }; }) });
+        st.mode1d = st.mode1d || 'line';
+        if (bd && st.mode1d === 'line') {                     // z135: 0930 official open → 5-min closes → 1600 official close
+          pts = barsLine(bd);
+          st.lineBase = bd.prevClose > 0 ? bd.prevClose : null;
+          label = `${bd.date} · 0930–1600 ET · 5-min bars`;
+          if (pts.length < 2) { pts = []; label = `${bd.date} · the session opens at 0930 ET`; }
+        } else st.lineBase = null;
         if (!bd) {
           if (st.intraday === undefined) st.intraday = cfg.ticker ? await seriesIntraday(cfg.ticker, daily) : null;
           pts = st.intraday ? st.intraday.points : [];
-          label = st.intraday ? `${st.intraday.date} · regular session, 09:30–${st.intraday.closeMin === 780 ? '13:00' : '16:00'} ET (15-min tape)` : 'no intraday data for the latest session';
+          label = st.intraday ? `${st.intraday.date} · regular session, 0930–${st.intraday.closeMin === 780 ? '1300' : '1600'} ET (15-min tape)` : 'no intraday data for the latest session';
         }
       } else {
         pts = windowed(daily, span(st.range));
@@ -826,7 +875,7 @@
             <span data-vc-price style="font-family:var(--mono);font-size:30px;font-weight:800;line-height:1">—</span>
             <span data-vc-pct style="font-family:var(--mono);font-size:14px;font-weight:700">—</span></div>
           <div data-vc-sub style="font-family:var(--mono);font-size:10px;color:var(--ink-dim);margin-top:2px"></div></div>
-        <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0 4px"><span class="seg-control" style="font-size:10px">${bar}</span>${ivlBar(avail, ivl, 'data-vci')}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0 4px"><span class="seg-control" style="font-size:10px">${bar}</span>${ivlBar(avail, ivl, 'data-vci')}${bd ? `<span class="seg-control" style="font-size:10px;margin-left:6px"><button class="seg-btn ${st.mode1d === 'line' ? 'active' : ''}" data-vcm="line" style="font-size:10px">Line</button><button class="seg-btn ${st.mode1d === 'candles' ? 'active' : ''}" data-vcm="candles" style="font-size:10px">Candles</button></span>` : ''}</div>
         <div class="vc-chart"></div>${cfg.note ? `<div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:4px">${cfg.note}</div>` : ''}`;
       const pe = host.querySelector('[data-vc-price]'), ce = host.querySelector('[data-vc-pct]'), se = host.querySelector('[data-vc-sub]');
       const setHeader = (v, base, sub, html) => {
@@ -836,7 +885,7 @@
         ce.textContent = cfg.changeFmt ? cfg.changeFmt(v, base) : (ch >= 0 ? '+' : '') + ch.toFixed(2) + '%'; ce.style.color = c;   // z132: bp for spreads
         if (html) se.innerHTML = sub; else se.textContent = sub;
       };
-      if (bd) {
+      if (bd && st.mode1d === 'candles') {
         const last = bd.bars[bd.bars.length - 1], base = bd.prevClose > 0 ? bd.prevClose : bd.bars[0].o;
         const rest = () => setHeader(last.c, base, barsSummary(bd, fmtV) + ' · scrub the chart', true);
         drawCandleChart(host.querySelector('.vc-chart'), bd, { us: usExtended(cfg.ticker), axisFmt: cfg.axisFmt, label: (cfg.title || cfg.ticker) + ' today',
@@ -844,10 +893,14 @@
         rest();
       } else {
         // z134: on 1D the line starts at the official open but the change is from the previous close (dotted)
-        const pc1d = st.range === '1D' && st.intraday && st.intraday.prevClose > 0 ? (cfg.tx ? cfg.tx(st.intraday.prevClose) : st.intraday.prevClose) : null;
+        const pc1d = st.range !== '1D' ? null : st.lineBase > 0 ? st.lineBase : (st.intraday && st.intraday.prevClose > 0 ? (cfg.tx ? cfg.tx(st.intraday.prevClose) : st.intraday.prevClose) : null);
         const baseV = () => pc1d || (pts[0] && pts[0].v);
         const offNote = st.range === '1D' && st.intraday ? [st.intraday.open ? `open ${fmtV(cfg.tx ? cfg.tx(st.intraday.open) : st.intraday.open)}` : '', st.intraday.close ? `close ${fmtV(cfg.tx ? cfg.tx(st.intraday.close) : st.intraday.close)}` : ''].filter(Boolean).join(' · ') : '';
-        const resetHeader = () => (pts.length ? setHeader(pts[pts.length - 1].v, baseV(), (pts[pts.length - 1]._live ? `${pts[pts.length - 1].t} · ${pts[pts.length - 1]._live} · ` : '') + label + (offNote ? ` · official ${offNote} (Yahoo)` : '') + ' · scrub the chart') : null);
+        const resetHeader = () => {
+          if (!pts.length) return null;
+          if (bd && st.mode1d === 'line') return setHeader(pts[pts.length - 1].v, baseV(), barsSummary(bd, fmtV) + ` · <span style="color:var(--ink-faint)">${esc(label)} · scrub the chart</span>`, true);
+          return setHeader(pts[pts.length - 1].v, baseV(), (pts[pts.length - 1]._live ? `${pts[pts.length - 1].t} · ${pts[pts.length - 1]._live} · ` : '') + label + (offNote ? ` · official ${offNote} (Yahoo)` : '') + ' · scrub the chart');
+        };
         drawStockChart(host.querySelector('.vc-chart'), pts, Object.assign({ label: cfg.title || cfg.ticker, empty: label, axisFmt: cfg.axisFmt, isUp: cfg.upIsBad ? ((p, f) => p.v <= f.v) : undefined,
           onScrub: p => setHeader(p.v, baseV(), (p._live ? `${p.t} · ${p._live}` : whenLabel(p, ivl, st.range === '1D'))), onReset: resetHeader },
           pc1d ? { isUp: p => (cfg.upIsBad ? p.v <= pc1d : p.v >= pc1d), baseline: pc1d, baselineLabel: 'previous close' } : {}));
@@ -855,6 +908,16 @@
       }
       host.querySelectorAll('[data-vcr]').forEach(b => b.onclick = () => { st.range = b.dataset.vcr; draw(); });
       host.querySelectorAll('[data-vci]').forEach(b => b.onclick = () => { st.interval = b.dataset.vci; draw(); });
+      host.querySelectorAll('[data-vcm]').forEach(b => b.onclick = () => { st.mode1d = b.dataset.vcm; draw(); });
+      // z135: while 1D is on screen between 0400 and 2005 ET, re-read the bars / tape every minute -
+      // the 0930 open and the 1600 close appear as soon as the pipeline commits them (~1 minute after)
+      clearTimeout(st.timer);
+      if (st.range === '1D') st.timer = setTimeout(() => {
+        if (!host.isConnected || st.range !== '1D') return;
+        const m = etMin(Date.now());
+        if (document.visibilityState === 'visible' && m >= 240 && m <= 1205) { st.bars = undefined; st.barsAt = 0; st.intraday = undefined; }
+        draw();
+      }, 60000);
     };
     await draw();
   }
