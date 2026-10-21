@@ -18,7 +18,7 @@
   const GROUPS = [
     { id: 'book', label: 'Stock Book & Valuation', icon: '📒', tabs: [['stockbook', 'Stock Book'], ['valuation', 'Valuation'], ['options', 'Options']] },
     { id: 'macro', label: 'Macro Data', icon: '🌐', tabs: [['regime', 'Regime'], ['macro', 'Macro Quad'], ['bonds', 'Bonds & Treasuries'], ['credit', 'Credit'], ['fed', 'Fed'], ['supplychain', 'Supply Chains'], ['globaltrade', 'Global Trade']] },
-    { id: 'lab', label: 'Data & Research', icon: '🔬', tabs: [['data', 'Data'], ['research', 'Research'], ['scenarios', 'Scenarios'], ['risk', 'Risk Calculator'], ['probability', 'Probability']] },
+    { id: 'lab', label: 'Data & Research', icon: '🔬', tabs: [['data', 'Data'], ['research', 'Research'], ['earnings', 'Earnings'], ['scenarios', 'Scenarios'], ['risk', 'Risk Calculator'], ['probability', 'Probability']] },
   ];
   const LAST = 'valuatio.nav.lastTab.v1';
   const groupOf = tab => GROUPS.find(g => g.tabs.some(([t]) => t === tab)) || null;
@@ -81,6 +81,12 @@
     const w = function (tab) {
       const r = orig.apply(this, arguments);
       try { paint(tab); } catch (e) {}
+      if (tab === 'earnings') {                                 // z136: the season, bottom-up
+        const sub = document.getElementById('masthead-sub');
+        if (sub) sub.textContent = 'Earnings · the season bottom-up: reported, beating, missing, surprise by sector';
+        const host = document.getElementById('earnings-mount');
+        if (host && window.EarningsTab) window.EarningsTab.render(host);
+      }
       if (tab === 'credit') {                                   // z132: junk & corporate bonds
         const sub = document.getElementById('masthead-sub');
         if (sub) sub.textContent = 'Credit · junk & corporate bond spreads by rating, yields, TRACE breadth';
