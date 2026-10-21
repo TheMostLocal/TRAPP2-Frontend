@@ -11576,9 +11576,7 @@ function switchTab(tabName) {
     if (typeof onSupplyChainTabActive === 'function') onSupplyChainTabActive();
   }
   if (tabName === 'probability') {
-    if (state.probability && state.probability.theses.length === 0) {
-      state.probability.theses = loadTheses();
-    }
+    _thesesLive();                                               // z137: storage merged into memory once
     // Macro contributes to the probability blend (sector quadrant alignment).
     // If the user hasn't visited the Macro tab yet, state.macro is null and
     // probMacro returns null, which silently drops macro from the blend.
@@ -17606,6 +17604,48 @@ function thesisElapsedDays(thesis) {
   const ms = new Date() - new Date(thesis.createdAt);
   return Math.max(0, Math.floor(ms / 86400000));
 }
+// z137: ONE list of theses. The in-memory list used to be filled only when the Probability tab opened
+// (and only if empty), so anything that saved before that - or merged from the repo - could overwrite
+// or miss what was stored. _thesesLive() merges storage into memory once; every writer goes through it.
+const PROB_DELETED = 'valuatio.probability.deleted.v1';     // id -> deletedAt (travels in XTRAPP)
+function loadThesisTombstones() { try { return JSON.parse(localStorage.getItem(PROB_DELETED) || '{}') || {}; } catch { return {}; } }
+function _thesisDeleted(id) { return !!(id && loadThesisTombstones()[id]); }
+function _thesisTombstone(ids) {
+  const m = loadThesisTombstones(), at = new Date().toISOString();
+  for (const id of [].concat(ids || [])) if (id) m[id] = m[id] || at;
+  try { localStorage.setItem(PROB_DELETED, JSON.stringify(m)); } catch {}
+  _xtrappSoon('thesis-delete');
+}
+function _thesesLive() {
+  if (!state.probability) state.probability = { theses: [] };
+  if (!state.probability._loaded) {
+    const byId = new Map();
+    for (const t of loadTheses()) if (t && t.id) byId.set(t.id, t);
+    for (const t of state.probability.theses || []) if (t && t.id) byId.set(t.id, t);
+    const dead = loadThesisTombstones();
+    state.probability.theses = [...byId.values()].filter(t => !dead[t.id]);
+    state.probability._loaded = true;
+  }
+  return state.probability.theses;
+}
+// merge another copy (XTRAPP / repo) into the live list: newest edit wins per id, deletions win
+function mergeTheses(incoming, tombstones) {
+  const live = _thesesLive(), dead = Object.assign(loadThesisTombstones(), tombstones || {});
+  try { localStorage.setItem(PROB_DELETED, JSON.stringify(dead)); } catch {}
+  const stamp = t => Date.parse((t && (t.reviewed && t.reviewed.at)) || '') || Date.parse(((t && t.snapshots) || []).slice(-1)[0]?.at || '') || Date.parse((t && t.createdAt) || '') || 0;
+  const byId = new Map(live.filter(t => !dead[t.id]).map(t => [t.id, t]));
+  let added = 0;
+  for (const t of incoming || []) {
+    if (!t || !t.id || dead[t.id]) continue;
+    const cur = byId.get(t.id);
+    if (!cur) { byId.set(t.id, t); added++; }
+    else if (stamp(t) > stamp(cur) || ((t.snapshots || []).length > (cur.snapshots || []).length && stamp(t) >= stamp(cur))) byId.set(t.id, t);
+  }
+  state.probability.theses = [...byId.values()];
+  saveTheses(state.probability.theses);
+  return added;
+}
+if (typeof window !== 'undefined') { window._thesesLive = _thesesLive; window.mergeTheses = mergeTheses; }
 function saveTheses(arr) {
   localStorage.setItem(PROB_STORAGE, JSON.stringify(arr));
   // Mirror probability theses to the analytics_kv table immediately (if analytics
@@ -18501,6 +18541,7 @@ async function renderProbabilityTab() {
         } else if (act === 'delete') {
           if (!await appConfirm(`Permanently delete archived thesis for ${thesis.ticker}? This cannot be undone.`, { danger: true })) return;
           state.probability.theses = state.probability.theses.filter(t => t.id !== thesis.id);
+          _thesisTombstone(thesis.id);
           saveTheses(state.probability.theses);
           renderProbabilityTab();
         }
@@ -19037,6 +19078,7 @@ async function wireThesisCard(thesis) {
       if (act === 'delete') {
         if (!await appConfirm('Delete this thesis?')) return;
         state.probability.theses = state.probability.theses.filter(t => t.id !== thesis.id);
+        _thesisTombstone(thesis.id);
         saveTheses(state.probability.theses);
         renderProbabilityTab();
       } else if (act === 'duplicate') {
@@ -19287,6 +19329,7 @@ document.getElementById('prob-new-btn').addEventListener('click', openThesisModa
 document.getElementById('prob-recalc-btn').addEventListener('click', renderProbabilityTab);
 document.getElementById('prob-clear-btn').addEventListener('click', async () => {
   if (!await appConfirm('Delete all theses?', { danger: true })) return;
+  _thesisTombstone(_thesesLive().map(t => t.id));
   state.probability.theses = [];
   saveTheses([]);
   renderProbabilityTab();
@@ -19365,7 +19408,7 @@ document.getElementById('prob-import-parse')?.addEventListener('click', async ()
   document.getElementById('prob-import-add')?.addEventListener('click', () => {
     const dir = document.getElementById('prob-import-dir')?.value;
     if (dir) th.direction = dir;
-    state.probability.theses.push(th);
+    _thesesLive().push(th);
     saveTheses(state.probability.theses);
     // Feed the human-in-the-loop: if the brain's sentiment read was low
     // confidence OR multiple tickers were detected, queue this thesis for
@@ -19385,7 +19428,7 @@ document.getElementById('prob-import-parse')?.addEventListener('click', async ()
   document.getElementById('prob-import-review')?.addEventListener('click', () => {
     const dir = document.getElementById('prob-import-dir')?.value;
     if (dir) th.direction = dir;
-    state.probability.theses.push(th);
+    _thesesLive().push(th);
     saveTheses(state.probability.theses);
     if (typeof queueThesisForReview === 'function') queueThesisForReview(th, parsed);
     _probImportPending = null;
@@ -19415,7 +19458,7 @@ document.getElementById('prob-import-file')?.addEventListener('change', async (e
         const parsed = await parsePost(`${r.ticker} to ${tgt}`, { author: 'csv-import' });
         const conv = thesisFromParsedPost(parsed);
         if (conv.ok) {
-          state.probability.theses.push(conv.thesis);
+          _thesesLive().push(conv.thesis);
           // Bulk CSV imports are unconfirmed — queue each for ticker/direction review.
           if (typeof queueThesisForReview === 'function') queueThesisForReview(conv.thesis, parsed);
           added++;
@@ -25734,8 +25777,10 @@ function applyProbabilityImport(parsed) {
   const byKey = new Map();
   for (const t of local) byKey.set(keyOf(t), t);
   for (const t of incomingTheses) byKey.set(keyOf(t), t);   // incoming wins on conflict
-  const merged = Array.from(byKey.values());
+  const dead = loadThesisTombstones();
+  const merged = Array.from(byKey.values()).filter(t => !dead[t.id]);
   if (typeof saveTheses === 'function') saveTheses(merged);
+  if (state.probability) { state.probability.theses = merged; state.probability._loaded = true; }   // z137: memory follows storage
   return merged.length;
 }
 if (typeof window !== 'undefined') window.applyProbabilityImport = applyProbabilityImport;
@@ -35112,6 +35157,7 @@ function queueThesisForReview(thesis, parsed) {
     direction: thesis.direction,
     targetDate: thesis.targetDate,
     sourceText: thesis.sourceText || (parsed && parsed.text) || '',
+    thesis: JSON.parse(JSON.stringify(thesis)),                  // z137: approving can always put it (back) in Probability
     allTickers: (parsed && parsed.tickers ? parsed.tickers.map(t => t.ticker) : [thesis.ticker]),
     brainSentiment: parsed?.sentiment?.label || null,
     confidence: parsed?.sentiment?.confidence ?? null,
@@ -42313,10 +42359,35 @@ function postsForTicker(ticker) {
 // ============================================================
 const REVIEW_QUEUE_KEY = 'valuatio.reviewQueue.v1';
 
-function loadReviewQueue() {
-  try { return JSON.parse(localStorage.getItem(REVIEW_QUEUE_KEY) || '[]'); } catch { return []; }
+// z137: an item, once decided (correct / fix / flip / delete / approve / skip), is DONE everywhere. Its id
+// is remembered (REVIEW_RESOLVED_KEY: id -> resolvedAt) and travels in XTRAPP, so an older copy of the
+// queue - this device's next pull, another device, a stale XTRAPP file - can never bring it back.
+const REVIEW_RESOLVED_KEY = 'valuatio.reviewResolved.v1';
+function loadReviewResolved() { try { return JSON.parse(localStorage.getItem(REVIEW_RESOLVED_KEY) || '{}') || {}; } catch { return {}; } }
+function saveReviewResolved(m) {
+  try {
+    const cut = Date.now() - 120 * 864e5, out = {};                 // keep 120 days of decisions
+    for (const [k, v] of Object.entries(m || {})) if (Date.parse(v) >= cut) out[k] = v;
+    localStorage.setItem(REVIEW_RESOLVED_KEY, JSON.stringify(out));
+  } catch {}
 }
-function saveReviewQueue(q) { try { localStorage.setItem(REVIEW_QUEUE_KEY, JSON.stringify(q)); } catch {} }
+function _reviewQueueRaw() { try { return JSON.parse(localStorage.getItem(REVIEW_QUEUE_KEY) || '[]'); } catch { return []; } }
+function _xtrappSoon(why) {                                        // decisions sync now, not in 15 minutes
+  try { if (typeof _xtSetDirty === 'function') _xtSetDirty(true); } catch {}
+  try { clearTimeout(window.__xtSoon); window.__xtSoon = setTimeout(() => { if (typeof _xtrappAutoPush === 'function') _xtrappAutoPush(why); }, 3000); } catch {}
+}
+function loadReviewQueue() {
+  const res = loadReviewResolved();
+  return _reviewQueueRaw().filter(x => x && !res[x.id]);
+}
+function saveReviewQueue(q) {
+  try {
+    // z137: whatever left the queue was decided - tombstone it (every resolve path ends here)
+    const keep = new Set((q || []).map(x => x.id)), gone = _reviewQueueRaw().filter(x => x && !keep.has(x.id)).map(x => x.id);
+    if (gone.length) { const m = loadReviewResolved(), at = new Date().toISOString(); for (const id of gone) m[id] = m[id] || at; saveReviewResolved(m); _xtrappSoon('review'); }
+    localStorage.setItem(REVIEW_QUEUE_KEY, JSON.stringify(q || []));
+  } catch {}
+}
 
 // Queue a post for human review when the brain is unsure (low confidence or
 // ambiguous ticker). Called from the Calls tab when parse confidence is low.
@@ -42766,7 +42837,19 @@ if (typeof window !== 'undefined') window.lexiconAddFromInputs = lexiconAddFromI
 function _findThesisForReview(id) {
   const item = loadReviewQueue().find(x => x.id === id);
   if (!item) return { item: null, thesis: null };
-  const thesis = (state.probability?.theses || []).find(t => t.id === item.thesisId) || null;
+  const live = _thesesLive();
+  let thesis = live.find(t => t.id === item.thesisId) || null;
+  // z137: the thesis may live only on another device (the review item came via XTRAPP) or have been lost
+  // locally - deciding on it re-creates it from the copy carried in the review item (or its fields)
+  if (!thesis && !_thesisDeleted(item.thesisId)) {
+    const base = item.thesis || {};
+    const days = item.targetDate ? Math.max(1, Math.ceil((new Date(item.targetDate) - Date.now()) / 864e5)) : 90;
+    thesis = Object.assign({ id: item.thesisId || ('t' + Date.now()), ticker: item.ticker, strike: item.strike, direction: item.direction || 'above',
+      initialDays: days, createdAt: item.queuedAt || new Date().toISOString(), targetDate: item.targetDate || new Date(Date.now() + days * 864e5).toISOString(),
+      manualPrior: 0.5, weights: { ai: 0.35, hist: 0.18, val: 0.18, macro: 0.09, cross: 0.10, manual: 0.10 }, createdProb: null, createdPrice: null,
+      status: 'active', snapshots: [], source: 'import', sourceText: item.sourceText || '' }, base);
+    live.push(thesis);
+  }
   return { item, thesis };
 }
 function _dequeue(id) { saveReviewQueue(loadReviewQueue().filter(x => x.id !== id)); }
@@ -42775,13 +42858,18 @@ function _afterThesisFix() {
   if (typeof renderProbabilityTab === 'function') { try { renderProbabilityTab(); } catch {} }
   renderReviewHub();
 }
+// z137: "Correct" CONFIRMS the thesis - it is (re)placed in Probability, stamped as human-confirmed,
+// saved, taken off the queue for good (tombstone) and synced. It used to only drop the review item,
+// so a thesis that wasn't in this browser's Probability list stayed missing and the item came back.
 function reviewThesisConfirm(id) {
-  _dequeue(id); renderReviewHub();
-  if (typeof flashStatus === 'function') flashStatus('Thesis confirmed', 'success');
+  const { item, thesis } = _findThesisForReview(id);
+  if (thesis) thesis.reviewed = { decision: 'confirmed', at: new Date().toISOString() };
+  _dequeue(id); _afterThesisFix();
+  if (typeof flashStatus === 'function') flashStatus(thesis ? `Confirmed: ${thesis.ticker} ${thesis.direction} $${thesis.strike} by ${String(thesis.targetDate || '').slice(0, 10)} — it's in Data & Research → Probability` : 'Review item closed', 'success');
 }
 function reviewThesisFixTicker(id, ticker) {
   const { thesis } = _findThesisForReview(id);
-  if (thesis) { thesis.ticker = ticker.toUpperCase(); thesis.snapshots = []; }  // reset snapshots — different ticker
+  if (thesis) { thesis.ticker = ticker.toUpperCase(); thesis.snapshots = []; thesis.reviewed = { decision: 'ticker fixed', at: new Date().toISOString() }; }  // reset snapshots — different ticker
   _dequeue(id); _afterThesisFix();
   if (typeof flashStatus === 'function') flashStatus(`Thesis ticker → ${ticker.toUpperCase()}`, 'success');
 }
@@ -42792,13 +42880,15 @@ function reviewThesisFixTickerInput(id) {
 }
 function reviewThesisFlip(id) {
   const { thesis } = _findThesisForReview(id);
-  if (thesis) thesis.direction = thesis.direction === 'above' ? 'below' : 'above';
+  if (thesis) { thesis.direction = thesis.direction === 'above' ? 'below' : 'above'; thesis.reviewed = { decision: 'direction flipped', at: new Date().toISOString() }; }
   _dequeue(id); _afterThesisFix();
   if (typeof flashStatus === 'function') flashStatus(`Direction flipped → ${thesis?.direction}`, 'success');
 }
 function reviewThesisDelete(id) {
-  const { thesis } = _findThesisForReview(id);
-  if (thesis) state.probability.theses = state.probability.theses.filter(t => t.id !== thesis.id);
+  const item = loadReviewQueue().find(x => x.id === id);
+  const tid = item && item.thesisId;
+  _thesesLive();
+  if (tid) { state.probability.theses = state.probability.theses.filter(t => t.id !== tid); _thesisTombstone(tid); }
   _dequeue(id); _afterThesisFix();
   if (typeof flashStatus === 'function') flashStatus('Thesis deleted', 'success');
 }
@@ -42931,7 +43021,8 @@ function _buildXtrappPayload() {
     // repo (they're otherwise per-browser localStorage).
     articleFixes: (typeof loadArticleFixes === 'function') ? loadArticleFixes() : {},
     // Imported theses (calls turned into probability theses).
-    theses: (typeof state !== 'undefined' && state.probability?.theses) ? state.probability.theses : [],
+    theses: (typeof _thesesLive === 'function') ? _thesesLive() : [],          // z137: the stored list, not an unloaded empty one
+    thesesDeleted: (typeof loadThesisTombstones === 'function') ? loadThesisTombstones() : {},
     // Paper-bot state — bets are the permanent track record; weights are the
     // learned signal multipliers. Committing these makes the bot's history and
     // its learning portable across devices.
@@ -42939,6 +43030,7 @@ function _buildXtrappPayload() {
     botWeights: (typeof loadBotWeights === 'function') ? loadBotWeights() : {},
     // Open review items so the human-in-the-loop queue follows you too.
     reviewQueue: (typeof loadReviewQueue === 'function') ? loadReviewQueue() : [],
+    reviewResolved: (typeof loadReviewResolved === 'function') ? loadReviewResolved() : {},   // z137
     // Unified edit log + edits queue (timestamped manual edits: grades [3-mo TTL],
     // reclassifications, leadership, sector/function — all permanent except grades).
     // XTRAPP is the universal overwrite store; on refresh these re-sync and stale
@@ -43809,13 +43901,26 @@ async function _fetchXtrappDataInner() {
         } catch {}
       }
     } catch {}
+    // z137: decisions (tombstones) merge FIRST, so neither copy can resurrect a decided item
+    if (j.reviewResolved && typeof j.reviewResolved === 'object') {
+      try { saveReviewResolved(Object.assign({}, j.reviewResolved, loadReviewResolved())); } catch {}
+    }
     if (Array.isArray(j.reviewQueue) && typeof loadReviewQueue === 'function' && typeof saveReviewQueue === 'function') {
       try {
+        const res = loadReviewResolved();
         const localQ = loadReviewQueue();
         const ids = new Set(localQ.map(x => x.id));
-        for (const item of j.reviewQueue) if (!ids.has(item.id)) localQ.push(item);
-        saveReviewQueue(localQ);
+        for (const item of j.reviewQueue) if (item && !ids.has(item.id) && !res[item.id]) localQ.push(item);
+        localStorage.setItem(REVIEW_QUEUE_KEY, JSON.stringify(localQ.filter(x => !res[x.id])));   // a merge adds, never "resolves"
+        if (typeof updateReviewBadge === 'function') { try { updateReviewBadge(); } catch {} }
       } catch (e) { console.warn('[xtrapp] review-queue merge failed:', e.message); }
+    }
+    // z137: theses travel too - a thesis made on one device appears on the others; deletions win
+    if ((Array.isArray(j.theses) || j.thesesDeleted) && typeof mergeTheses === 'function') {
+      try {
+        const n = mergeTheses(Array.isArray(j.theses) ? j.theses : [], j.thesesDeleted || {});
+        if (n && state.tab === 'probability' && typeof renderProbabilityTab === 'function') { try { renderProbabilityTab(); } catch {} }
+      } catch (e) { console.warn('[xtrapp] theses merge failed:', e.message); }
     }
     // Unified edit log — apply timestamped edits from the repo. Newer editedAt
     // wins; non-permanent edits past their expiry are dropped (fresh data resumes).
@@ -55713,3 +55818,4 @@ function _ccyLensBar(stock) {
   };
   ['renderSummary', 'renderResults', 'renderProjection', 'renderMonteCarlo', 'renderValuationConfidenceAudit'].forEach(wrapLens);
 })();
+
