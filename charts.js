@@ -53,9 +53,10 @@
     _daily[t] = [];
     return _daily[t];
   }
-  // z135: times are 24-hour Eastern ("0930", "1600"), from the tz database (EDT / EST automatic)
-  const _hhmm = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false });
-  const hhmmET = ms => { const [h, m] = _hhmm.format(new Date(ms)).split(':'); return String(+h % 24).padStart(2, '0') + m; };
+  // z136: the app shows Eastern clock times with AM / PM ("9:30 AM", "4:00 PM"), from the tz database
+  // (EDT / EST automatic). (24-hour time is only for the conversation, not the screen.)
+  const _clk = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', hour12: true });
+  const hhmmET = ms => _clk.format(new Date(ms));
   // z134: the ET calendar date `back` days ago (tape files are named by it; the UTC date runs a day
   // ahead from 20:00 ET in summer / 19:00 ET in winter)
   const etDay = back => new Date(Date.now() - back * 864e5).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -781,7 +782,7 @@
     }).join('');
     const ticks = (opts.us ? (ext ? [240, 570, 720, 960, 1200] : [570, 720, 840, 960]).map(m => day0 + m * 60000)
                            : [first, (first + t1) / 2, t1]).map((t, k, arr) =>
-      `<text x="${X(t).toFixed(1)}" y="${H - 4}" font-size="10" fill="var(--ink-faint,#6e6a5f)" text-anchor="${k === 0 ? 'start' : k === arr.length - 1 ? 'end' : 'middle'}" font-family="var(--mono,monospace)">${esc(hhmmET(t))}</text>`).join('');
+      `<text x="${X(t).toFixed(1)}" y="${H - 4}" font-size="10" fill="var(--ink-faint,#6e6a5f)" text-anchor="${k === 0 ? 'start' : k === arr.length - 1 ? 'end' : 'middle'}" font-family="var(--mono,monospace)">${esc(hhmmET(t).replace(':00', ''))}</text>`).join('');
     host.innerHTML = `<div style="position:relative">
       <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="max-width:100%;height:auto;display:block;overflow:visible" role="img" aria-label="${esc(opts.label || 'intraday candles')}">
         ${bands}${grid}${pc}
