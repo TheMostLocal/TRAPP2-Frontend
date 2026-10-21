@@ -102,10 +102,10 @@
     const state = open ? 'open' : !ok ? label : (min < 570 ? 'pre-market' : 'after the close');
     let next = null;
     if (!open) for (let k = 0; k < 20; k++) { const s = addD(date, k); if (!dayStatus(s)[0] || (k === 0 && min >= 570)) continue; next = s; break; }
-    const hm = m => `${p2(Math.floor(m / 60))}${p2(m % 60)}`;              // z135: 24-hour ET ("1600")
+    const hm = m => `${Math.floor(m / 60) % 12 || 12}:${p2(m % 60)} ${m >= 720 ? 'PM' : 'AM'}`;   // z136: AM / PM on screen
     const day = s => new Date(s + 'T12:00:00Z').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
     const text = open ? `NYSE open · closes ${hm(close)} ET${close === 780 ? ' (half day)' : ''}`
-      : `NYSE closed (${state})${next ? ` · opens ${next === date ? 'today' : day(next)} 0930 ET` : ''}`;
+      : `NYSE closed (${state})${next ? ` · opens ${next === date ? 'today' : day(next)} 9:30 AM ET` : ''}`;
     return { open, state, label, date, min, closeMin: close, next, text };
   }
 
@@ -211,9 +211,8 @@
     const s = session(), info = j(SYNC, null), aside = j(ASIDE, []);
     const col = S.err ? 'var(--red)' : s.open ? 'var(--pos)' : 'var(--ink-faint)';
     const ago = t => { if (!t) return '—'; const m = Math.round((Date.now() - new Date(t).getTime()) / 60000); return m < 1 ? 'just now' : m < 90 ? `${m} min ago` : `${Math.round(m / 60)} h ago`; };
-    const when = t => { const d = new Date(t || 0); if (!(isFinite(d) && t)) return '—';   // z135: 24-hour ET
-      const [h, m] = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false }).format(d).split(':');
-      return d.toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric' }) + ' ' + String(+h % 24).padStart(2, '0') + m + ' ET'; };
+    const when = t => { const d = new Date(t || 0); if (!(isFinite(d) && t)) return '—';   // z136: Eastern, AM / PM
+      return d.toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' ET'; };
     const btn = (label, fn) => `<button class="btn btn-ghost" style="padding:3px 9px;font-size:10px" onclick="${fn}">${label}</button>`;
     const line = S.busy ? 'syncing with the runner…' : S.err ? `sync failed: ${esc(S.err)} — showing the last synced copy`
       : info ? `runner journal ${esc(when(info.journalAt))} · ${info.trades} trades (${info.open} open) · bankroll $${(+info.bankroll || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · synced ${ago(info.at)}`
