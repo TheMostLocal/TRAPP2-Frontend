@@ -44306,6 +44306,10 @@ function exportBotTrainingData() {
 // Merge a parsed bot-training payload into local state. Shared by the repo-URL
 // import and the drop-a-JSON-file import. APPENDS new trades by stable id; never
 // overwrites or drops an existing trade.
+// z138: fields the runner owns on every trade - horizon plan, catalyst, option contract + mark, review
+const _Z138_FIELDS = ['horizonClass', 'horizonReason', 'horizonDaysPlanned', 'minHoldDays', 'plannedExitBy', 'steered', 'explore', 'catalyst',
+  'optionStrike', 'optionExpiry', 'optionContracts', 'optionPremium', 'optionMark', 'optionMarkAt', 'optionMarkSource', 'optionDelta', 'optionIV',
+  'optionExit', 'maxLoss', 'lastReview', 'reviews', 'horizonType', 'horizonDays'];
 function _mergeBotTrainingData(data, sourceLabel) {
   if (!data || (data.schema || '').indexOf('valuatio-bot-training') !== 0) {
     console.warn('[bot] import: unexpected schema');
@@ -44334,6 +44338,8 @@ function _mergeBotTrainingData(data, sourceLabel) {
           updated++;
         }
         if (t.origin && !loc.origin) loc.origin = t.origin;
+        // z138: the runner's plan, option marks and its latest review of the position - always the runner's
+        for (const k of _Z138_FIELDS) if (t[k] !== undefined) loc[k] = t[k];
         if (t.regimeContext && !loc.regimeContext) loc.regimeContext = t.regimeContext;
         if (typeof t.regimeCallCorrect === 'boolean' && loc.regimeCallCorrect !== t.regimeCallCorrect) loc.regimeCallCorrect = t.regimeCallCorrect;
       }
@@ -44383,6 +44389,7 @@ function _mergeBotTrainingData(data, sourceLabel) {
         couldHaveWorked: t.couldHaveWorked,
         components: t.components || (t.topDrivers || []).reduce((o, d) => { o[d.signal] = d.lean; return o; }, {}),
         _trained: true, _fromRepo: true,
+        ..._Z138_FIELDS.reduce((o, k) => { if (t[k] !== undefined) o[k] = t[k]; return o; }, {}),   // z138
       });
       localById.set(key, true);
       added++;
@@ -48555,7 +48562,10 @@ function botMarkToMarket() {
       // Original time value = premium − original intrinsic (ATM entry ⇒ ≈ premium).
       const origIntrinsic = isCall ? Math.max(0, bet.entryPrice - bet.optionStrike) : Math.max(0, bet.optionStrike - bet.entryPrice);
       const origTimeValue = Math.max(0, bet.optionPremium - origIntrinsic);
-      const currentValue = intrinsic + origTimeValue * timeFrac;
+      // z138: the runner marks its options from the real chain (mid) every pass - use that mark; the
+      // intrinsic + decaying-time-value estimate only when there is none (or it's older than 3 days)
+      const runnerMark = (bet.optionMark > 0 && bet.optionMarkAt && (Date.parse(today) - Date.parse(bet.optionMarkAt)) <= 3 * 864e5) ? +bet.optionMark : null;
+      const currentValue = runnerMark != null ? runnerMark : intrinsic + origTimeValue * timeFrac;
       const contracts = bet.optionContracts || 1;
       pnl = (currentValue - bet.optionPremium) * 100 * contracts;
       // Hard floor: can never lose more than the premium paid (defined risk).
@@ -50785,16 +50795,28 @@ function renderBetsTab() {
 
   const _openRows = _acct.openPositions.map(p => {
     const upl = p.unrealized;
+    // z138: the runner's plan and its latest review of each position (horizon, day count, option, decision)
+    const _bets = (perf.bets || []).filter(b => b.status === 'open' && b.ticker === p.ticker && ((b.direction === 'short') ? -1 : 1) === (p.dir < 0 ? -1 : 1));
+    const _opt = _bets.length && _bets.every(b => b.instrument === 'option') ? _bets[0] : null;
+    const _plan = _bets.map(b => {
+      const r = b.lastReview || {}, hc = b.horizonClass || (b.horizonType === 'core' ? 'long' : b.horizonType ? 'medium' : '');
+      const what = b.instrument === 'option' ? `${String(b.optionType || '').toUpperCase()} $${b.optionStrike} ${b.optionExpiry ? new Date(b.optionExpiry + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }) + " '" + String(b.optionExpiry).slice(2, 4) : ''} ×${b.optionContracts || 1} · premium $${(+b.optionPremium || 0).toFixed(2)}${b.optionMark != null ? ' → $' + (+b.optionMark).toFixed(2) : ''}` : '';
+      const day = r.daysHeld != null ? `day ${r.daysHeld} of ~${b.horizonDaysPlanned || '—'}${b.minHoldDays && r.daysHeld < b.minHoldDays ? ` (min hold ${b.minHoldDays})` : ''}` : '';
+      const cat = b.catalyst && b.catalyst.date && b.catalyst.days != null && b.catalyst.days >= 0 ? `earnings ${b.catalyst.date}` : '';
+      const dec = r.decision ? `<span style="color:${r.decision === 'close' || r.decision === 'flag' ? 'var(--neg)' : r.decision === 'trim' ? 'var(--amber)' : 'var(--ink-dim)'};font-weight:700">${escapeHtml(String(r.decision).toUpperCase())}</span>: ${escapeHtml(r.reason || '')}${r.at ? ` <span style="color:var(--ink-faint)">(${escapeHtml(r.at)})</span>` : ''}` : '';
+      return [hc ? `<strong>${escapeHtml(hc)}</strong>` : '', day, what, cat, dec].filter(Boolean).join(' · ');
+    }).filter(Boolean);
+    const _sub = _plan.length ? `<tr><td colspan="7" style="font-family:var(--mono);font-size:9.5px;color:var(--ink-dim);padding-top:0;line-height:1.5">${_plan.join('<br>')}</td></tr>` : '';
     return `
     <tr class="bot-receipt-row" data-ticker="${p.ticker}" style="cursor:pointer" title="Open ${p.ticker}">
       <td style="font-family:var(--mono);font-weight:700"><span class="bot-ticker-link" data-ticker="${p.ticker}" style="color:var(--amber);text-decoration:underline;text-decoration-style:dotted">${p.ticker}</span></td>
       <td style="font-family:var(--mono);font-size:10px;font-weight:700;color:${p.dir < 0 ? 'var(--neg)' : 'var(--pos)'}">${p.dir < 0 ? 'SHORT' : 'LONG'}</td>
-      <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">${p.shares.toLocaleString(undefined,{maximumFractionDigits:2})}</td>
-      <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">$${p.avgCost.toFixed(2)}</td>
-      <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">${p.live != null ? '$' + p.live.toFixed(2) : '\u2014'}</td>
+      <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">${_opt ? `${_opt.optionContracts || 1} ctr` : p.shares.toLocaleString(undefined,{maximumFractionDigits:2})}</td>
+      <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">$${(_opt ? (+_opt.optionPremium || 0) : p.avgCost).toFixed(2)}</td>
+      <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">${_opt ? (_opt.optionMark != null ? '$' + (+_opt.optionMark).toFixed(2) : '\u2014') : (p.live != null ? '$' + p.live.toFixed(2) : '\u2014')}</td>
       <td style="font-family:var(--mono);font-size:11px;font-weight:700;color:${upl != null ? pnlColor(upl) : 'var(--ink-faint)'}">${upl != null ? fmtPnl(upl) : '\u2014'}</td>
       <td style="font-family:var(--mono);font-size:11px;font-weight:700;color:${p.realized > 0 ? 'var(--pos)' : p.realized < 0 ? 'var(--neg)' : 'var(--ink-faint)'}">${p.realized ? fmtPnl(p.realized) : '\u2014'}</td>
-    </tr>`;
+    </tr>${_sub}`;
   }).join('');
   const _openCard = _acct.openPositions.length ? `
     <div class="company-card">
