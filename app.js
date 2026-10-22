@@ -947,13 +947,35 @@ function loadSignalsConsensus() {
   return null;
 }
 
+// z140 audit: nothing writes TRAPP2-1/data/signals_consensus.json any more (404 on every load), while each
+// book writes its own data/signals.json. When the consensus file is missing, build it here from the books:
+// market-wide signals from the newest book, per-ticker signals merged (each ticker lives in one book).
+async function _consensusFromBooks() {
+  const books = ['TRAPP2', 'TRAPP2-1', 'TRAPP2-2', 'TRAPP2-3'];
+  const docs = (await Promise.all(books.map(async b => {
+    try { const r = await fetch(`${GH_RAW}/${b}/main/data/signals.json`, { cache: 'no-cache' }); return r.ok ? [b, await r.json()] : null; } catch { return null; }
+  }))).filter(Boolean);
+  if (!docs.length) return null;
+  docs.sort((a, z) => String(z[1].updatedAt || '').localeCompare(String(a[1].updatedAt || '')));
+  const out = { _schema: 'valuatio-signals-consensus (built in the app from the books)', updatedAt: docs[0][1].updatedAt, signals: {}, tickers: {}, _mergedFrom: [] };
+  for (const [b, d] of docs) {
+    out._mergedFrom.push(b);
+    for (const [k, v] of Object.entries(d.signals || {})) if (!(k in out.signals)) out.signals[k] = v;
+    for (const [t, v] of Object.entries(d.tickers || {})) if (!(t in out.tickers)) out.tickers[t] = v;
+  }
+  out.tickerCount = Object.keys(out.tickers).length || docs.reduce((s, [, d]) => s + (+d.tickerCount || 0), 0);   // books carry market-wide signals only
+  return out;
+}
+
 async function fetchSignalsConsensus() {
   const base = DYNAMIC_DATA_BASE;  // always TRAPP2-1 — consensus is written there
   const url = base + 'signals_consensus.json';
   try {
     const r = await fetch(url, { cache: 'no-cache' });
-    if (!r.ok) { console.warn('[signals] consensus not found at', url, '(status', r.status + ')'); return null; }
-    const json = await r.json();
+    let json = null;
+    if (r.ok) json = await r.json();
+    else json = await _consensusFromBooks();                     // z140: the books' own signals.json
+    if (!json) { console.warn('[signals] no consensus file and no book signals'); return null; }
     _signalsConsensus = json;
     try { localStorage.setItem(SIGNALS_CONSENSUS_KEY, JSON.stringify(json)); } catch {}
     const sigCount = json.signals ? Object.keys(json.signals).length : 0;
@@ -55840,4 +55862,3 @@ function _ccyLensBar(stock) {
   };
   ['renderSummary', 'renderResults', 'renderProjection', 'renderMonteCarlo', 'renderValuationConfidenceAudit'].forEach(wrapLens);
 })();
-
