@@ -6150,77 +6150,46 @@ function renderSummary(s) {
   setStat('s-eps',    epsC  ? renderConsensusCell(epsC,  fmtEps,  'EPS').html   : fmt$(s.eps));
   setStat('s-volume', volC  ? renderConsensusCell(volC,  fmtVol,  'Volume').html: '—');
 
-  // Logo resolution chain (each falls through if it 404s):
-  //   1. s.polygonLogo — Polygon.io branding URL (US tickers, includes API key auth)
-  //   2. s.fcsLogo — FCS API logo (global coverage, no auth needed)
-  //   3. s.image — explicit URL from sheet/master.csv
-  //   4. s.finnhubLogo — Finnhub's logo URL if available
-  //   5. Clearbit /<website-domain> — derived from the .website field
-  //   6. Clearbit /<ticker>.com — works for most large-cap names
-  //   7. Clearbit /<company-name-slug>.com — last resort
-  //   8. Hide the slot
+  // z145: logo sources that are alive in 2026 and come transparent and tight (Clearbit, the old last
+  // resort, was shut down). Each falls through on an error or an image too small to be a logo:
+  //   1. s.image (sheet / master - FMP's symbol image)  2. FMP symbol image by ticker  3. Parqet by ticker
+  //   4. Finnhub  5. Polygon branding (through the key proxy when this browser has no Polygon key)
+  //   6. FCS  7. the site's own icon via Google (only if ≥ 48 px - its stand-in globe is 16 px)  8. hidden
   const logoEl = document.getElementById('s-logo');
   if (logoEl) {
-    const candidates = [];
-    if (s.polygonLogo && /^https?:\/\//i.test(String(s.polygonLogo))) {
-      candidates.push(String(s.polygonLogo));
+    const T = String(s.ticker || '').toUpperCase().trim();
+    const http = v => (v && /^https?:\/\//i.test(String(v)) ? String(v) : null);
+    const viaProxy = u => (typeof _viaProxyUrl === 'function' && _viaProxyUrl(u)) || u;
+    const cands = [];
+    const add = (url, minW = 24) => { if (url && !cands.some(c => c.url === url)) cands.push({ url, minW }); };
+    add(http(s.image));
+    if (/^[A-Z0-9.\-]{1,12}$/.test(T) && !/^\^|=X$|=F$|-USD$/.test(T)) {
+      add(`https://images.financialmodelingprep.com/symbol/${encodeURIComponent(T)}.png`);
+      add(`https://financialmodelingprep.com/image-stock/${encodeURIComponent(T)}.png`);   // FMP's older image path
     }
-    if (s.fcsLogo && /^https?:\/\//i.test(String(s.fcsLogo))) {
-      candidates.push(String(s.fcsLogo));
-    }
-    if (s.image && /^https?:\/\//i.test(String(s.image))) {
-      candidates.push(String(s.image));
-    }
-    if (s.finnhubLogo && /^https?:\/\//i.test(String(s.finnhubLogo))) {
-      candidates.push(String(s.finnhubLogo));
-    }
-    if (s.website && /^https?:\/\//i.test(String(s.website))) {
-      try {
-        const host = new URL(s.website).hostname.replace(/^www\./, '');
-        if (host && host.includes('.')) candidates.push(`https://logo.clearbit.com/${host}`);
-      } catch {}
-    }
-    if (s.ticker && /^[A-Z.\-]{1,8}$/i.test(s.ticker)) {
-      const slug = s.ticker.toLowerCase().replace(/[.\-]/g, '');
-      candidates.push(`https://logo.clearbit.com/${slug}.com`);
-    }
-    // Company-name slug fallback (e.g. "Apple Inc." → apple.com)
-    if (s.name) {
-      const namePart = String(s.name)
-        .toLowerCase()
-        .replace(/\b(inc|corp|corporation|company|co|ltd|limited|plc|holdings|holding|group|sa)\b\.?/g, '')
-        .replace(/[^a-z0-9]/g, '')
-        .trim();
-      if (namePart.length >= 3 && namePart.length <= 20) {
-        const url = `https://logo.clearbit.com/${namePart}.com`;
-        if (!candidates.includes(url)) candidates.push(url);
-      }
-    }
-    console.log(`[logo] ${s.ticker} candidates:`, candidates);
-
+    if (/^[A-Z]{1,5}(-[A-Z])?$/.test(T)) add(`https://assets.parqet.com/logos/symbol/${encodeURIComponent(T)}?format=png`);
+    add(http(s.finnhubLogo));
+    if (http(s.polygonLogo)) add(viaProxy(String(s.polygonLogo)));
+    add(http(s.fcsLogo));
+    try {
+      const host = http(s.website) ? new URL(s.website).hostname.replace(/^www\./, '') : '';
+      if (host && host.includes('.')) add(`https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=128`, 48);
+    } catch {}
     let idx = 0;
     const tryNext = () => {
-      if (idx >= candidates.length) {
-        console.warn(`[logo] ${s.ticker} — all ${candidates.length} candidates failed`);
-        logoEl.style.display = 'none';
-        logoEl.onerror = null;
-        logoEl.onload = null;
-        return;
-      }
-      const url = candidates[idx];
-      logoEl.style.display = '';
-      logoEl.onerror = () => {
-        console.log(`[logo] ${s.ticker} ${url} → 404, trying next`);
-        idx++;
-        tryNext();
-      };
+      if (idx >= cands.length) { logoEl.style.display = 'none'; logoEl.onerror = logoEl.onload = null; logoEl.removeAttribute('src'); return; }
+      const c = cands[idx];
+      logoEl.onerror = () => { idx++; tryNext(); };
       logoEl.onload = () => {
-        console.log(`[logo] ${s.ticker} ✓ ${url}`);
+        // a 1×1 placeholder or a 16-px stand-in icon is not a logo - keep looking
+        if ((logoEl.naturalWidth || 0) < c.minW && (logoEl.naturalHeight || 0) < c.minW) { idx++; tryNext(); return; }
+        logoEl.style.display = '';
+        logoEl.alt = (s.name || T) + ' logo';
       };
-      logoEl.src = url;
+      logoEl.style.display = 'none';            // shown only once a real logo has loaded - never an empty frame
+      logoEl.src = c.url;
     };
-    if (candidates.length > 0) tryNext();
-    else logoEl.style.display = 'none';
+    if (cands.length) tryNext(); else logoEl.style.display = 'none';
   }
 
   // Top-right meta: website link · ticker exchange · IPO date
@@ -13961,16 +13930,13 @@ async function fnDES(ticker) {
   if (merged.phone)      ci.push(`<div><div class="l">Phone</div><div class="v" style="font-size:11px">${escapeHtml(merged.phone)}</div></div>`);
   if (merged.currency)   ci.push(`<div><div class="l">Currency</div><div class="v">${escapeHtml(merged.currency)}</div></div>`);
 
-  // Top header with logo + name + website. Falls back to Clearbit if image empty.
+  // z145: same rule as the Valuation header - no white card; the logo sits on the page at the header's height.
+  // Sources: the profile image, else FMP's symbol image by ticker (Clearbit is gone). Hidden if it fails.
+  const _tk = String(merged.ticker || merged.symbol || '').toUpperCase();
   let logoSrc = (merged.image && /^https?:\/\//.test(merged.image)) ? merged.image : null;
-  if (!logoSrc && merged.website && /^https?:\/\//.test(merged.website)) {
-    try {
-      const host = new URL(merged.website).hostname.replace(/^www\./, '');
-      if (host?.includes('.')) logoSrc = `https://logo.clearbit.com/${host}`;
-    } catch {}
-  }
+  if (!logoSrc && /^[A-Z0-9.\-]{1,12}$/.test(_tk)) logoSrc = `https://images.financialmodelingprep.com/symbol/${encodeURIComponent(_tk)}.png`;
   const logoHtml = logoSrc
-    ? `<img src="${logoSrc}" style="width:72px;height:72px;border-radius:8px;background:var(--bg-card);border:1px solid var(--rule);object-fit:contain;padding:6px;flex-shrink:0" onerror="this.style.display='none'">`
+    ? `<img src="${logoSrc}" alt="" class="summary-logo" style="height:56px" onerror="this.style.display='none'">`
     : '';
   const websiteHtml = merged.website ? (() => {
     const cleanUrl = String(merged.website).replace(/\/$/, '');
