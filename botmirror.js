@@ -214,12 +214,26 @@
     const when = t => { const d = new Date(t || 0); if (!(isFinite(d) && t)) return '—';   // z136: Eastern, AM / PM
       return d.toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' ET'; };
     const btn = (label, fn) => `<button class="btn btn-ghost" style="padding:3px 9px;font-size:10px" onclick="${fn}">${label}</button>`;
+    const $ = v => (v < 0 ? '−$' : '$') + Math.abs(+v || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    // z144: the bridge from the runner's bankroll to the Portfolio Value card, and a check that the two agree.
+    // bankroll = capital + realized = cash + open positions at COST; Portfolio Value = bankroll + unrealized.
+    let bridge = '';
+    try {
+      const bk = (typeof botBookValue === 'function') ? botBookValue() : null;
+      if (bk && info) {
+        const same = Math.abs((+info.bankroll || 0) - (+bk.bankroll || 0)) < 0.01;
+        const pv = +(bk.cash + bk.openMarketValue).toFixed(2);
+        bridge = `<span style="flex-basis:100%;color:var(--ink-dim)">bankroll ${$(info.bankroll)} = cash ${$(bk.cash)} + open positions at cost ${$(bk.openNotional)}`
+          + ` · + unrealized <span style="color:${bk.openPnl >= 0 ? 'var(--pos)' : 'var(--neg)'}">${bk.openPnl >= 0 ? '+' : '−'}${$(Math.abs(bk.openPnl)).replace(/^−/, '')}</span> at live prices`
+          + ` = <strong>portfolio value ${$(pv)}</strong> · <span style="color:${same ? 'var(--pos)' : 'var(--neg)'}">${same ? '✓ app = runner journal (to the cent)' : `⚠ app bankroll ${$(bk.bankroll)} ≠ journal ${$(info.bankroll)} — Refresh`}</span></span>`;
+      }
+    } catch (e) {}
     const line = S.busy ? 'syncing with the runner…' : S.err ? `sync failed: ${esc(S.err)} — showing the last synced copy`
-      : info ? `runner journal ${esc(when(info.journalAt))} · ${info.trades} trades (${info.open} open) · bankroll $${(+info.bankroll || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · synced ${ago(info.at)}`
+      : info ? `runner journal ${esc(when(info.journalAt))} · ${info.trades} trades (${info.open} open) · bankroll ${$(info.bankroll)} (capital + realized, positions at cost) · synced ${ago(info.at)}`
       : 'not synced yet';
     el.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;font-family:var(--mono);font-size:10.5px;padding:7px 12px;border:1px solid var(--rule);border-left:3px solid ${col};border-radius:4px;margin:8px 0;background:var(--bg-elev)">
       <span style="color:${col};font-weight:700">ONE BOOK · RUNNER</span><span style="color:var(--ink-dim)">${esc(s.text)}</span>
-      <span style="flex-basis:100%;color:var(--ink-dim)">${line}</span>
+      <span style="flex-basis:100%;color:var(--ink-dim)">${line}</span>${bridge}
       <span style="color:var(--ink-faint)">The bot is autonomous: only the GitHub runner trades, and only while the NYSE is open — new entries once per session after 10:00 ET, exits every pass. Every device shows the same journal.</span>
       <span style="margin-left:auto;display:flex;gap:6px">${btn('Refresh', "BotMirror.sync('button')")}</span></div>`;
     strip();
