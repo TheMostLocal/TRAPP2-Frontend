@@ -43206,7 +43206,7 @@ const GH_DEFAULT_BRANCH = 'main';
 const GH_DATA_TARGETS = [
   { key: 'portfolio',   label: 'Portfolio',          builder: 'buildPortfolioData',   repo: 'TRAPP2-PORT', path: 'data/portfolio_data.json',    def: true },
   { key: 'probability', label: 'Probability theses', builder: 'buildProbabilityData', repo: 'TRAPP2-PORT', path: 'data/probability_data.json',  def: true },
-  { key: 'bot',         label: 'Bot journal',        builder: 'buildBotTrainingData', repo: 'TRAPP2-BOT',  path: 'data/bot_training_data.json', def: true },
+  { key: 'bot',         label: 'Bot journal',        builder: 'buildBotTrainingData', repo: 'TRAPP2-BOT',  path: 'data/bot_training_data.json', def: false, runnerOwned: true },   // z141: the runner owns it (one book, z121)
   { key: 'xtrapp',      label: 'Social / XTRAPP',    builder: '_buildXtrappPayload',  repo: 'XTRAPP',      path: 'data/xtrapp_data.json',       def: true },
 ];
 
@@ -43280,6 +43280,13 @@ async function _ghCommit(target, obj, message) {
 async function commitTarget(key, message) {
   const t = _ghTarget(key);
   if (!t) { console.warn('[gh] unknown target', key); return false; }
+  // z141: one book, one trader (z121) - TRAPP2-BOT/data/bot_training_data.json is written ONLY by the runner.
+  // "Save to Repo" used to include it (on by default), so a desktop save could overwrite the runner's
+  // journal (trades, reviews, ledger) with this browser's copy. Never again.
+  if (key === 'bot' && /TRAPP2-BOT/i.test(t.repo || '') && /bot_training_data\.json$/.test(t.path || '')) {
+    console.warn('[gh] the bot journal belongs to the runner (TRAPP2-BOT) - not written from the app');
+    return false;
+  }
   const fn = (typeof window !== 'undefined') ? window[t.builder] : undefined;
   const builder = (typeof fn === 'function') ? fn : (typeof globalThis !== 'undefined' ? globalThis[t.builder] : null);
   if (typeof builder !== 'function') { console.warn('[gh] no builder', t.builder); return false; }
@@ -43420,9 +43427,11 @@ if (typeof window !== 'undefined') window.saveAllToReposAndSupabase = saveAllToR
 async function setGitHubToken() {
   const cur = localStorage.getItem(GH_TOKEN_KEY);
   const t = await appPrompt(
-    'Paste a FINE-GRAINED GitHub token with Contents: Read & write, scoped to your\n' +
-    VALUATIO_OWNER + ' data repos (TRAPP2-PORT, TRAPP2-BOT, TRAPP2-ANALYTICS, XTRAPP).\n' +
-    '(github.com → Settings → Developer settings → Fine-grained tokens → select those repos)\n\n' +
+    'Paste a FINE-GRAINED GitHub token (resource owner ' + VALUATIO_OWNER + ') with:\n' +
+    '  • Contents: Read and write on XTRAPP and TRAPP2-PORT (review decisions, theses, portfolio)\n' +
+    '  • Actions: Read and write on TRAPP2-OPTIONS (on-demand option chains)\n' +
+    '(github.com → Settings → Developer settings → Fine-grained tokens → select those repos)\n' +
+    'The bot journal is the runner\'s - the app never writes TRAPP2-BOT.\n\n' +
     'With this set, "Save to Repo" buttons write the JSON straight to GitHub —\n' +
     'no more download + paste. Stored in THIS browser only; never included in any export.\n\n' +
     'Leave empty + OK to REMOVE the stored token.', cur ? '••••stored••••' : '');
