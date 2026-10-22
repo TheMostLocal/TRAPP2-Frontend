@@ -257,6 +257,52 @@ const FCS_KEY_STORAGE = 'valuatio.fcs.key';
 const SUPABASE_URL_STORAGE = 'valuatio.supabase.url';
 const SUPABASE_ANON_STORAGE = 'valuatio.supabase.anon';
 const FRED_KEY_STORAGE = 'valuatio.fred.key';
+// ============================================================
+//   z142 — KEYS VIA THE PROXY. Vendor API keys live on Vercel (repo TRAPP2-PROXY), never in a
+//   browser or a public repo. When TRAPP2-1/data/app_config.json names the proxy, every call to a
+//   vendor host below that carries no real key (empty, or the 'via-proxy' marker) is sent to
+//   <proxy>?u=<url without key>; the proxy adds the key server-side. A key someone types into
+//   Settings still goes direct, so personal keys keep working.
+// ============================================================
+const KEY_VIA_PROXY = 'via-proxy';
+const KEY_PROXY_STORAGE = 'valuatio.keyProxy';
+const KEY_SEEDED_STORAGE = 'valuatio.keys.seeded';
+let _keyProxyBase = (() => { try { return localStorage.getItem(KEY_PROXY_STORAGE) || ''; } catch { return ''; } })();
+const _VENDOR_KEY_PARAM = {
+  'financialmodelingprep.com': 'apikey', 'finnhub.io': 'token', 'api.polygon.io': 'apiKey', 'www.alphavantage.co': 'apikey',
+  'api.twelvedata.com': 'apikey', 'fcsapi.com': 'access_key', 'api-v3.fcsapi.com': 'access_key', 'api-v4.fcsapi.com': 'access_key',
+  'api.stlouisfed.org': 'api_key', 'api.marketaux.com': 'api_token',
+};
+function _viaProxyUrl(url) {
+  if (!_keyProxyBase || typeof url !== 'string' || !url.startsWith('https://')) return null;
+  let u;
+  try { u = new URL(url); } catch { return null; }
+  const p = _VENDOR_KEY_PARAM[u.hostname];
+  if (!p) return null;
+  const k = u.searchParams.get(p);
+  if (k && k !== KEY_VIA_PROXY && k !== 'undefined' && k !== 'null') return null;   // a real personal key goes direct
+  u.searchParams.delete(p);
+  return _keyProxyBase + (_keyProxyBase.includes('?') ? '&' : '?') + 'u=' + encodeURIComponent(u.toString());
+}
+(function installKeyProxyFetch() {
+  if (typeof window === 'undefined' || typeof window.fetch !== 'function' || window.fetch._z142) return;
+  const raw = window.fetch.bind(window);
+  const f = function (input, init) {
+    try {
+      const url = typeof input === 'string' ? input : (input && input.url) || '';
+      const via = _viaProxyUrl(url);
+      if (via) {
+        const opts = init ? Object.assign({}, init) : {};
+        delete opts.headers;                                   // plain GET → no CORS preflight
+        return raw(via, opts);
+      }
+    } catch (e) {}
+    return raw(input, init);
+  };
+  f._z142 = true; f._raw = raw;
+  window.fetch = f;
+})();
+if (typeof window !== 'undefined') { window._viaProxyUrl = _viaProxyUrl; }
 const SHEET_URL_STORAGE = 'valuatio.sheet.url';
 const SOURCE_PREF_STORAGE = 'valuatio.source.preference';
 const GITHUB_DATA_BASE_STORAGE = 'valuatio.githubData.baseUrl';
@@ -9291,7 +9337,8 @@ function renderConnectionsPanel() {
   const btn = (txt, js) => `<button class="btn btn-ghost" style="padding:4px 10px;font-size:10px" onclick="${js}">${txt}</button>`;
   const keys = [['FMP', FMP_KEY_STORAGE], ['Finnhub', FINNHUB_KEY_STORAGE], ['Alpha Vantage', AV_KEY_STORAGE], ['Twelve Data', TWELVE_KEY_STORAGE],
                 ['Polygon', POLYGON_KEY_STORAGE], ['FCS', FCS_KEY_STORAGE], ['FRED', FRED_KEY_STORAGE]];
-  const keyList = keys.map(([n, k]) => `${has(k) ? '✓' : '✗'} ${n}`).join(' · ');
+  const keyList = keys.map(([n, k]) => `${has(k) ? '✓' : '✗'} ${n}${localStorage.getItem(k) === KEY_VIA_PROXY ? ' (proxy)' : ''}`).join(' · ') +
+    (_keyProxyBase ? ` · key proxy: ${_keyProxyBase.replace(/^https:\/\//, '').split('/')[0]}` : '');
   const nKeys = keys.filter(([, k]) => has(k)).length;
   const portOk = has('valuatio.portSupabase.url') && has('valuatio.portSupabase.anon');
   const anaOk = has('valuatio.analyticsSupabase.url') && has('valuatio.analyticsSupabase.anon');
@@ -43133,16 +43180,41 @@ if (typeof window !== 'undefined') window.fetchJsonMaybeGz = fetchJsonMaybeGz;
 // shared users get the full app even with no keys at all.
 async function loadSharedKeys() {
   try {
-    const j = await fetchJsonMaybeGz(GH_RAW + '/TRAPP2-1/main/data/app_keys.json');
-    if (!j) return 0;
     const slots = {
       finnhub: FINNHUB_KEY_STORAGE, fmp: FMP_KEY_STORAGE, alphavantage: AV_KEY_STORAGE,
       twelvedata: TWELVE_KEY_STORAGE, polygon: POLYGON_KEY_STORAGE, fcs: FCS_KEY_STORAGE,
     };
+    // z142: the key proxy first (TRAPP2-1/data/app_config.json → { "keyProxy": "https://….vercel.app/api/v" })
+    try {
+      const cfg = await fetchJsonMaybeGz(GH_RAW + '/TRAPP2-1/main/data/app_config.json');
+      const kp = cfg && typeof cfg.keyProxy === 'string' ? cfg.keyProxy.trim() : '';
+      if (kp && /^https:\/\//.test(kp)) { _keyProxyBase = kp; localStorage.setItem(KEY_PROXY_STORAGE, kp); }
+      else if (cfg && 'keyProxy' in cfg && !kp) { _keyProxyBase = ''; localStorage.removeItem(KEY_PROXY_STORAGE); }
+    } catch {}
+    const j = await fetchJsonMaybeGz(GH_RAW + '/TRAPP2-1/main/data/app_keys.json');
+    let seededMap = {};
+    try { seededMap = JSON.parse(localStorage.getItem(KEY_SEEDED_STORAGE) || '{}') || {}; } catch {}
+    if (!j) {
+      // z142: no public key file - with the proxy, every slot that is empty or still holds a key that
+      // came from the old public file becomes 'via-proxy' (a key you typed yourself is left alone)
+      if (!_keyProxyBase) return 0;
+      let n = 0;
+      for (const slot of [...Object.values(slots), FRED_KEY_STORAGE, 'valuatio.marketaux.key']) {
+        const cur = localStorage.getItem(slot);
+        if (!cur || (seededMap[slot] && cur === seededMap[slot])) { localStorage.setItem(slot, KEY_VIA_PROXY); n++; }
+      }
+      try { localStorage.removeItem(KEY_SEEDED_STORAGE); } catch {}
+      if (n) console.log(`[keys] ${n} vendor key slot(s) set to go through the key proxy (${_keyProxyBase})`);
+      return n;
+    }
     let seeded = 0;
     for (const [field, slot] of Object.entries(slots)) {
-      if (j[field] && !localStorage.getItem(slot)) { localStorage.setItem(slot, String(j[field]).trim()); seeded++; }
+      if (!j[field]) continue;
+      const v = String(j[field]).trim(), cur = localStorage.getItem(slot);
+      if (!cur) { localStorage.setItem(slot, v); seededMap[slot] = v; seeded++; }
+      else if (cur === v) seededMap[slot] = v;        // z142: already the shared key - remembered, so the proxy can take over later
     }
+    try { localStorage.setItem(KEY_SEEDED_STORAGE, JSON.stringify(seededMap)); } catch {}
     // FED_API_KEY belongs to the BACKEND pipeline (FRED), not the frontend — it
     // has no client data slot and is correctly ignored here; put it in the data
     // repo's Actions SECRETS, not app_keys.json.
