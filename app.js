@@ -43190,6 +43190,26 @@ async function loadSharedKeys() {
       const kp = cfg && typeof cfg.keyProxy === 'string' ? cfg.keyProxy.trim() : '';
       if (kp && /^https:\/\//.test(kp)) { _keyProxyBase = kp; localStorage.setItem(KEY_PROXY_STORAGE, kp); }
       else if (cfg && 'keyProxy' in cfg && !kp) { _keyProxyBase = ''; localStorage.removeItem(KEY_PROXY_STORAGE); }
+      // z143: public Supabase settings from the same file - the project URL and the ANON (publishable) key are
+      // public by design (row-level security protects the data), so every browser gets them without typing.
+      // A service-role / secret key is refused outright: it must never be in a public file.
+      const sb = cfg && cfg.supabase;
+      if (sb && typeof sb === 'object') {
+        const secretish = v => {
+          if (/^sb_secret_/i.test(v)) return true;
+          try { const p = JSON.parse(atob(String(v).split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))); return p && p.role === 'service_role'; } catch { return false; }
+        };
+        const put = (slot, v, isKey) => {
+          if (!v || typeof v !== 'string' || localStorage.getItem(slot)) return;
+          if (isKey && secretish(v.trim())) { console.error('[keys] app_config.json has a Supabase SERVICE-ROLE / secret key - ignored. Remove it from the public repo and rotate it now.'); return; }
+          localStorage.setItem(slot, v.trim());
+        };
+        for (const [k, urlSlot, anonSlot] of [['bot', SUPABASE_URL_STORAGE, SUPABASE_ANON_STORAGE],
+                                               ['portfolio', 'valuatio.portSupabase.url', 'valuatio.portSupabase.anon'],
+                                               ['analytics', 'valuatio.analyticsSupabase.url', 'valuatio.analyticsSupabase.anon']]) {
+          if (sb[k] && typeof sb[k] === 'object') { put(urlSlot, sb[k].url, false); put(anonSlot, sb[k].anon, true); }
+        }
+      }
     } catch {}
     const j = await fetchJsonMaybeGz(GH_RAW + '/TRAPP2-1/main/data/app_keys.json');
     let seededMap = {};
