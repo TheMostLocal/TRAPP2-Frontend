@@ -82,11 +82,13 @@
     const key = { cds: r => (r.cds && r.cds.bps5y != null ? r.cds.bps5y : -1), chg: r => (r.cds && r.cds.chg1m != null ? r.cds.chg1m : -1e9), bonds: r => r.bonds || 0, t: r => r.t, mat: r => r.nextMaturity || '9999' }[S.sort] || (r => r.t);
     rows.sort((a, b) => { const x = key(a), y = key(b); return typeof x === 'string' ? x.localeCompare(y) : (y - x) || a.t.localeCompare(b.t); });
     const nC = Object.values(idx.tickers).filter(v => v.cds).length, nB = Object.values(idx.tickers).filter(v => v.bonds).length;
+    const prog = idx.bondsProgress || {};                  // z146: bond lists fill in over runs - say how far along
+    const progress = prog.issuers ? ` (bond lists checked for ${prog.checked} of ${prog.issuers} companies${prog.checked < prog.issuers ? ' so far — the rest fill in with the next runs' : ''})` : '';
     const th = (k, l, al = 'right') => `<th data-cd-sort="${k}" style="text-align:${al};cursor:pointer;${S.sort === k ? 'color:var(--amber)' : ''}">${l}${S.sort === k ? ' ▾' : ''}</th>`;
     host.innerHTML = `
       <section class="company-card" style="margin:0 0 12px">
         <div style="display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center">
-          <div style="font-family:var(--mono);font-size:10px;letter-spacing:.12em;color:var(--ink-dim)">BONDS &amp; CDS · ${nB} companies with bonds · ${nC} with CDS trades</div>
+          <div style="font-family:var(--mono);font-size:10px;letter-spacing:.12em;color:var(--ink-dim)">BONDS &amp; CDS · ${nB} companies with bonds${esc(progress)} · ${nC} with CDS trades</div>
           <span class="seg-control" style="font-size:10px">${[['all', 'All'], ['cds', 'With CDS'], ['bonds', 'With bonds']].map(([k, l]) => `<button class="seg-btn ${S.filter === k ? 'active' : ''}" data-cd-f="${k}" style="font-size:10px">${l}</button>`).join('')}</span>
           <input data-cd-q placeholder="ticker or name" value="${esc(S.q)}" style="font-family:var(--mono);font-size:11px;padding:4px 6px;background:var(--bg-elev);border:1px solid var(--rule);color:var(--ink);min-width:120px">
           <div style="margin-left:auto;font-family:var(--mono);font-size:9.5px;color:var(--ink-faint)">CDS ${esc((idx.cdsAsOf || '').slice(0, 10) || '—')} · index ${esc((idx.asOf || '').slice(0, 10))}</div></div>
