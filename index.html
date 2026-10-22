@@ -567,26 +567,29 @@
     gap: 20px;
     margin-bottom: 10px;
   }
+  /* z145: the logo sits on the page itself - no white card, no border, no padding. Its height matches the
+     name + ticker block (56 px; 44 px on phones), width follows the logo's own proportions (≤ 200 px), and it
+     is centred on that block. A hairline light halo keeps dark logos (Apple, Oracle's black wordmark…)
+     readable on the dark theme without boxing them; white logos read as they are. */
   .summary-logo {
-    width: 64px;
-    height: 64px;
-    border-radius: 8px;
-    /* White background so dark logos (Apple, Nike, etc.) stay visible against dark mode.
-       In light mode, the white blends with the cream background naturally. */
-    background: #ffffff;
-    border: 1px solid var(--rule);
+    height: 56px;
+    width: auto;
+    max-width: 200px;
     object-fit: contain;
-    padding: 7px;
+    object-position: left center;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    border-radius: 0;
+    box-shadow: none;
     flex-shrink: 0;
-    /* Soft shadow gives the logo a polished card look against either theme */
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15), 0 0 0 1px rgba(255, 255, 255, 0.04);
+    align-self: center;
+    filter: drop-shadow(0 0 0.6px rgba(255, 255, 255, 0.85)) drop-shadow(0 0 3px rgba(255, 255, 255, 0.18));
   }
-  /* In light mode, swap to a subtle tinted background so the white doesn't pop too much */
   html[data-theme="light"] .summary-logo {
-    background: #ffffff;
-    box-shadow: 0 1px 4px rgba(26, 31, 46, 0.08);
-    border-color: rgba(184, 114, 28, 0.2);
+    filter: drop-shadow(0 0 0.6px rgba(26, 31, 46, 0.45));
   }
+  @media (max-width: 640px) { .summary-logo { height: 44px; max-width: 150px; } }
   .summary-header-text {
     display: flex;
     flex-direction: column;
@@ -8927,7 +8930,7 @@
       'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
   }
 </script>
-<script src="app.js?v=20260615z143"></script>
+<script src="app.js?v=20260615z145"></script>
 <!-- Patterns & Templates (TA tool + overview pattern read) - z87 WIP; standalone, loads after app.js -->
 <script src="patterns.js?v=20260615z109"></script>
 <!-- UX: tickers clickable everywhere -> Valuation (z88) -->
