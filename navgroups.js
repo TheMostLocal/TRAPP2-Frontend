@@ -18,7 +18,7 @@
   const GROUPS = [
     { id: 'book', label: 'Stock Book & Valuation', icon: '📒', tabs: [['stockbook', 'Stock Book'], ['valuation', 'Valuation'], ['options', 'Options']] },
     { id: 'macro', label: 'Macro Data', icon: '🌐', tabs: [['regime', 'Regime'], ['macro', 'Macro Quad'], ['bonds', 'Bonds & Treasuries'], ['credit', 'Credit'], ['fed', 'Fed'], ['supplychain', 'Supply Chains'], ['globaltrade', 'Global Trade']] },
-    { id: 'lab', label: 'Data & Research', icon: '🔬', tabs: [['data', 'Data'], ['research', 'Research'], ['earnings', 'Earnings'], ['creditdesk', 'Bonds & CDS'], ['scenarios', 'Scenarios'], ['risk', 'Risk Calculator'], ['probability', 'Probability']] },
+    { id: 'lab', label: 'Data & Research', icon: '🔬', tabs: [['data', 'Data'], ['research', 'Research'], ['earnings', 'Earnings'], ['creditdesk', 'Bonds & CDS'], ['headcount', 'Headcount'], ['scenarios', 'Scenarios'], ['risk', 'Risk Calculator'], ['probability', 'Probability']] },
   ];
   const LAST = 'valuatio.nav.lastTab.v1';
   const groupOf = tab => GROUPS.find(g => g.tabs.some(([t]) => t === tab)) || null;
@@ -81,6 +81,12 @@
     const w = function (tab) {
       const r = orig.apply(this, arguments);
       try { paint(tab); } catch (e) {}
+      if (tab === 'headcount') {                                // z151: employees + hiring breadth
+        const sub = document.getElementById('masthead-sub');
+        if (sub) sub.textContent = 'Headcount · who is hiring and who is cutting — the labor side of the cycle';
+        const host = document.getElementById('headcount-mount');
+        if (host && window.Headcount) window.Headcount.render(host);
+      }
       if (tab === 'creditdesk') {                               // z139: corporate bonds & single-name CDS
         const sub = document.getElementById('masthead-sub');
         if (sub) sub.textContent = 'Bonds & CDS · every company with bonds or credit default swaps — spreads, trades, maturities';
