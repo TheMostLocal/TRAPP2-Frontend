@@ -58,7 +58,7 @@
     if (sec.dataset.ticker !== tk) return;
     if (!doc || !(doc.points || []).length) { sec.style.display = 'none'; sec.innerHTML = ''; return; }
     sec.style.display = '';
-    const m = doc.metrics || {}, pts = doc.points.slice(-44), last = m.latest || pts[pts.length - 1];
+    const m = doc.metrics || {}, pts = doc.points.slice(-120), last = m.latest || pts[pts.length - 1];   // z156: the whole kept history (up to 120 reports)
     const annual = m.cadence !== 'quarterly';
     const rpe = (m.revenuePerEmployee || []).slice(-12);
     // the headline uses the same basis as its year-over-year change: the reported series at the latest
