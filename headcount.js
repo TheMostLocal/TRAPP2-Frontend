@@ -20,7 +20,7 @@
   const money = v => (v == null ? '—' : v >= 1e12 ? '$' + (v / 1e12).toFixed(2) + 'T' : v >= 1e9 ? '$' + (v / 1e9).toFixed(1) + 'B' : v >= 1e6 ? '$' + (v / 1e6).toFixed(2) + 'M' : '$' + Math.round(v / 1e3).toLocaleString('en-US') + 'K');
   const qlab = ds => { const d = new Date(ds + 'T12:00:00Z'); return `Q${Math.floor(d.getUTCMonth() / 3) + 1} '${String(d.getUTCFullYear()).slice(2)}`; };
   const niceStep = mx => { const raw = mx / 4, p = Math.pow(10, Math.floor(Math.log10(raw))); for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= raw) return m * p; return 10 * p; };
-  const SRC = { filing: 'filing', sec: 'SEC', wikidata: 'Wikidata', profile: 'quote page' };
+  const SRC = { filing: 'filing', tenk: 'annual report', sec: 'SEC', wikidata: 'Wikidata', profile: 'quote page' };
 
   function bars(points, opts = {}) {
     const W = opts.W || 640, H = opts.H || 220, L = 4, R = 44, T = 10, B = 26;
@@ -112,6 +112,7 @@
       <section class="company-card" style="margin:0 0 12px"><h4>By sector</h4><div style="overflow-x:auto"><table class="sb-table" style="width:100%;min-width:520px;font-family:var(--mono);font-size:11px"><thead><tr><th style="text-align:left">Sector</th><th style="text-align:right">Companies</th><th style="text-align:right">Cutting</th><th style="text-align:right">Growing</th><th style="text-align:right">Median YoY</th><th style="text-align:right">Aggregate</th></tr></thead><tbody>
         ${Object.entries(s.sectors || {}).filter(([, v]) => v).sort((a, b) => b[1].pctCutting - a[1].pctCutting).map(([k, v]) => `<tr><td>${esc(k)}</td><td style="text-align:right">${v.companies}</td><td style="text-align:right">${v.pctCutting}%</td><td style="text-align:right">${v.pctGrowing}%</td><td style="text-align:right">${pct(v.medianYoY)}</td><td style="text-align:right">${pct(v.aggregateYoY)}</td></tr>`).join('')}</tbody></table></div></section>
       <section class="company-card" style="margin:0 0 12px;display:flex;flex-wrap:wrap;gap:16px">${list(s.cutting, 'BIGGEST CUTS (≥ 1,000 EMPLOYEES)')}${list(s.growing, 'BIGGEST HIRING')}</section>
+      ${(s.excluded || []).length ? `<div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-bottom:4px">Left out of the read (moves beyond ±60 % — usually a merger or two sources counting differently): ${(s.excluded || []).slice(0, 12).map(r => `${esc(r.ticker)} ${r.yoyPct > 0 ? '+' : ''}${r.yoyPct}%`).join(' · ')}</div>` : ''}
       <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint)">${esc(s.note || '')} · as of ${esc(String(s.asOf || '').slice(0, 10))}</div>`;
     host.querySelectorAll('[data-hc-open]').forEach(a => a.onclick = e => { e.preventDefault(); const i = document.getElementById('ticker'); if (i) i.value = a.dataset.hcOpen; if (typeof switchTab === 'function') switchTab('valuation'); if (typeof loadValuation === 'function') loadValuation(); });
   }
