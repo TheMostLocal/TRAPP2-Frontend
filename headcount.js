@@ -80,7 +80,7 @@
         ${m.qoqPct != null ? `<div><div style="color:var(--ink-faint);font-size:9px">VS LAST QUARTER</div><div style="font-size:14px">${pct(m.qoqPct)}</div></div>` : ''}
         <div><div style="color:var(--ink-faint);font-size:9px">FROM PEAK</div><div style="font-size:14px">${pct(m.fromPeakPct)}</div><div style="font-size:9px;color:var(--ink-faint)">peak ${fmtN(m.peak && m.peak.employees)} (${esc(m.peak && m.peak.date)})</div></div></div>
       ${bars(pts, { annual, label: tk + ' employee count' })}
-      <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:2px">bars at their report dates (true time spacing) · amber = latest · grey = quote-page count between reports</div>
+      <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:2px">bars at their report dates (true time spacing) · amber = latest · grey = the quote page's count, dated at the latest fiscal-year end</div>
       <div style="margin-top:12px;font-family:var(--mono);font-size:11px"><span style="color:var(--ink-faint);font-size:9px;letter-spacing:.08em">REVENUE PER EMPLOYEE</span>
         <div style="font-size:15px;font-weight:700;margin-top:2px">${rpeNow ? money(rpeNow.rpe) : '—'}${rpeYoY != null ? ` <span style="font-size:11px;font-weight:400">${pct(rpeYoY)} vs a year earlier</span>` : ''}</div>
         <div style="font-size:9px;color:var(--ink-faint)">${rpeNow ? `trailing-12-month revenue ${money(rpeNow.revenue)} ÷ ${fmtN(rpeNow.employees)} employees${m.currency && m.currency !== 'USD' ? ' · ' + esc(m.currency) : ''}` : 'needs revenue and headcount for the same period'}</div></div>
