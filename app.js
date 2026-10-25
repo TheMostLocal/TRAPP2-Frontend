@@ -4287,9 +4287,13 @@ async function fetchAnyDataSource(url) {
           loadRegimeCanonical().catch(() => {});
         }, 200);
         console.log(`✓ History manifest registered: ${tickers.length} tickers · base=${baseUrl}`);
-        setTimeout(() => {
-          primeHistoryForTickers(tickers).catch(e => console.warn('background prime failed', e));
-        }, 100);
+        // z157: no longer every ticker. This used to download each book's full 20-year history file for
+        // EVERY ticker at startup (~336 files × ~236 KB ≈ 80 MB per book, ~300 MB across the four, re-fetched
+        // as the 500-ticker cache evicted) — a leftover from when the app ran its own bot scan; since z121
+        // the runner trades. Now: only what you look at first (holdings, open bot positions, GoodGlobe,
+        // the open valuation ticker), in idle time, and not at all on a data-saver / 2G-3G connection.
+        // Everything else loads when a view asks for it (every view already primes its own list).
+        _schedulePriority(tickers);
         return {
           headers: ['ticker'], rows: [], priceHistory: {},
           docKey: url.slice(-60), isPublished: true, isManifest: true,
@@ -4795,7 +4799,7 @@ if (typeof window !== 'undefined') { window.storageReport = storageReport; windo
 const PRICE_HIST_TTL_MS = 24 * 60 * 60 * 1000;
 // Browser localStorage is 5-10 MB. Each ticker's 5-year history is ~25-40 KB.
 // Cap to 100 most-recently-used to avoid silently busting quota.
-const PRICE_HIST_CACHE_MAX_TICKERS = 500;  // was 60 under localStorage's 5MB cap;
+const PRICE_HIST_CACHE_MAX_TICKERS = 1500;  // z157: IndexedDB holds every book's tickers (was 500 → ~400 evicted and re-downloaded each session);
 // IndexedDB has the headroom — full-book history is what lets the bot scan
 // every candidate with real data instead of starving on the uncached ones.
 
@@ -9295,7 +9299,28 @@ if (typeof window !== 'undefined') window.syncFedDecisionsFromFred = syncFedDeci
 // GitHub token (XTRAPP sync, Save to Repo, options requests), data sources and
 // API keys, and the three Supabase projects. Also still reachable from the
 // Stock Book "Data Sources" button.
+// ---- Home · Data health (z157) -----------------------------------------------------
+// TRAPP2-ANALYTICS/data/health.json (every 30 min): each input the app and the bot read, against what its
+// schedule promises. A broken workflow shows here as STALE / MISSING instead of as a quietly old number.
+async function renderDataHealth() {
+  const host = document.getElementById('home-health');
+  if (!host) return;
+  let h = null;
+  try { const r = await fetch(`${GH_RAW}/TRAPP2-ANALYTICS/main/data/health.json?_=${Math.floor(Date.now() / 60000)}`, { cache: 'no-cache' }); if (r.ok) h = await r.json(); } catch {}
+  if (!h) { host.innerHTML = '<div class="home-section-title">Data health</div><div style="font-family:var(--mono);font-size:10px;color:var(--ink-faint)">Waiting for TRAPP2-ANALYTICS → Data health (every 30 min).</div>'; return; }
+  const s = h.summary || {}, bad = (h.checks || []).filter(c => c.status === 'stale' || c.status === 'missing' || c.status === 'unknown');
+  const age = m => (m == null ? '—' : m < 90 ? `${m} min` : m < 2880 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} d`);
+  const asOf = new Date(h.asOf).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' ET';
+  host.innerHTML = `<div class="home-section-title">Data health</div>
+    <div style="font-family:var(--mono);font-size:11px;margin-bottom:6px"><span style="color:${bad.length ? 'var(--neg)' : 'var(--pos)'};font-weight:700">${bad.length ? '⚠ ' + bad.length + ' input' + (bad.length > 1 ? 's' : '') + ' behind' : '✓ every input on time'}</span>
+      <span style="color:var(--ink-faint)"> · ${s.ok || 0} fresh · ${s.notDue || 0} not due (${escapeHtml(h.session || '')}) · checked ${escapeHtml(asOf)}</span></div>
+    ${bad.map(c => `<div style="font-family:var(--mono);font-size:10px;padding:3px 0;border-top:1px solid var(--rule)"><strong style="color:var(--neg)">${escapeHtml(c.status.toUpperCase())}</strong> ${escapeHtml(c.name)}${c.feedsBot ? ' <span style="color:var(--amber)">· feeds the bot</span>' : ''}
+      <span style="color:var(--ink-faint)">· ${age(c.ageMinutes)} old (limit ${age(c.maxMinutes)}) · ${escapeHtml(c.repo)}</span></div>`).join('')}`;
+}
+if (typeof window !== 'undefined') window.renderDataHealth = renderDataHealth;
+
 function renderConnectionsPanel() {
+  try { renderDataHealth(); } catch {}
   const host = document.getElementById('home-connections');
   if (!host) return;
   const has = k => { try { return !!(localStorage.getItem(k) || '').trim(); } catch { return false; } };
@@ -24475,6 +24500,42 @@ async function getHistoryForTickerAsync(ticker) {
 
 // Bulk-prime history for many tickers in parallel (batches of 20).
 // Call this before rendering charts/correlations so synchronous reads find data.
+function _startupPrimeSet(tickers) {
+  const want = new Set();
+  try { (loadPortfolio() || []).forEach(p => p.ticker && want.add(String(p.ticker).toUpperCase())); } catch {}
+  try { const bot = loadBotState(); (bot.bets || []).filter(b => b.status === 'open').forEach(b => b.ticker && want.add(String(b.ticker).toUpperCase())); } catch {}
+  try { (typeof getGoodGlobeIndexEntries === 'function' ? getGoodGlobeIndexEntries() : []).forEach(e => e && e.ticker && !e.removedFromIndex && want.add(String(e.ticker).toUpperCase())); } catch {}
+  try { if (state.valuation && state.valuation.ticker) want.add(String(state.valuation.ticker).toUpperCase()); } catch {}
+  // the market set the sector / correlation / bond-ETF views read synchronously
+  ['SPY', 'QQQ', 'IWM', 'DIA', 'TLT', 'GLD', 'UUP', 'HYG', 'LQD', 'XLK', 'XLC', 'XLY', 'XLF', 'XLI', 'XLB', 'XLE', 'XLV', 'XLP', 'XLU', 'XLRE'].forEach(t => want.add(t));
+  // peers of the open ticker (same sector, largest first) - for the peer grade on its Valuation page
+  try {
+    const rows = (state.stockbook && state.stockbook.rows) || [];
+    const me = state.valuation && state.valuation.ticker && rows.find(r => String(r.ticker || '').toUpperCase() === String(state.valuation.ticker).toUpperCase());
+    if (me && me.sector) rows.filter(r => r.sector === me.sector && r.ticker).sort((a, b) => (+b.marketCap || +b.marketcap || 0) - (+a.marketCap || +a.marketcap || 0))
+      .slice(0, 30).forEach(r => want.add(String(r.ticker).toUpperCase()));
+  } catch {}
+  const inBook = new Set((tickers || []).map(t => String(t).toUpperCase()));
+  return [...want].filter(t => inBook.has(t)).slice(0, 150);
+}
+function _primeAllowed() {
+  try {
+    const c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    if (c && (c.saveData || /(^|-)2g$|^3g$/.test(String(c.effectiveType || '')))) return false;
+  } catch {}
+  return true;
+}
+function _schedulePriority(tickers) {
+  const run = () => {
+    if (!_primeAllowed()) { console.log('History: data-saver / slow connection — loading only on demand'); return; }
+    const set = _startupPrimeSet(tickers);
+    if (set.length) primeHistoryForTickers(set).catch(e => console.warn('background prime failed', e));
+    console.log(`History: pre-loading ${set.length} of ${(tickers || []).length} tickers (holdings, bot positions, GoodGlobe, open ticker); the rest on demand`);
+  };
+  if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 4000 }); else setTimeout(run, 800);
+}
+if (typeof window !== 'undefined') { window._startupPrimeSet = _startupPrimeSet; }
+
 async function primeHistoryForTickers(tickers) {
   if (!Array.isArray(tickers) || tickers.length === 0) return;
   const needed = tickers.filter(t => !getHistoryForTicker(t));
@@ -55929,3 +55990,4 @@ function _ccyLensBar(stock) {
   };
   ['renderSummary', 'renderResults', 'renderProjection', 'renderMonteCarlo', 'renderValuationConfidenceAudit'].forEach(wrapLens);
 })();
+
