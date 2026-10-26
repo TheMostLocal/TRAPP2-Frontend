@@ -199,7 +199,7 @@ const state = {
   mcResults: null,      // monte carlo array
 };
 // ---- z160: page modules - big pages load the first time they open (pages/<name>.js) ----
-const VALUATIO_BUILD = '20260615z160';
+const VALUATIO_BUILD = '20260615z160';   // pages/*.js unchanged since z160
 const _pageLoads = {};
 function _loadPage(name) {
   if (_pageLoads[name]) return _pageLoads[name];
@@ -9117,7 +9117,10 @@ async function renderDataHealth() {
   const s = h.summary || {}, bad = (h.checks || []).filter(c => c.status === 'stale' || c.status === 'missing' || c.status === 'unknown');
   const age = m => (m == null ? '—' : m < 90 ? `${m} min` : m < 2880 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} d`);
   const asOf = new Date(h.asOf).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' ET';
-  host.innerHTML = `<div class="home-section-title">Data health</div>
+  // z161: the check itself runs every 30 min - if it is older than 45 min, GitHub isn't starting scheduled runs
+  const checkAgeMin = Math.round((Date.now() - Date.parse(h.asOf)) / 60000);
+  const stalled = checkAgeMin > 45 ? `<div style="font-family:var(--mono);font-size:10.5px;color:var(--neg);margin-bottom:6px">⚠ this check last ran ${checkAgeMin < 120 ? checkAgeMin + ' min' : Math.round(checkAgeMin / 60) + ' h'} ago — GitHub isn't starting scheduled runs. Run the loops by hand (Actions → Run workflow) or set up the Supabase heartbeat (STATUS §2c).</div>` : '';
+  host.innerHTML = `<div class="home-section-title">Data health</div>${stalled}
     <div style="font-family:var(--mono);font-size:11px;margin-bottom:6px"><span style="color:${bad.length ? 'var(--neg)' : 'var(--pos)'};font-weight:700">${bad.length ? '⚠ ' + bad.length + ' input' + (bad.length > 1 ? 's' : '') + ' behind' : '✓ every input on time'}</span>
       <span style="color:var(--ink-faint)"> · ${s.ok || 0} fresh · ${s.notDue || 0} not due (${escapeHtml(h.session || '')}) · checked ${escapeHtml(asOf)}</span></div>
     ${bad.map(c => `<div style="font-family:var(--mono);font-size:10px;padding:3px 0;border-top:1px solid var(--rule)"><strong style="color:var(--neg)">${escapeHtml(c.status.toUpperCase())}</strong> ${escapeHtml(c.name)}${c.feedsBot ? ' <span style="color:var(--amber)">· feeds the bot</span>' : ''}
