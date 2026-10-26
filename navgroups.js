@@ -17,7 +17,7 @@
   'use strict';
   const GROUPS = [
     { id: 'book', label: 'Stock Book & Valuation', icon: '📒', tabs: [['stockbook', 'Stock Book'], ['valuation', 'Valuation'], ['options', 'Options']] },
-    { id: 'macro', label: 'Macro Data', icon: '🌐', tabs: [['regime', 'Regime'], ['macro', 'Macro Quad'], ['bonds', 'Bonds & Treasuries'], ['credit', 'Credit'], ['fed', 'Fed'], ['supplychain', 'Supply Chains'], ['globaltrade', 'Global Trade']] },
+    { id: 'macro', label: 'Macro Data', icon: '🌐', tabs: [['regime', 'Regime'], ['macro', 'Macro Quad'], ['bonds', 'Bonds & Treasuries'], ['credit', 'Credit'], ['fed', 'Fed'], ['supplychain', 'Supply Chains'], ['globaltrade', 'Global Trade'], ['volsent', 'Volatility & Sentiment']] },
     { id: 'lab', label: 'Data & Research', icon: '🔬', tabs: [['data', 'Data'], ['research', 'Research'], ['earnings', 'Earnings'], ['creditdesk', 'Bonds & CDS'], ['headcount', 'Headcount'], ['scenarios', 'Scenarios'], ['risk', 'Risk Calculator'], ['probability', 'Probability']] },
   ];
   const LAST = 'valuatio.nav.lastTab.v1';
@@ -81,6 +81,12 @@
     const w = function (tab) {
       const r = orig.apply(this, arguments);
       try { paint(tab); } catch (e) {}
+      if (tab === 'volsent') {                                  // z158: CBOE, Treasury, BLS, GDELT, cross-checks
+        const sub = document.getElementById('masthead-sub');
+        if (sub) sub.textContent = 'Volatility & Sentiment · VIX term structure, SKEW, auctions, BLS, news tone';
+        const host = document.getElementById('volsent-mount');
+        if (host && window.MarketExtras) window.MarketExtras.render(host);
+      }
       if (tab === 'headcount') {                                // z151: employees + hiring breadth
         const sub = document.getElementById('masthead-sub');
         if (sub) sub.textContent = 'Headcount · who is hiring and who is cutting — the labor side of the cycle';
