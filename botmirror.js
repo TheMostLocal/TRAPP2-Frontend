@@ -111,6 +111,17 @@
 
   // ---- the runner's journal is the book ----
   async function fetchJournal() {
+    // z159: Supabase first - the runner pushes the journal there the moment a pass ends (a 1-row head check,
+    // the full journal only when it's newer). GitHub (5-minute raw cache) when Supabase isn't set up, fails,
+    // or - while the NYSE is open - holds nothing from the last 45 minutes (the pushes may have stopped).
+    try {
+      if (window.LiveData && typeof window.LiveData.journal === 'function') {
+        const lj = await window.LiveData.journal();
+        const age = lj && lj.generatedAt ? Date.now() - Date.parse(lj.generatedAt) : Infinity;
+        if (lj && lj.doc && (!session().open || age < 45 * 60000)) { S.src = 'supabase'; return lj.doc; }
+      }
+    } catch (e) {}
+    S.src = 'github';
     const r = await fetch(`${RAW()}/TRAPP2-BOT/main/data/bot_training_data.json?_v=${Math.floor(Date.now() / 60000)}`, { cache: 'no-store' });
     if (!r.ok) throw new Error('journal HTTP ' + r.status);
     const d = await r.json();
@@ -229,7 +240,7 @@
       }
     } catch (e) {}
     const line = S.busy ? 'syncing with the runner…' : S.err ? `sync failed: ${esc(S.err)} — showing the last synced copy`
-      : info ? `runner journal ${esc(when(info.journalAt))} · ${info.trades} trades (${info.open} open) · bankroll ${$(info.bankroll)} (capital + realized, positions at cost) · synced ${ago(info.at)}`
+      : info ? `runner journal ${esc(when(info.journalAt))} · ${info.trades} trades (${info.open} open) · bankroll ${$(info.bankroll)} (capital + realized, positions at cost) · synced ${ago(info.at)}${S.src === 'supabase' ? ' · live (Supabase)' : S.src === 'github' ? ' · via GitHub' : ''}`
       : 'not synced yet';
     el.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;font-family:var(--mono);font-size:10.5px;padding:7px 12px;border:1px solid var(--rule);border-left:3px solid ${col};border-radius:4px;margin:8px 0;background:var(--bg-elev)">
       <span style="color:${col};font-weight:700">ONE BOOK · RUNNER</span><span style="color:var(--ink-dim)">${esc(s.text)}</span>
