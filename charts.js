@@ -686,6 +686,14 @@
   const _barsLatest = {}, _barsT = {};
   async function fetchBars(ticker) {
     const t = String(ticker || '').toUpperCase();
+    // z159: Supabase first (live_bars_day, one row, no 5-minute raw cache); the book's GitHub files below are the fallback
+    try {
+      if (window.LiveData && typeof window.LiveData.bars === 'function') {
+        const k = 'sb|' + t, n0 = Date.now();
+        if (!_barsT[k] || n0 - _barsT[k].at > 55000) _barsT[k] = { at: n0, rec: await window.LiveData.bars(t) };
+        if (_barsT[k].rec) return _barsT[k].rec;
+      }
+    } catch (e) {}
     if (!_book[t]) { try { await fetchDaily(t); } catch (e) {} }
     const b = _book[t];
     if (!b) return null;
