@@ -9124,7 +9124,7 @@ async function renderDataHealth() {
     <div style="font-family:var(--mono);font-size:11px;margin-bottom:6px"><span style="color:${bad.length ? 'var(--neg)' : 'var(--pos)'};font-weight:700">${bad.length ? '⚠ ' + bad.length + ' input' + (bad.length > 1 ? 's' : '') + ' behind' : '✓ every input on time'}</span>
       <span style="color:var(--ink-faint)"> · ${s.ok || 0} fresh · ${s.notDue || 0} not due (${escapeHtml(h.session || '')}) · checked ${escapeHtml(asOf)}</span></div>
     ${bad.map(c => `<div style="font-family:var(--mono);font-size:10px;padding:3px 0;border-top:1px solid var(--rule)"><strong style="color:var(--neg)">${escapeHtml(c.status.toUpperCase())}</strong> ${escapeHtml(c.name)}${c.feedsBot ? ' <span style="color:var(--amber)">· feeds the bot</span>' : ''}
-      <span style="color:var(--ink-faint)">· ${age(c.ageMinutes)} old (limit ${age(c.maxMinutes)}) · ${escapeHtml(c.repo)}</span></div>`).join('')}`;
+      <span style="color:var(--ink-faint)">· ${age(c.ageMinutes)} old (limit ${age(c.maxMinutes)}) · ${escapeHtml(c.repo)}${c.note ? ' · ' + escapeHtml(c.note) : ''}</span></div>`).join('')}`;
 }
 if (typeof window !== 'undefined') window.renderDataHealth = renderDataHealth;
 
