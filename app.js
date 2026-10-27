@@ -40780,8 +40780,12 @@ function botTickerLedger(bets, priceOf) {
     } else {
       const key = `bet:${b.id}`;
       const q = num(b.shares) || (num(b.optionContracts) || 1);
-      push(key, { ticker: tic, dir, linear: false, bet: b }, { betId: b.id, side: 'buy', date: b.entryDate, price: num(b.entryPrice), shares: q });
-      if (b.status === 'closed') push(key, { ticker: tic, dir, linear: false, bet: b }, { betId: b.id, side: 'sell', date: b.exitDate || b.entryDate, price: num(b.exitPrice), shares: q, _closeBet: b });
+      // z164: an option leg is priced per CONTRACT (premium x 100) - the underlying's price made a $1,720 call read "$731"
+      const isOpt = b.instrument === 'option';
+      const bp = isOpt ? (num(b.optionPremium) != null ? +(num(b.optionPremium) * 100).toFixed(2) : null) : num(b.entryPrice);
+      const sp = isOpt ? (num(b.optionExit) != null ? +(num(b.optionExit) * 100).toFixed(2) : null) : num(b.exitPrice);
+      push(key, { ticker: tic, dir, linear: false, bet: b }, { betId: b.id, side: 'buy', date: b.entryDate, price: bp, shares: q });
+      if (b.status === 'closed') push(key, { ticker: tic, dir, linear: false, bet: b }, { betId: b.id, side: 'sell', date: b.exitDate || b.entryDate, price: sp, shares: q, _closeBet: b });
     }
   }
   const legs = [];
@@ -40818,7 +40822,7 @@ function botTickerLedger(bets, priceOf) {
         label = closed ? 'SELL' : 'TRIM';
         statusAfter = closed ? 'closed' : 'open';
       }
-      legs.push({ ticker: bk.ticker, dir: bk.dir, betId: t.betId, date: t.date, side: t.side, label, price: t.price, shares: t.shares, value: (t.price != null ? +(t.price * t.shares).toFixed(2) : null), pl, statusAfter, derived: !!t.derived });
+      legs.push({ ticker: bk.ticker, dir: bk.dir, opt: !!(bk.bet && bk.bet.instrument === 'option'), betId: t.betId, date: t.date, side: t.side, label, price: t.price, shares: t.shares, value: (t.price != null ? +(t.price * t.shares).toFixed(2) : null), pl, statusAfter, derived: !!t.derived });
     }
     const open = shares > 1e-6;
     const live = open ? priceOf(bk.ticker) : null;
@@ -42136,10 +42140,22 @@ function renderBetsTab() {
   const openBets = (perf.bets || []).filter(b => b.status === 'open');
   // Aggregate by ticker+direction so multiple adds to the same name roll up into
   // one line showing TOTAL shares (the gradual-accumulation view).
+  // z164: an option position is its CONTRACT (type, strike, expiry) - two different contracts on one name are two lines.
+  const _posKey = x => `${x.ticker}|${x.direction}|${x.instrument || 'shares'}` + ((x.instrument === 'option') ? `|${x.optionType || ''}|${x.optionStrike || ''}|${x.optionExpiry || ''}` : '');
   const posMap = new Map();
   for (const b of openBets) {
-    const key = `${b.ticker}|${b.direction}|${b.instrument || 'shares'}`;
-    const cur = posMap.get(key) || { ticker: b.ticker, direction: b.direction, instrument: b.instrument || 'shares', leveragedEtf: b.leveragedEtf, shares: 0, notional: 0, dollars: 0, pnl: 0, lots: 0, lastPrice: null, entryCost: 0, targetPrice: null, stopPrice: null, firstEntryDate: null };
+    const key = _posKey(b);
+    const cur = posMap.get(key) || { ticker: b.ticker, direction: b.direction, instrument: b.instrument || 'shares', leveragedEtf: b.leveragedEtf, shares: 0, notional: 0, dollars: 0, pnl: 0, lots: 0, lastPrice: null, entryCost: 0, targetPrice: null, stopPrice: null, firstEntryDate: null,
+      optionType: b.optionType || null, optionStrike: b.optionStrike != null ? +b.optionStrike : null, optionExpiry: b.optionExpiry || null, contracts: 0, premPaid: 0, premMark: 0, markAt: null, delta: null, iv: null };
+    if (b.instrument === 'option') {
+      const k = +b.optionContracts || 0;
+      cur.contracts += k;
+      cur.premPaid += (+b.optionPremium || 0) * k;
+      cur.premMark += (b.optionMark != null && isFinite(+b.optionMark) ? +b.optionMark : (+b.optionPremium || 0)) * k;
+      if (b.optionMarkAt && (!cur.markAt || b.optionMarkAt > cur.markAt)) cur.markAt = b.optionMarkAt;
+      if (b.optionDelta != null) cur.delta = +b.optionDelta;
+      if (b.optionIV != null) cur.iv = +b.optionIV;
+    }
     cur.shares += (b.shares || 0);
     cur.notional += (b.notional || 0);
     cur.dollars += (b.dollars || 0);
@@ -42162,7 +42178,7 @@ function renderBetsTab() {
   const activeWin = BETS_STATE.perfWindow || 'all';
   let chartHtml = '';
   const _selPosKey = BETS_STATE.selectedPosition;
-  const _selPos = _selPosKey ? positions.find(p => `${p.ticker}|${p.direction}|${p.instrument || 'shares'}` === _selPosKey) : null;
+  const _selPos = _selPosKey ? positions.find(p => _posKey(p) === _selPosKey) : null;
   if (_selPos) {
     chartHtml = renderPositionChart(_selPos);
   } else if (wp && wp.curve.length >= 2) {
@@ -42218,21 +42234,33 @@ function renderBetsTab() {
   // ---- OPEN POSITIONS table (positions already aggregated above for the chart). ----
   const positionsHtml = positions.length ? `
     <div class="company-card">
-      <h4>Open Positions <span style="color:var(--ink-faint);font-size:9px;text-transform:none;letter-spacing:0;font-weight:400">· ${positions.length} ${positions.length === 1 ? 'name' : 'names'} · total ${totalSharesAll.toLocaleString(undefined,{maximumFractionDigits:2})} shares · gradual adds roll up here</span></h4>
+      <h4>Open Positions <span style="color:var(--ink-faint);font-size:9px;text-transform:none;letter-spacing:0;font-weight:400">· ${positions.length} ${positions.length === 1 ? 'name' : 'names'} · total ${totalSharesAll.toLocaleString(undefined,{maximumFractionDigits:2})} shares${positions.some(p => p.instrument === 'option') ? ` · ${positions.filter(p => p.instrument === 'option').reduce((s, p) => s + p.contracts, 0)} option contracts` : ''} · gradual adds roll up here</span></h4>
       <div style="overflow-x:auto">
         <table class="sb-table" style="width:100%;min-width:640px">
-          <thead><tr><th>Ticker</th><th>Direction</th><th>Total Shares</th><th>Avg Entry</th><th>Last</th><th>Cost Basis</th><th>Unrealized</th><th>Lots</th></tr></thead>
+          <thead><tr><th>Ticker</th><th>Direction</th><th>Size</th><th>Avg Entry</th><th>Last</th><th>Cost Basis</th><th>Unrealized</th><th>Lots</th></tr></thead>
           <tbody>${positions.map(p => {
             const avgEntry = p.shares > 0 ? p.entryCost / p.shares : 0;
-            const _pkey = `${p.ticker}|${p.direction}|${p.instrument || 'shares'}`;
+            const _pkey = _posKey(p);
+            const isOpt = p.instrument === 'option', isFx = String(p.ticker).startsWith('FX:');
+            const _ccy = isFx ? p.ticker.slice(3) : '';
+            const _fxPair = c => (['EUR', 'GBP', 'AUD', 'NZD'].includes(c) ? c + 'USD=X' : c + '=X');
+            const _sub = t => `<div style="font-size:9px;color:var(--ink-faint);font-weight:400;margin-top:2px;white-space:nowrap">${t}</div>`;
+            const _px = v => v == null || !isFinite(v) ? '—' : isFx ? '$' + (+v).toFixed(v < 0.1 ? 6 : 4) : '$' + (+v).toFixed(2);
+            const _dte = isOpt && p.optionExpiry ? Math.round((Date.parse(p.optionExpiry + 'T21:00:00Z') - Date.now()) / 864e5) : null;
+            const _exp = isOpt && p.optionExpiry ? new Date(p.optionExpiry + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }) : '';
+            const _isPut = isOpt && String(p.optionType).toLowerCase() === 'put';
+            const _tickSub = isOpt ? _sub(`${_isPut ? 'PUT' : 'CALL'} $${(+p.optionStrike).toFixed(2).replace(/\.00$/, '')} · exp ${_exp}${_dte != null ? ` (${_dte >= 0 ? _dte + ' d' : 'expired'})` : ''}${p.delta != null ? ` · Δ ${(+p.delta).toFixed(2)}` : ''}${p.iv != null ? ` · IV ${Math.round(p.iv * 100)}%` : ''}`)
+              : isFx ? _sub(`currency · USD per ${escapeHtml(_ccy)}`)
+              : /^(TLT|IEF|SHY|TIP|AGG|BND|BNDX|GOVT|LQD|HYG|JNK|EMB)$/.test(p.ticker) ? _sub('bond ETF') : '';
+            const _optAvg = isOpt && p.contracts ? p.premPaid / p.contracts : null, _optLast = isOpt && p.contracts ? p.premMark / p.contracts : null;
             const _isSel = BETS_STATE.selectedPosition === _pkey;
             return `
             <tr class="bot-position-row" data-poskey="${escapeHtml(_pkey)}" style="cursor:pointer;${_isSel ? 'background:rgba(212,162,76,0.12);outline:1px solid var(--amber)' : ''}" title="Click to chart ${p.ticker}'s price performance with entry/target/stop">
-              <td style="font-family:var(--mono);font-weight:700">${_isSel ? '<span style="color:var(--amber)">▸ </span>' : ''}<span class="bot-ticker-link" data-ticker="${p.ticker}" style="cursor:pointer;color:var(--amber);text-decoration:underline;text-decoration-style:dotted" title="Open ${p.ticker} in Valuation">${p.ticker}</span></td>
-              <td style="font-family:var(--mono);font-size:11px">${dirBadge(p.direction)}${p.instrument === 'leveraged_etf' && p.leveragedEtf ? ` <span style="color:#4ec9a8;font-weight:700">${p.leveragedEtf}</span>` : ''}</td>
-              <td style="font-family:var(--mono);font-size:11px;font-weight:700;color:var(--ink)">${p.shares.toLocaleString(undefined,{maximumFractionDigits:2})}</td>
-              <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">$${avgEntry.toFixed(2)}</td>
-              <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">${p.lastPrice != null ? '$' + p.lastPrice.toFixed(2) : '—'}</td>
+              <td style="font-family:var(--mono);font-weight:700">${_isSel ? '<span style="color:var(--amber)">▸ </span>' : ''}<span class="bot-ticker-link" data-ticker="${isFx ? escapeHtml(_fxPair(_ccy)) : p.ticker}" style="cursor:pointer;color:var(--amber);text-decoration:underline;text-decoration-style:dotted" title="Open ${isFx ? escapeHtml(_fxPair(_ccy)) : p.ticker} in Valuation">${isFx ? escapeHtml(_ccy) : p.ticker}</span>${_tickSub}</td>
+              <td style="font-family:var(--mono);font-size:11px">${isOpt ? `<span style="color:${_isPut ? 'var(--neg)' : 'var(--pos)'};font-weight:700">${_isPut ? '▼ PUT' : '▲ CALL'}</span>${_sub('bought · max loss = premium')}` : dirBadge(p.direction)}${p.instrument === 'leveraged_etf' && p.leveragedEtf ? ` <span style="color:#4ec9a8;font-weight:700">${p.leveragedEtf}</span>` : ''}</td>
+              <td style="font-family:var(--mono);font-size:11px;font-weight:700;color:var(--ink)">${isOpt ? `${p.contracts} contract${p.contracts === 1 ? '' : 's'}${_sub('× 100 shares')}` : isFx ? `${p.shares.toLocaleString(undefined,{maximumFractionDigits:0})} ${escapeHtml(_ccy)}` : p.shares.toLocaleString(undefined,{maximumFractionDigits:2})}</td>
+              <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">${isOpt ? `$${(_optAvg || 0).toFixed(2)}${_sub(`premium / sh · $${p.premPaid ? (p.premPaid * 100).toLocaleString(undefined,{maximumFractionDigits:0}) : '0'} paid`)}` : _px(avgEntry)}</td>
+              <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">${isOpt ? `$${(_optLast || 0).toFixed(2)}${_sub(`premium${p.markAt ? ' · ' + escapeHtml(String(p.markAt).slice(5, 16).replace('T', ' ')) : ''}${p.lastPrice != null ? ` · ${escapeHtml(p.ticker)} $${p.lastPrice.toFixed(2)}` : ''}`)}` : _px(p.lastPrice)}</td>
               <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">$${p.notional.toLocaleString(undefined,{maximumFractionDigits:0})}</td>
               <td style="font-family:var(--mono);font-size:11px;font-weight:700;color:${pnlColor(p.pnl)}">${fmtPnl(p.pnl)}</td>
               <td style="font-family:var(--mono);font-size:10px;color:var(--ink-faint)" title="${p.lots} separate entries rolled into this position">${p.lots}${p.lots > 1 ? ' adds' : ''}</td>
@@ -42257,6 +42285,7 @@ function renderBetsTab() {
     (byDay.get(d) || byDay.set(d, []).get(d)).push(L);
   }
   const days = Array.from(byDay.keys()).sort().reverse().slice(0, 14);  // last 14 active days
+  const _betById = new Map((perf.bets || []).map(b => [b.id, b]));            // z164: option / currency legs say what they are
   const _dayTag = d => (typeof _botIsTradingDay === 'function' && !_botIsTradingDay(d))
     ? ` <span title="Not an NYSE trading day: stamped by a UTC clock (an action taken the evening before, ET) - priced at the last session's close; the equity chart books it on the next session." style="color:var(--amber)">†</span>` : '';
   const _noFillNote = (_actLedger.noFill || []).length
@@ -42273,8 +42302,13 @@ function renderBetsTab() {
             const amt = L.side === 'buy'
               ? (L.value != null ? '$' + L.value.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '<span title="The device sold this trade without recording a share count - its size is unknowable; its realized P/L is exact.">size not recorded</span>')
               : (L.pl != null ? fmtPnl(L.pl) : '—');
-            const verb = L.label === 'BUY' ? (L.dir < 0 ? '▼ SHORT' : '▲ LONG') : L.label === 'ADD' ? '➕ ADD' : L.label === 'TRIM' ? '✂ TRIM' : '✕ CLOSE';
-            items.push(`<span style="font-family:var(--mono);font-size:10px;color:${col}">${verb} ${escapeHtml(L.ticker)} ${amt}</span>`);
+            const _b = _betById.get(L.betId);
+            const _opt = _b && _b.instrument === 'option';
+            const _put = _opt && String(_b.optionType).toLowerCase() === 'put';
+            const verb = L.label === 'BUY' ? (_opt ? (_put ? '▼ PUT' : '▲ CALL') : (L.dir < 0 ? '▼ SHORT' : '▲ LONG')) : L.label === 'ADD' ? '➕ ADD' : L.label === 'TRIM' ? '✂ TRIM' : '✕ CLOSE';
+            const _what = String(L.ticker).startsWith('FX:') ? String(L.ticker).slice(3) : L.ticker;
+            const _optTag = _opt && _b.optionStrike != null ? ` $${(+_b.optionStrike).toFixed(2).replace(/\.00$/, '')} ${escapeHtml(String(_b.optionExpiry || '').slice(5))}` : '';
+            items.push(`<span style="font-family:var(--mono);font-size:10px;color:${_opt ? (_put ? 'var(--neg)' : 'var(--pos)') : col}">${verb} ${escapeHtml(_what)}${_optTag} ${amt}</span>`);
           }
           return `
             <div style="display:flex;gap:12px;align-items:flex-start;padding:6px 0;border-bottom:1px solid var(--rule)">
@@ -42379,7 +42413,7 @@ function renderBetsTab() {
       <td style="font-family:var(--mono);font-size:11px">${L.date || '\u2014'}${L.date ? _dayTag(String(L.date).slice(0, 10)) : ''}</td>
       <td style="font-family:var(--mono);font-weight:700"><span class="bot-ticker-link" data-ticker="${L.ticker}" style="cursor:pointer;color:var(--amber);text-decoration:underline;text-decoration-style:dotted" title="Open ${L.ticker}">${L.ticker}</span> <span style="color:var(--ink-faint);font-size:9px">${dirTxt}</span></td>
       <td><span class="leg-badge leg-badge--${badgeClass}">${L.label}</span></td>
-      <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)"${L.derived ? ' title="Shares from the recorded fraction of the position; price back-solved from the recorded P/L"' : ''}>${L.unsized ? '<span title="Sold by the device without a share count - size unknowable; the P/L is exact" style="color:var(--ink-faint)">not recorded</span>' : L.shares ? (L.derived ? '≈' : '') + L.shares.toLocaleString(undefined,{maximumFractionDigits:2}) : '\u2014'}</td>
+      <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)"${L.derived ? ' title="Shares from the recorded fraction of the position; price back-solved from the recorded P/L"' : ''}>${L.unsized ? '<span title="Sold by the device without a share count - size unknowable; the P/L is exact" style="color:var(--ink-faint)">not recorded</span>' : L.shares ? (L.derived ? '≈' : '') + L.shares.toLocaleString(undefined,{maximumFractionDigits:2}) + (L.opt ? ' ctr' : '') : '\u2014'}</td>
       <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">${L.price != null ? (L.derived ? '≈' : '') + '$' + L.price.toFixed(2) : '\u2014'}</td>
       <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">${L.value != null ? '$' + L.value.toLocaleString(undefined,{maximumFractionDigits:0}) : '\u2014'}</td>
       <td style="font-family:var(--mono);font-size:11px;font-weight:700;color:${isSell && L.pl != null ? pnlColor(L.pl) : 'var(--ink-faint)'}" title="${isSell ? 'Realized vs average cost' : 'Buys/adds book cost basis — P/L is realized on the sell'}">${isSell && L.pl != null ? fmtPnl(L.pl) : '\u2014'}</td>
@@ -47393,3 +47427,4 @@ function _ccyLensBar(stock) {
   };
   ['renderSummary', 'renderResults', 'renderProjection', 'renderMonteCarlo', 'renderValuationConfidenceAudit'].forEach(wrapLens);
 })();
+
