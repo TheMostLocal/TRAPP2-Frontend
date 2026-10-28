@@ -40734,6 +40734,13 @@ function _betSellList(b) {
 }
 function _betLegs(b) {
   const dir = b.direction === 'short' ? -1 : 1, entry = +b.entryPrice, evs = _betSellList(b);
+  // z166: a trim recorded BEFORE a split is on the old share basis; the trade's shares / entry are already on the new
+  // one (the runner adjusts them) - put the trim on the new basis too (shares x r, price / r; dollars unchanged).
+  const _splits = (b.corporateActions || []).filter(a => a && a.type === 'split' && +a.ratio > 0);
+  if (_splits.length) for (const e of evs) {
+    const f = _splits.filter(a => String(e.date || '').slice(0, 10) < String(a.exDate)).reduce((x, a) => x * +a.ratio, 1);
+    if (f !== 1) { if (e.shares > 0) e.shares = +(e.shares * f).toFixed(6); if (e.price > 0) e.price = +(e.price / f).toFixed(6); }
+  }
   let after = +b.shares || 0;
   for (let i = evs.length - 1; i >= 0; i--) {
     const e = evs[i];
@@ -40874,7 +40881,16 @@ function botTickerLedger(bets, priceOf) {
   // unrealized total is INCOMPLETE, not zero, and must be labelled that way.
   const unpricedPositions = openPositions.filter(p => p.unpriced);
   const unpricedCostBasis = +unpricedPositions.reduce((x, p) => x + (p.costBasis || 0), 0).toFixed(2);
-  return { legs, positions, openPositions, totalRealized, totalUnrealized,
+  // z166: dividends - income on the trade (a short pays them), booked by the runner on the ex-date
+  let totalDividends = 0;
+  for (const b of (bets || [])) for (const d of (b && b.dividends) || []) {
+    const amt = num(d.amount);
+    if (amt == null) continue;
+    totalDividends += amt;
+    legs.push({ ticker: String(b.ticker).toUpperCase(), dir: b.direction === 'short' ? -1 : 1, betId: b.id, date: d.exDate, side: 'income', label: 'DIV',
+                price: num(d.perShare), shares: num(d.shares), value: amt, pl: amt, statusAfter: b.status });
+  }
+  return { legs, positions, openPositions, totalRealized, totalUnrealized, totalDividends: +totalDividends.toFixed(2),
            unpricedPositions, unpricedCount: unpricedPositions.length, unpricedCostBasis, noFill: _noFill };
 }
 
@@ -41202,7 +41218,9 @@ function botLedgerBankroll(bot) {
   // z117: + 'adjustment' (the runner's dated opening reconciliation) - the same set
   // as trade_sync.ledger_bankroll, so the app and the runner sum the same things.
   const capital = ((bot && bot.transactions) || []).filter(t => t.type === 'deposit' || t.type === 'withdrawal' || t.type === 'adjustment').reduce((s, t) => s + (+t.amount || 0), 0);
-  return +(BOT_STARTING_BANKROLL + capital + closed + trims).toFixed(2);
+  // z166: + dividends (income on longs, paid by shorts) - the same as trade_sync.ledger_bankroll
+  const divs = bets.reduce((s, b) => s + ((b && b.dividends) || []).reduce((s2, d) => s2 + (+d.amount || 0), 0), 0);
+  return +(BOT_STARTING_BANKROLL + capital + closed + trims + divs).toFixed(2);
 }
 if (typeof window !== 'undefined') window.botLedgerBankroll = botLedgerBankroll;
 
@@ -42156,6 +42174,7 @@ function renderBetsTab() {
       if (b.optionDelta != null) cur.delta = +b.optionDelta;
       if (b.optionIV != null) cur.iv = +b.optionIV;
     }
+    if (b.priceAnomaly) cur.anomaly = b.priceAnomaly;                         // z166: a frozen mark
     cur.shares += (b.shares || 0);
     cur.notional += (b.notional || 0);
     cur.dollars += (b.dollars || 0);
@@ -42253,10 +42272,11 @@ function renderBetsTab() {
               : isFx ? _sub(`currency · USD per ${escapeHtml(_ccy)}`)
               : /^(TLT|IEF|SHY|TIP|AGG|BND|BNDX|GOVT|LQD|HYG|JNK|EMB)$/.test(p.ticker) ? _sub('bond ETF') : '';
             const _optAvg = isOpt && p.contracts ? p.premPaid / p.contracts : null, _optLast = isOpt && p.contracts ? p.premMark / p.contracts : null;
+            const _frozen = p.anomaly ? `<div style="font-size:9px;color:var(--amber);font-weight:700;margin-top:2px;white-space:nowrap" title="The price jumped x${p.anomaly.ratio} in one pass with the market cap unchanged - a split the book hasn't confirmed. No stop, target or trim acts on it until the split is on record.">⚠ FROZEN · split-like jump x${(+p.anomaly.ratio || 0).toFixed(2)}</div>` : '';
             const _isSel = BETS_STATE.selectedPosition === _pkey;
             return `
             <tr class="bot-position-row" data-poskey="${escapeHtml(_pkey)}" style="cursor:pointer;${_isSel ? 'background:rgba(212,162,76,0.12);outline:1px solid var(--amber)' : ''}" title="Click to chart ${p.ticker}'s price performance with entry/target/stop">
-              <td style="font-family:var(--mono);font-weight:700">${_isSel ? '<span style="color:var(--amber)">▸ </span>' : ''}<span class="bot-ticker-link" data-ticker="${isFx ? escapeHtml(_fxPair(_ccy)) : p.ticker}" style="cursor:pointer;color:var(--amber);text-decoration:underline;text-decoration-style:dotted" title="Open ${isFx ? escapeHtml(_fxPair(_ccy)) : p.ticker} in Valuation">${isFx ? escapeHtml(_ccy) : p.ticker}</span>${_tickSub}</td>
+              <td style="font-family:var(--mono);font-weight:700">${_isSel ? '<span style="color:var(--amber)">▸ </span>' : ''}<span class="bot-ticker-link" data-ticker="${isFx ? escapeHtml(_fxPair(_ccy)) : p.ticker}" style="cursor:pointer;color:var(--amber);text-decoration:underline;text-decoration-style:dotted" title="Open ${isFx ? escapeHtml(_fxPair(_ccy)) : p.ticker} in Valuation">${isFx ? escapeHtml(_ccy) : p.ticker}</span>${_tickSub}${_frozen}</td>
               <td style="font-family:var(--mono);font-size:11px">${isOpt ? `<span style="color:${_isPut ? 'var(--neg)' : 'var(--pos)'};font-weight:700">${_isPut ? '▼ PUT' : '▲ CALL'}</span>${_sub('bought · max loss = premium')}` : dirBadge(p.direction)}${p.instrument === 'leveraged_etf' && p.leveragedEtf ? ` <span style="color:#4ec9a8;font-weight:700">${p.leveragedEtf}</span>` : ''}</td>
               <td style="font-family:var(--mono);font-size:11px;font-weight:700;color:var(--ink)">${isOpt ? `${p.contracts} contract${p.contracts === 1 ? '' : 's'}${_sub('× 100 shares')}` : isFx ? `${p.shares.toLocaleString(undefined,{maximumFractionDigits:0})} ${escapeHtml(_ccy)}` : p.shares.toLocaleString(undefined,{maximumFractionDigits:2})}</td>
               <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">${isOpt ? `$${(_optAvg || 0).toFixed(2)}${_sub(`premium / sh · $${p.premPaid ? (p.premPaid * 100).toLocaleString(undefined,{maximumFractionDigits:0}) : '0'} paid`)}` : _px(avgEntry)}</td>
@@ -42305,7 +42325,7 @@ function renderBetsTab() {
             const _b = _betById.get(L.betId);
             const _opt = _b && _b.instrument === 'option';
             const _put = _opt && String(_b.optionType).toLowerCase() === 'put';
-            const verb = L.label === 'BUY' ? (_opt ? (_put ? '▼ PUT' : '▲ CALL') : (L.dir < 0 ? '▼ SHORT' : '▲ LONG')) : L.label === 'ADD' ? '➕ ADD' : L.label === 'TRIM' ? '✂ TRIM' : '✕ CLOSE';
+            const verb = L.label === 'BUY' ? (_opt ? (_put ? '▼ PUT' : '▲ CALL') : (L.dir < 0 ? '▼ SHORT' : '▲ LONG')) : L.label === 'ADD' ? '➕ ADD' : L.label === 'TRIM' ? '✂ TRIM' : L.label === 'DIV' ? '$ DIV' : '✕ CLOSE';
             const _what = String(L.ticker).startsWith('FX:') ? String(L.ticker).slice(3) : L.ticker;
             const _optTag = _opt && _b.optionStrike != null ? ` $${(+_b.optionStrike).toFixed(2).replace(/\.00$/, '')} ${escapeHtml(String(_b.optionExpiry || '').slice(5))}` : '';
             items.push(`<span style="font-family:var(--mono);font-size:10px;color:${_opt ? (_put ? 'var(--neg)' : 'var(--pos)') : col}">${verb} ${escapeHtml(_what)}${_optTag} ${amt}</span>`);
@@ -42404,8 +42424,8 @@ function renderBetsTab() {
   });
 
   const ledgerRows = _sortedLegs.map(L => {
-    const isSell = L.side === 'sell';
-    const badgeClass = (L.label === 'BUY' || L.label === 'ADD') ? 'buy' : 'sell';
+    const isSell = L.side === 'sell' || L.side === 'income';
+    const badgeClass = (L.label === 'BUY' || L.label === 'ADD' || L.label === 'DIV') ? 'buy' : 'sell';
     const st = L.statusAfter === 'closed' ? 'CLOSED' : 'OPEN';
     const dirTxt = L.dir < 0 ? 'SHORT' : 'LONG';
     return `
@@ -42472,7 +42492,10 @@ function renderBetsTab() {
         <span style="color:var(--ink-faint)">Unrealized (open): <strong style="color:${_acct.totalUnrealized >= 0 ? 'var(--pos)' : 'var(--neg)'}">${fmtPnl(_acct.totalUnrealized)}</strong></span>
         <span style="color:var(--ink-faint)">= Total value: <strong style="color:${pnlColor(perf.totalPnl)}">$${perf.currentValue.toLocaleString(undefined,{maximumFractionDigits:0})}</strong></span>
         <span style="color:var(--ink-faint)">Realized since start: <strong style="color:${perf.realizedPnl >= 0 ? 'var(--pos)' : 'var(--neg)'}">${fmtPnl(perf.realizedPnl)}</strong></span>
+        ${_acct.totalDividends ? `<span style="color:var(--ink-faint)" title="Booked on each ex-date: income on longs, paid by shorts - part of cash and of realized">Dividends: <strong style="color:${_acct.totalDividends >= 0 ? 'var(--pos)' : 'var(--neg)'}">${fmtPnl(_acct.totalDividends)}</strong></span>` : ''}
       </div>
+      ${(() => { const rs = (perf.bets || []).flatMap(b => (b.corporateActions || []).filter(a => a.type === 'split').map(a => ({ b, a })));
+        return rs.length ? `<div style="font-family:var(--mono);font-size:10px;color:var(--ink-dim);margin-top:8px;line-height:1.6">${rs.map(({ b, a }) => `SPLIT ${escapeHtml(b.ticker)} ${escapeHtml(a.label || '')} ex ${escapeHtml(a.exDate)}: ${a.before && a.before.shares != null ? (+a.before.shares).toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' → ' : ''}${(+b.shares).toLocaleString(undefined, { maximumFractionDigits: 2 })} sh${a.restated ? ` · <strong>restated</strong> P/L ${fmtPnl(+a.pnlBefore)} → ${fmtPnl(+a.pnlAfter)} (${fmtPnl(+a.delta)})` : ''}`).join('<br>')}</div>` : ''; })()}
     </div>` : '';
   const ledger = perf.bets.length ? _openCard + `
     <div class="company-card">
@@ -47427,4 +47450,3 @@ function _ccyLensBar(stock) {
   };
   ['renderSummary', 'renderResults', 'renderProjection', 'renderMonteCarlo', 'renderValuationConfidenceAudit'].forEach(wrapLens);
 })();
-
