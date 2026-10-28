@@ -15,8 +15,10 @@
   async function gh(path) { try { const r = await fetch(`${RAW()}/TRAPP2-QUANT/main/${path}?_=${Math.floor(Date.now() / 60000)}`, { cache: 'no-cache' }); return r.ok ? await r.json() : null; } catch (e) { return null; } }
   async function sb(path) {
     try {
-      const u = (typeof getSupabaseUrl === 'function' ? getSupabaseUrl() : '').replace(/\/+$/, '').replace(/\/rest\/v1$/, '');
-      const a = typeof getSupabaseAnon === 'function' ? getSupabaseAnon() : '';
+      // z166: the quant tables live in the PORT + ANALYTICS project (that's where they were created); the Bot project is the fallback
+      const an = typeof getAnalyticsSupabaseUrl === 'function' && getAnalyticsSupabaseUrl();
+      const u = (an || (typeof getSupabaseUrl === 'function' ? getSupabaseUrl() : '') || '').replace(/\/+$/, '').replace(/\/rest\/v1$/, '');
+      const a = an ? (typeof getAnalyticsSupabaseAnon === 'function' ? getAnalyticsSupabaseAnon() : '') : (typeof getSupabaseAnon === 'function' ? getSupabaseAnon() : '');
       if (!u || !a) return null;
       const r = await fetch(u + path, { headers: { apikey: a, Authorization: 'Bearer ' + a }, cache: 'no-store' });
       return r.ok ? await r.json() : null;
