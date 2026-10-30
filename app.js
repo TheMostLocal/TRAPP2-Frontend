@@ -40790,7 +40790,7 @@ function botTickerLedger(bets, priceOf) {
       // z164: an option leg is priced per CONTRACT (premium x 100) - the underlying's price made a $1,720 call read "$731"
       const isOpt = b.instrument === 'option';
       const bp = isOpt ? (num(b.optionPremium) != null ? +(num(b.optionPremium) * 100).toFixed(2) : null) : num(b.entryPrice);
-      const sp = isOpt ? (num(b.optionExit) != null ? +(num(b.optionExit) * 100).toFixed(2) : null) : num(b.exitPrice);
+      const sp = isOpt ? (num(b.optionExit) != null ? +(Math.abs(num(b.optionExit)) * 100).toFixed(2) : null) : num(b.exitPrice);   // z167: a spread's exit value can be negative (a credit bought back)
       push(key, { ticker: tic, dir, linear: false, bet: b }, { betId: b.id, side: 'buy', date: b.entryDate, price: bp, shares: q });
       if (b.status === 'closed') push(key, { ticker: tic, dir, linear: false, bet: b }, { betId: b.id, side: 'sell', date: b.exitDate || b.entryDate, price: sp, shares: q, _closeBet: b });
     }
@@ -42159,17 +42159,19 @@ function renderBetsTab() {
   // Aggregate by ticker+direction so multiple adds to the same name roll up into
   // one line showing TOTAL shares (the gradual-accumulation view).
   // z164: an option position is its CONTRACT (type, strike, expiry) - two different contracts on one name are two lines.
-  const _posKey = x => `${x.ticker}|${x.direction}|${x.instrument || 'shares'}` + ((x.instrument === 'option') ? `|${x.optionType || ''}|${x.optionStrike || ''}|${x.optionExpiry || ''}` : '');
+  const _posKey = x => `${x.ticker}|${x.direction}|${x.instrument || 'shares'}` + ((x.instrument === 'option') ? `|${x.optionStructure || x.optionType || ''}|${(x.optionLegs || []).map(l => l.strike).join('/') || x.optionStrike || ''}|${x.optionExpiry || ''}` : '');
   const posMap = new Map();
   for (const b of openBets) {
     const key = _posKey(b);
     const cur = posMap.get(key) || { ticker: b.ticker, direction: b.direction, instrument: b.instrument || 'shares', leveragedEtf: b.leveragedEtf, shares: 0, notional: 0, dollars: 0, pnl: 0, lots: 0, lastPrice: null, entryCost: 0, targetPrice: null, stopPrice: null, firstEntryDate: null,
-      optionType: b.optionType || null, optionStrike: b.optionStrike != null ? +b.optionStrike : null, optionExpiry: b.optionExpiry || null, contracts: 0, premPaid: 0, premMark: 0, markAt: null, delta: null, iv: null };
+      optionType: b.optionType || null, optionStrike: b.optionStrike != null ? +b.optionStrike : null, optionExpiry: b.optionExpiry || null, contracts: 0, premPaid: 0, premMark: 0, markAt: null, delta: null, iv: null,
+      structure: b.optionStructure || null, legs: b.optionLegs || null, credit: !!b.optionCredit, net: b.optionNet != null ? +b.optionNet : null, breakeven: b.breakeven, maxGain: 0, ivRegime: b.ivRegime || null };
     if (b.instrument === 'option') {
       const k = +b.optionContracts || 0;
       cur.contracts += k;
       cur.premPaid += (+b.optionPremium || 0) * k;
-      cur.premMark += (b.optionMark != null && isFinite(+b.optionMark) ? +b.optionMark : (+b.optionPremium || 0)) * k;
+      cur.premMark += (b.optionMark != null && isFinite(+b.optionMark) ? +b.optionMark : (b.optionLegs ? +(b.optionNet || 0) : (+b.optionPremium || 0))) * k;
+      cur.maxGain += +b.maxGain || 0;
       if (b.optionMarkAt && (!cur.markAt || b.optionMarkAt > cur.markAt)) cur.markAt = b.optionMarkAt;
       if (b.optionDelta != null) cur.delta = +b.optionDelta;
       if (b.optionIV != null) cur.iv = +b.optionIV;
@@ -42268,7 +42270,14 @@ function renderBetsTab() {
             const _dte = isOpt && p.optionExpiry ? Math.round((Date.parse(p.optionExpiry + 'T21:00:00Z') - Date.now()) / 864e5) : null;
             const _exp = isOpt && p.optionExpiry ? new Date(p.optionExpiry + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }) : '';
             const _isPut = isOpt && String(p.optionType).toLowerCase() === 'put';
-            const _tickSub = isOpt ? _sub(`${_isPut ? 'PUT' : 'CALL'} $${(+p.optionStrike).toFixed(2).replace(/\.00$/, '')} · exp ${_exp}${_dte != null ? ` (${_dte >= 0 ? _dte + ' d' : 'expired'})` : ''}${p.delta != null ? ` · Δ ${(+p.delta).toFixed(2)}` : ''}${p.iv != null ? ` · IV ${Math.round(p.iv * 100)}%` : ''}`)
+            // z167: vertical spreads (the IV table): structure, both strikes, credit / debit, breakeven, IV basis
+            const _isSpread = isOpt && Array.isArray(p.legs) && p.legs.length === 2;
+            const _sName = s => ({ bull_put_credit: 'BULL PUT CREDIT', bear_call_credit: 'BEAR CALL CREDIT', bull_call_debit: 'BULL CALL DEBIT', bear_put_debit: 'BEAR PUT DEBIT' }[s] || String(s || '').replace(/_/g, ' ').toUpperCase());
+            const _bull = _isSpread && /^bull/.test(p.structure || '');
+            const _ks = _isSpread ? p.legs.map(l => (+l.strike).toFixed(2).replace(/\.00$/, '')).join('/') : '';
+            const _ivTxt = p.ivRegime && p.ivRegime.regime ? ` · IV ${p.ivRegime.regime === 'upper' ? 'rich' : p.ivRegime.regime === 'lower' ? 'cheap' : 'mid'}${p.ivRegime.ivPct != null ? ' ' + Math.round(p.ivRegime.ivPct) + ' pct' : p.ivRegime.ivHv != null ? ' x' + (+p.ivRegime.ivHv).toFixed(2) : ''}` : '';
+            const _tickSub = _isSpread ? _sub(`${_sName(p.structure)} ${_ks} · exp ${_exp}${_dte != null ? ` (${_dte >= 0 ? _dte + ' d' : 'expired'})` : ''}${p.breakeven != null ? ` · breakeven $${(+p.breakeven).toFixed(2)}` : ''}${_ivTxt}`)
+              : isOpt ? _sub(`${_isPut ? 'PUT' : 'CALL'} $${(+p.optionStrike).toFixed(2).replace(/\.00$/, '')} · exp ${_exp}${_dte != null ? ` (${_dte >= 0 ? _dte + ' d' : 'expired'})` : ''}${p.delta != null ? ` · Δ ${(+p.delta).toFixed(2)}` : ''}${p.iv != null ? ` · IV ${Math.round(p.iv * 100)}%` : ''}`)
               : isFx ? _sub(`currency · USD per ${escapeHtml(_ccy)}`)
               : /^(TLT|IEF|SHY|TIP|AGG|BND|BNDX|GOVT|LQD|HYG|JNK|EMB)$/.test(p.ticker) ? _sub('bond ETF') : '';
             const _optAvg = isOpt && p.contracts ? p.premPaid / p.contracts : null, _optLast = isOpt && p.contracts ? p.premMark / p.contracts : null;
@@ -42277,10 +42286,10 @@ function renderBetsTab() {
             return `
             <tr class="bot-position-row" data-poskey="${escapeHtml(_pkey)}" style="cursor:pointer;${_isSel ? 'background:rgba(212,162,76,0.12);outline:1px solid var(--amber)' : ''}" title="Click to chart ${p.ticker}'s price performance with entry/target/stop">
               <td style="font-family:var(--mono);font-weight:700">${_isSel ? '<span style="color:var(--amber)">▸ </span>' : ''}<span class="bot-ticker-link" data-ticker="${isFx ? escapeHtml(_fxPair(_ccy)) : p.ticker}" style="cursor:pointer;color:var(--amber);text-decoration:underline;text-decoration-style:dotted" title="Open ${isFx ? escapeHtml(_fxPair(_ccy)) : p.ticker} in Valuation">${isFx ? escapeHtml(_ccy) : p.ticker}</span>${_tickSub}${_frozen}</td>
-              <td style="font-family:var(--mono);font-size:11px">${isOpt ? `<span style="color:${_isPut ? 'var(--neg)' : 'var(--pos)'};font-weight:700">${_isPut ? '▼ PUT' : '▲ CALL'}</span>${_sub('bought · max loss = premium')}` : dirBadge(p.direction)}${p.instrument === 'leveraged_etf' && p.leveragedEtf ? ` <span style="color:#4ec9a8;font-weight:700">${p.leveragedEtf}</span>` : ''}</td>
-              <td style="font-family:var(--mono);font-size:11px;font-weight:700;color:var(--ink)">${isOpt ? `${p.contracts} contract${p.contracts === 1 ? '' : 's'}${_sub('× 100 shares')}` : isFx ? `${p.shares.toLocaleString(undefined,{maximumFractionDigits:0})} ${escapeHtml(_ccy)}` : p.shares.toLocaleString(undefined,{maximumFractionDigits:2})}</td>
-              <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">${isOpt ? `$${(_optAvg || 0).toFixed(2)}${_sub(`premium / sh · $${p.premPaid ? (p.premPaid * 100).toLocaleString(undefined,{maximumFractionDigits:0}) : '0'} paid`)}` : _px(avgEntry)}</td>
-              <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">${isOpt ? `$${(_optLast || 0).toFixed(2)}${_sub(`premium${p.markAt ? ' · ' + escapeHtml(String(p.markAt).slice(5, 16).replace('T', ' ')) : ''}${p.lastPrice != null ? ` · ${escapeHtml(p.ticker)} $${p.lastPrice.toFixed(2)}` : ''}`)}` : _px(p.lastPrice)}</td>
+              <td style="font-family:var(--mono);font-size:11px">${_isSpread ? `<span style="color:${_bull ? 'var(--pos)' : 'var(--neg)'};font-weight:700">${_bull ? '▲' : '▼'} ${_bull ? 'BULL' : 'BEAR'} ${p.structure && /put/.test(p.structure) ? 'PUT' : 'CALL'}</span>${_sub(`${p.credit ? 'credit' : 'debit'} spread · max loss $${(p.notional || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}${p.maxGain ? ` · max gain $${p.maxGain.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : ''}`)}` : isOpt ? `<span style="color:${_isPut ? 'var(--neg)' : 'var(--pos)'};font-weight:700">${_isPut ? '▼ PUT' : '▲ CALL'}</span>${_sub('bought · max loss = premium')}` : dirBadge(p.direction)}${p.instrument === 'leveraged_etf' && p.leveragedEtf ? ` <span style="color:#4ec9a8;font-weight:700">${p.leveragedEtf}</span>` : ''}</td>
+              <td style="font-family:var(--mono);font-size:11px;font-weight:700;color:var(--ink)">${_isSpread ? `${p.contracts} spread${p.contracts === 1 ? '' : 's'}${_sub('2 legs × 100 shares')}` : isOpt ? `${p.contracts} contract${p.contracts === 1 ? '' : 's'}${_sub('× 100 shares')}` : isFx ? `${p.shares.toLocaleString(undefined,{maximumFractionDigits:0})} ${escapeHtml(_ccy)}` : p.shares.toLocaleString(undefined,{maximumFractionDigits:2})}</td>
+              <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">${_isSpread ? `$${(_optAvg || 0).toFixed(2)}${_sub(`${p.credit ? 'credit' : 'debit'} / sh · $${(p.premPaid * 100).toLocaleString(undefined,{maximumFractionDigits:0})} ${p.credit ? 'received' : 'paid'}`)}` : isOpt ? `$${(_optAvg || 0).toFixed(2)}${_sub(`premium / sh · $${p.premPaid ? (p.premPaid * 100).toLocaleString(undefined,{maximumFractionDigits:0}) : '0'} paid`)}` : _px(avgEntry)}</td>
+              <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">${_isSpread ? `$${Math.abs(_optLast || 0).toFixed(2)}${_sub(`${p.credit ? 'cost to close' : 'worth'} / sh${p.markAt ? ' · ' + escapeHtml(String(p.markAt).slice(5, 16).replace('T', ' ')) : ''}${p.lastPrice != null ? ` · ${escapeHtml(p.ticker)} $${p.lastPrice.toFixed(2)}` : ''}`)}` : isOpt ? `$${(_optLast || 0).toFixed(2)}${_sub(`premium${p.markAt ? ' · ' + escapeHtml(String(p.markAt).slice(5, 16).replace('T', ' ')) : ''}${p.lastPrice != null ? ` · ${escapeHtml(p.ticker)} $${p.lastPrice.toFixed(2)}` : ''}`)}` : _px(p.lastPrice)}</td>
               <td style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">$${p.notional.toLocaleString(undefined,{maximumFractionDigits:0})}</td>
               <td style="font-family:var(--mono);font-size:11px;font-weight:700;color:${pnlColor(p.pnl)}">${fmtPnl(p.pnl)}</td>
               <td style="font-family:var(--mono);font-size:10px;color:var(--ink-faint)" title="${p.lots} separate entries rolled into this position">${p.lots}${p.lots > 1 ? ' adds' : ''}</td>
@@ -42325,9 +42334,12 @@ function renderBetsTab() {
             const _b = _betById.get(L.betId);
             const _opt = _b && _b.instrument === 'option';
             const _put = _opt && String(_b.optionType).toLowerCase() === 'put';
-            const verb = L.label === 'BUY' ? (_opt ? (_put ? '▼ PUT' : '▲ CALL') : (L.dir < 0 ? '▼ SHORT' : '▲ LONG')) : L.label === 'ADD' ? '➕ ADD' : L.label === 'TRIM' ? '✂ TRIM' : L.label === 'DIV' ? '$ DIV' : '✕ CLOSE';
+            const _spr = _opt && Array.isArray(_b.optionLegs) && _b.optionLegs.length === 2;
+            const _sb = _spr && /^bull/.test(_b.optionStructure || '');
+            const verb = L.label === 'BUY' ? (_spr ? `${_sb ? '▲ BULL' : '▼ BEAR'} ${/put/.test(_b.optionStructure || '') ? 'PUT' : 'CALL'} ${_b.optionCredit ? 'CR' : 'DB'}` : _opt ? (_put ? '▼ PUT' : '▲ CALL') : (L.dir < 0 ? '▼ SHORT' : '▲ LONG')) : L.label === 'ADD' ? '➕ ADD' : L.label === 'TRIM' ? '✂ TRIM' : L.label === 'DIV' ? '$ DIV' : '✕ CLOSE';
             const _what = String(L.ticker).startsWith('FX:') ? String(L.ticker).slice(3) : L.ticker;
-            const _optTag = _opt && _b.optionStrike != null ? ` $${(+_b.optionStrike).toFixed(2).replace(/\.00$/, '')} ${escapeHtml(String(_b.optionExpiry || '').slice(5))}` : '';
+            const _optTag = _spr ? ` ${_b.optionLegs.map(l => (+l.strike).toFixed(2).replace(/\.00$/, '')).join('/')} ${escapeHtml(String(_b.optionExpiry || '').slice(5))}`
+              : _opt && _b.optionStrike != null ? ` $${(+_b.optionStrike).toFixed(2).replace(/\.00$/, '')} ${escapeHtml(String(_b.optionExpiry || '').slice(5))}` : '';
             items.push(`<span style="font-family:var(--mono);font-size:10px;color:${_opt ? (_put ? 'var(--neg)' : 'var(--pos)') : col}">${verb} ${escapeHtml(_what)}${_optTag} ${amt}</span>`);
           }
           return `
@@ -47450,3 +47462,4 @@ function _ccyLensBar(stock) {
   };
   ['renderSummary', 'renderResults', 'renderProjection', 'renderMonteCarlo', 'renderValuationConfidenceAudit'].forEach(wrapLens);
 })();
+
