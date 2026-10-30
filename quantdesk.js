@@ -7,6 +7,7 @@
 (function () {
   'use strict';
   const RAW = () => (typeof GH_RAW !== 'undefined' ? GH_RAW : 'https://raw.githubusercontent.com/TheMostLocal');
+  const escapeHtml = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const pct = v => (v == null ? '—' : (v * 100).toFixed(1) + '%');
   const pct2 = v => (v == null ? '—' : (v * 100).toFixed(2) + '%');
@@ -42,9 +43,19 @@
       const head = panel.querySelector('.news-header');
       if (head && head.nextSibling) head.parentNode.insertBefore(host, head.nextSibling); else panel.prepend(host);
     }
-    const [summ, gate, st] = await Promise.all([gh('data/quant/summary.json'), gh('data/quant/gate.json'), sb('/rest/v1/quant_state?id=eq.live&select=doc,updated_at')]);
+    const [summ, gate, st, uni, recent] = await Promise.all([gh('data/quant/summary.json'), gh('data/quant/gate.json'), sb('/rest/v1/quant_state?id=eq.live&select=doc,updated_at'),
+      gh('data/quant/universe.json'), sb('/rest/v1/quant_trades?select=trade&order=closed_at.desc&limit=25')]);
     const live = st && st[0] && st[0].doc;
-    if (!summ && !live) { host.innerHTML = `<h4>Quant book · intraday</h4><div style="font-family:var(--mono);font-size:10.5px;color:var(--ink-dim)">Waiting for the first session of TRAPP2-QUANT (engine 0920 ET; the nightly backtest decides which strategies trade live).</div>`; return; }
+    if (!summ && !live) {
+      // z167: say exactly why nothing shows and what starts it
+      const step = !uni ? 'Neither the backtest nor the engine has run yet - TRAPP2-QUANT needs its Actions secrets (ALPACA_KEY_ID / ALPACA_SECRET_KEY, SUPABASE_URL / SUPABASE_SERVICE_ROLE) and variables (QUANT_FEED, QUANT_STREAM_LIMIT). Then Actions → Quant backtest → Run workflow once; the engine starts itself at 0920 ET (or Actions → Quant engine → Run workflow during the session).'
+        : !gate ? 'The universe is built, but no backtest has finished - Actions → Quant backtest → Run workflow (needs the Alpaca secrets).'
+        : 'Backtest done; waiting for the engine\'s first session (0920 ET, or Actions → Quant engine → Run workflow during the session).';
+      host.innerHTML = `<div style="font-family:var(--mono);font-size:10px;letter-spacing:.12em;color:var(--ink-dim)">QUANT BOOK · INTRADAY &amp; SHORT HORIZON</div>
+        <div style="font-family:var(--mono);font-size:10.5px;color:var(--ink-dim);margin-top:6px;line-height:1.6">Quant trades appear here - today's P&amp;L, open positions, every closed trade and the record against 50.75 %. Nothing yet: ${escapeHtml(step)}</div>`;
+      return;
+    }
+    const trades = (recent || []).map(r => r.trade).filter(Boolean);
     const L = (summ && summ.live) || {}, S = (summ && summ.shadow) || {}, g = (gate && gate.strategies) || {};
     const bench = (summ && summ.benchmarkWinRate) || 0.5075;
     const beat = L.pBeatsBenchmark == null ? '' : L.pBeatsBenchmark < 0.05 ? `<span style="color:var(--pos)">beats ${pct2(bench)} (p = ${L.pBeatsBenchmark})</span>` : `not yet shown to beat ${pct2(bench)} (p = ${L.pBeatsBenchmark})`;
@@ -58,6 +69,9 @@
       <div style="overflow-x:auto"><table class="sb-table" style="width:100%;min-width:560px;font-family:var(--mono);font-size:10.5px"><thead><tr><th style="text-align:left">Book</th><th style="text-align:right">Trades</th><th style="text-align:right">Win</th><th style="text-align:right">95 % CI</th><th style="text-align:right">Expectancy</th><th style="text-align:right">Profit factor</th><th style="text-align:right">t</th><th style="text-align:left">Gate</th></tr></thead><tbody>
         ${row('All live', L, '')}${row('All shadow', S, '')}
         ${Object.entries((summ && summ.byStrategy) || {}).map(([k, v]) => row(k + ' · live', v.live, g[k] ? (g[k].pass ? '<span style="color:var(--pos)">live</span>' : 'shadow') : '—') + row(k + ' · shadow', v.shadow, '')).join('')}</tbody></table></div>
+      ${trades.length ? `<div style="font-family:var(--mono);font-size:10px;letter-spacing:.1em;color:var(--ink-dim);margin:12px 0 4px">LATEST TRADES</div>
+        <div style="overflow-x:auto"><table class="sb-table" style="width:100%;min-width:560px;font-family:var(--mono);font-size:10.5px"><thead><tr><th style="text-align:left">Closed (ET)</th><th style="text-align:left">Strategy</th><th style="text-align:left">Trade</th><th style="text-align:right">Held</th><th style="text-align:right">Net</th><th style="text-align:right">$</th><th style="text-align:left">Why out</th></tr></thead><tbody>
+        ${trades.map(t => `<tr><td>${esc(new Date(t.exit_ts).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))}</td><td>${esc(t.strategy)}${t.mode === 'shadow' ? ' <span style="color:var(--ink-faint)">(shadow)</span>' : ''}</td><td>${esc(t.side)} ${t.qty} ${esc(t.symbol)}</td><td style="text-align:right">${Math.round((t.hold_sec || 0) / 60)} min</td><td style="text-align:right">${bps(t.net_bps)}</td><td style="text-align:right">${usd(t.pnl)}</td><td style="color:var(--ink-faint)">${esc(t.reason_out)}</td></tr>`).join('')}</tbody></table></div>` : ''}
       <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:4px">expectancy = average net result per trade after the spread, slippage and fees · win rate alone can mislead (a strategy can win most trades and lose money) · benchmark: Medallion's often-quoted ${pct2(bench)}</div>` : ''}`;
   }
 
