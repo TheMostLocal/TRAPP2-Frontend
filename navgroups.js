@@ -2,7 +2,7 @@
    navgroups.js — A SIMPLER HOME (z125). Load after app.js.
 
    The top bar shows six things instead of seventeen:
-     News · Bets · Stock Book & Valuation · Macro Data · Data & Research · Review
+     News · Bets · Quant · Stock Book & Valuation · Macro Data · Data & Research · Review   (Quant: z171)
    A group opens its last-used page and shows its own sub-tabs underneath:
      Stock Book & Valuation : Stock Book · Valuation · Options (new: every chain)
      Macro Data             : Regime · Macro Quad · Bonds & Treasuries · Fed ·
@@ -30,7 +30,8 @@
     nav._z125 = true;
     const members = new Set(GROUPS.flatMap(g => g.tabs.map(([t]) => t)));
     nav.querySelectorAll('.tab-btn').forEach(b => { if (members.has(b.dataset.tab)) b.classList.add('nav-hidden'); });
-    let after = nav.querySelector('.tab-btn[data-tab="bets"]') || nav.querySelector('.tab-btn[data-tab="news"]');
+    // z171: groups follow News · Bets · Quant (the quant book's own tab)
+    let after = nav.querySelector('.tab-btn[data-tab="quant"]') || nav.querySelector('.tab-btn[data-tab="bets"]') || nav.querySelector('.tab-btn[data-tab="news"]');
     for (const g of GROUPS) {
       const b = document.createElement('button');
       b.type = 'button';
