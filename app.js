@@ -42531,11 +42531,12 @@ function renderBetsTab() {
 
   // ---- Portfolio ⇄ Ledger toggle. Portfolio = the flashy live dashboard;
   // Ledger = the full transaction history with tap-for-receipt rows. ----
-  const view = _betsView === 'ledger' ? 'ledger' : 'portfolio';
+  const view = _betsView === 'ledger' ? 'ledger' : _betsView === 'quant' ? 'quant' : 'portfolio';   // z170: + the quant book
   const toggle = `
     <div style="display:flex;gap:0;margin:0 0 18px;border:1px solid var(--rule);border-radius:8px;overflow:hidden;width:fit-content">
       <button class="bets-view-btn" data-view="portfolio" style="font-family:var(--mono);font-size:11px;padding:8px 18px;border:none;cursor:pointer;background:${view==='portfolio'?'var(--amber)':'transparent'};color:${view==='portfolio'?'#000':'var(--ink-dim)'};font-weight:${view==='portfolio'?'700':'400'}">◆ Portfolio</button>
       <button class="bets-view-btn" data-view="ledger" style="font-family:var(--mono);font-size:11px;padding:8px 18px;border:none;cursor:pointer;background:${view==='ledger'?'var(--amber)':'transparent'};color:${view==='ledger'?'#000':'var(--ink-dim)'};font-weight:${view==='ledger'?'700':'400'}">▤ Ledger (${perf.bets.length})</button>
+      <button class="bets-view-btn" data-view="quant" title="The quant book (TRAPP2-QUANT): intraday trades, its ledger, statistics and the backtest gate" style="font-family:var(--mono);font-size:11px;padding:8px 18px;border:none;cursor:pointer;background:${view==='quant'?'var(--amber)':'transparent'};color:${view==='quant'?'#000':'var(--ink-dim)'};font-weight:${view==='quant'?'700':'400'}">⚡ Quant</button>
     </div>`;
 
   // ---- Action toolbar (sits BELOW the live summary cards, grouped by purpose)
@@ -42565,7 +42566,12 @@ function renderBetsTab() {
       </div>
     </div>`;
 
-  if (view === 'ledger') {
+  if (view === 'quant') {
+    // z170: the quant book's own dashboard (quantdesk.js) - ledger, statistics, gate, engine status
+    body.innerHTML = toggle + '<div id="quant-dashboard"></div>';
+    if (window.QuantDesk && window.QuantDesk.renderDashboard) window.QuantDesk.renderDashboard(body.querySelector('#quant-dashboard'));
+    else body.querySelector('#quant-dashboard').innerHTML = '<div class="company-card"><div style="font-family:var(--mono);font-size:11px;color:var(--ink-faint)">quantdesk.js did not load - reload the page.</div></div>';
+  } else if (view === 'ledger') {
     body.innerHTML = toggle + ledger + note;
   } else {
     // z129: the equity chart is the same chart as the account value / GoodGlobe (header that follows
