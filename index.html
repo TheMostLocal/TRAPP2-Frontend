@@ -6983,6 +6983,10 @@
     <span class="tab-num">↗</span>
     <span class="tab-label">Bets</span>
   </button>
+  <button class="tab-btn" data-tab="quant" title="Quant book · intraday stat-arb, ETF arbitrage and momentum · its own $100,000 paper ledger">
+    <span class="tab-num">⚡</span>
+    <span class="tab-label">Quant</span>
+  </button>
   <button class="tab-btn" data-tab="research" title="Cross-stockbook statistical ranking · screen by any metric · letter grades · rank in every category">
     <span class="tab-num">🔬</span>
     <span class="tab-label">Research</span>
@@ -8126,6 +8130,19 @@
   <div id="bets-body" class="tab-body-pad" style="padding:0 32px 60px;overflow-x:auto"></div>
 </div><!-- /bets panel -->
 
+<!-- z171: THE QUANT BOOK - its own tab, laid out like Bot Bets (quantdesk.js renders #quant-body) -->
+<div class="tab-panel" data-panel="quant">
+  <div class="news-header">
+    <div>
+      <h1 class="bets-title" style="font-family:var(--serif);font-size:34px;margin:0">Quant Book ⚡</h1>
+      <div style="color:var(--ink-dim);font-family:var(--mono);font-size:11px;letter-spacing:0.05em;margin-top:4px">
+        $100,000 paper book · intraday stat-arb, ETF arbitrage &amp; momentum · its own ledger, separate from the bot
+      </div>
+    </div>
+  </div>
+  <div id="quant-body" class="tab-body-pad" style="padding:0 32px 60px;overflow-x:auto"></div>
+</div><!-- /quant panel -->
+
 <!-- ===== RESEARCH PANEL =====
      Cross-stockbook statistical ranking. Screen the top/bottom 100 on any
      financial metric, or view composite letter grades with each company's
@@ -8943,7 +8960,7 @@
       'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
   }
 </script>
-<script src="app.js?v=20260615z170"></script>
+<script src="app.js?v=20260615z171"></script>
 <!-- Patterns & Templates (TA tool + overview pattern read) - z87 WIP; standalone, loads after app.js -->
 <script src="patterns.js?v=20260615z109"></script>
 <!-- UX: tickers clickable everywhere -> Valuation (z88) -->
@@ -8968,7 +8985,7 @@
 <script src="headcount.js?v=20260615z156"></script>
 <script src="marketextras.js?v=20260615z158"></script>
 <script src="live.js?v=20260615z159"></script>
-<script src="quantdesk.js?v=20260615z170"></script>
-<script src="navgroups.js?v=20260615z158"></script>
+<script src="quantdesk.js?v=20260615z171"></script>
+<script src="navgroups.js?v=20260615z171"></script>
 </body>
 </html>
