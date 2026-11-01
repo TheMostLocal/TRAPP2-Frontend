@@ -1,5 +1,5 @@
 /* ==========================================================================
-   quantdesk.js — the QUANT BOOK tab (z171; card z163, dashboard z170).
+   quantdesk.js — the QUANT BOOK tab (z171, universe line z174; card z163, dashboard z170).
    Its own top-level tab, laid out like Bot Bets: ◆ Portfolio (today, record, equity, engine & pipeline, open
    positions, statistics, the backtest gate, by day, strategies & risk) and ▤ Ledger (every closed quant trade,
    filterable and sortable). Separate from the swing bot in every way: data from TRAPP2-QUANT (data/quant/*) and
@@ -89,6 +89,16 @@
       <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:9px;color:var(--ink-faint)"><span>${esc(pts[0][0])}</span><span>cumulative realized ${usd(last)}</span><span>${esc(pts[pts.length - 1][0])}</span></div>`;
   }
   const _ui = { view: 'portfolio', mode: 'all', strat: 'all', sort: 'exit_ts', dir: -1 };
+  // z174: what the universe holds - every US stock / ETF in the books - and what Alpaca's stock API can't trade
+  function universeLine(u) {
+    const c = u.counts || {}, n = c.symbols || (u.symbols || []).length;
+    const skip = Object.entries(c.notOnAlpacaStocks || {}).sort((a, b) => b[1] - a[1]);
+    const skipped = skip.reduce((x, [, v]) => x + v, 0);
+    return `${n} symbols${c.bookTickers ? ` - every US stock / ETF in the books (${c.usTradable} of ${c.bookTickers} book tickers)` : ''}`
+      + (skipped ? `; ${skipped} not on Alpaca's stock API (${skip.map(([k, v]) => `${v} ${esc(k)}`).join(', ')})` : '')
+      + (c.withSector != null ? ` · ${c.withSector} with a sector ETF · ${c.momentum} liquid enough for breakouts` : '')
+      + `, built ${esc(etTime(u.asOf))} ET`;
+  }
 
   function whyNothing(d) {
     const r = d.runs || {};
@@ -116,7 +126,7 @@
     const r = d.runs || {};
     const status = card('Engine & pipeline', `${why ? `<div style="font-family:var(--mono);font-size:10.5px;color:var(--amber);line-height:1.6;margin-bottom:8px">⚠ ${why}</div>` : ''}
       ${tbl([['Workflow'], ['Latest run']], [['Quant engine (0920 ET → close)', r.engine], ['Quant backtest (the gate, 1840 ET)', r.backtest], ['Tests (every push)', r.tests]].map(([n, x]) => `<tr><td>${n}</td><td>${runTxt(x)}</td></tr>`), 420)}
-      <div style="font-family:var(--mono);font-size:9.5px;color:var(--ink-faint);margin-top:6px">universe: ${d.uni ? `${(d.uni.counts && d.uni.counts.symbols) || (d.uni.symbols || []).length} symbols, built ${esc(etTime(d.uni.asOf))} ET` : 'not built yet'} · gate: ${d.gate ? `from ${esc(etTime(d.gate.asOf))} ET` : 'no backtest yet'} · summary: ${d.summ ? `${esc(etTime(d.summ.asOf))} ET (${ago(d.summ.asOf)})` : 'none yet'} · live state: ${d.live ? `${ago(d.liveAt)} (Supabase)` : 'none'}</div>`);
+      <div style="font-family:var(--mono);font-size:9.5px;color:var(--ink-faint);margin-top:6px">universe: ${d.uni ? universeLine(d.uni) : 'not built yet'} · gate: ${d.gate ? `from ${esc(etTime(d.gate.asOf))} ET` : 'no backtest yet'} · summary: ${d.summ ? `${esc(etTime(d.summ.asOf))} ET (${ago(d.summ.asOf)})` : 'none yet'} · live state: ${d.live ? `${ago(d.liveAt)} (Supabase)` : 'none'}</div>`);
     const pos = card('Open positions', opn.length ? tbl([['Symbol'], ['Side'], ['Qty', 'right'], ['Strategy'], ['Mode'], ['Entry', 'right'], ['Move', 'right']],
       opn.map(p => `<tr><td>${esc(p.symbol)}</td><td>${esc(p.side)}</td><td style="text-align:right">${p.qty}</td><td>${esc(p.strategy)}</td><td>${p.mode === 'shadow' ? '<span style="color:var(--ink-faint)">shadow</span>' : 'live'}</td><td style="text-align:right">$${(+p.entry).toFixed(2)}</td><td style="text-align:right">${bps(p.moveBps)}</td></tr>`))
       : empty(d.live ? 'Flat - the book is always flat by 1555 ET.' : 'None - the engine isn\'t running right now.'));
