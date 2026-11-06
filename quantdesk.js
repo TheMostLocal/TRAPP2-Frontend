@@ -1,5 +1,5 @@
 /* ==========================================================================
-   quantdesk.js — the QUANT BOOK tab (z171, universe line z174; card z163, dashboard z170).
+   quantdesk.js — the QUANT BOOK tab (z171, universe line z174, strategy lab z175; card z163, dashboard z170).
    Its own top-level tab, laid out like Bot Bets: ◆ Portfolio (today, record, equity, engine & pipeline, open
    positions, statistics, the backtest gate, by day, strategies & risk) and ▤ Ledger (every closed quant trade,
    filterable and sortable). Separate from the swing bot in every way: data from TRAPP2-QUANT (data/quant/*) and
@@ -62,11 +62,11 @@
     return out;
   }
   async function loadAll() {
-    const [summ, gate, bt, uni, st, sbTrades, runs] = await Promise.all([gh('data/quant/summary.json'), gh('data/quant/gate.json'), gh('data/quant/backtest/latest.json'),
+    const [lab, summ, gate, bt, uni, st, sbTrades, runs] = await Promise.all([gh('data/quant/lab/latest.json'), gh('data/quant/summary.json'), gh('data/quant/gate.json'), gh('data/quant/backtest/latest.json'),
       gh('data/quant/universe.json'), sb('/rest/v1/quant_state?id=eq.live&select=doc,updated_at'), sb('/rest/v1/quant_trades?select=trade&order=closed_at.desc&limit=500'), actionsRuns()]);
     let trades = (sbTrades || []).map(r => r.trade).filter(Boolean), src = trades.length ? 'Supabase (live)' : '';
     if (!trades.length) { trades = (await dayFiles(14)).sort((a, b) => String(b.exit_ts).localeCompare(String(a.exit_ts))); src = trades.length ? 'GitHub (committed every 15 min)' : ''; }
-    return { summ, gate, bt, uni, live: st && st[0] && st[0].doc, liveAt: st && st[0] && st[0].updated_at, trades, src, runs };
+    return { lab, summ, gate, bt, uni, live: st && st[0] && st[0].doc, liveAt: st && st[0] && st[0].updated_at, trades, src, runs };
   }
 
   // ---- shared pieces, styled like Bot Bets ----
@@ -89,6 +89,37 @@
       <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:9px;color:var(--ink-faint)"><span>${esc(pts[0][0])}</span><span>cumulative realized ${usd(last)}</span><span>${esc(pts[pts.length - 1][0])}</span></div>`;
   }
   const _ui = { view: 'portfolio', mode: 'all', strat: 'all', sort: 'exit_ts', dir: -1 };
+  // z175: the strategy lab in words - which segments, which parameters
+  const SEG_WORDS = { liq: { mega: 'mega names (≥ $1B/day)', large: 'large names ($200M–1B)', mid: 'mid-size names ($50–200M)', small: 'small names (< $50M)', unknown: 'names without volume data' },
+                      tod: { open: 'the open (to 1030)', mid: 'midday (1030–1430)', late: 'late (after 1430)' }, side: { long: 'longs', short: 'shorts' } };
+  function segWords(key) {
+    if (key === 'all') return 'every name, all day';
+    return key.split('|').map(part => { const [d, v] = part.split(':'); return d === 'sector' ? (v === 'none' ? 'no sector' : `${v} names`) : ((SEG_WORDS[d] || {})[v] || part); }).join(' · ');
+  }
+  function variantWords(strategy, p) {
+    if (!p) return '—';
+    const hm = m => `${Math.floor(m / 60)}${String(m % 60).padStart(2, '0')}`;
+    if (strategy === 'sector_reversion') return `z ≥ ${p.z_in} · hold ≤ ${p.max_hold} min${p.vol_spike_max ? ` · skip volume spikes > ${p.vol_spike_max}×` : ''}`;
+    if (strategy === 'etf_arb') return `gap ≥ ${p.thr_mult}× cost · hold ≤ ${p.max_hold} min${p.persist ? ' · 2 minutes running' : ''}`;
+    if (strategy === 'opening_range') return `${p.range_min}-min range · target ${p.target_mult}× risk · entries to ${hm(p.last_entry)} ET`;
+    return Object.entries(p).map(([k, v]) => `${k} ${v}`).join(' · ');
+  }
+  function labCard(lab) {
+    if (!lab || !lab.strategies) return card('Where it works · strategy lab', empty('The lab hasn\'t run yet. Each night (Actions → Quant backtest) it replays the last 40 sessions of real 1-minute bars across every universe name, scores each strategy\'s parameter variants in every segment (liquidity, time of day, side, sector), trains on two thirds and tests on the last third it never saw, with false-discovery control. A strategy trades live only in segments that pass; everywhere else it keeps running in shadow.'));
+    const ses = lab.sessions || {}, r = lab.rules || {};
+    const sub = `retrained ${esc(etTime(lab.asOf))} ET · trained on ${ses.train ? `${esc(ses.train[0])} … ${esc(ses.train[1])} (${ses.train[2]} sessions)` : '—'} · tested on ${ses.test ? `${esc(ses.test[0])} … ${esc(ses.test[1])} (${ses.test[2]})` : '—'} · live needs ≥ ${r.minTrainTrades} / ${r.minTestTrades} trades, ≥ ${r.minTestExpectancyBps} bps a trade out of sample, false-discovery q ≤ ${r.fdr}`;
+    const bodies = Object.entries(lab.strategies).map(([st, m]) => {
+      const variants = Object.assign({}, m.variants || {});
+      const best = Object.entries(m.overall || {}).filter(([, v]) => v.test && v.test.n).sort((a, b) => b[1].test.meanBps - a[1].test.meanBps)[0];
+      const rows = (m.report || []).slice(0, 10).map(c => `<tr><td style="white-space:normal;min-width:180px">${esc(segWords(c.segment))}</td><td style="white-space:normal;min-width:170px">${esc(variantWords(st, (m.live || []).find(a => a.variant === c.variant) ? variants[c.variant] : (c.params || null)) || c.variant)}</td>
+        <td style="text-align:right">${c.train.n} · ${bps(c.train.meanBps)} · t ${c.train.t}</td><td style="text-align:right">${c.test.n} · ${bps(c.test.meanBps)} · t ${c.test.t}</td><td style="text-align:right">${c.q}</td><td>${c.approved ? '<span style="color:var(--pos);font-weight:700">LIVE</span>' : '<span style="color:var(--ink-faint)">shadow</span>'}</td></tr>`);
+      return `<div style="font-family:var(--mono);font-size:11px;margin:12px 0 6px"><strong>${esc(st)}</strong> · ${m.tested} segments tested · <span style="color:${(m.live || []).length ? 'var(--pos)' : 'var(--ink-faint)'}">${(m.live || []).length} live</span>${best ? ` · on every name the best variant made ${bps(best[1].test.meanBps)} a trade out of sample` : ''}</div>`
+        + (rows.length ? tbl([['Segment'], ['Variant'], ['Train (n · net · t)', 'right'], ['Test (n · net · t)', 'right'], ['q', 'right'], ['Status']], rows, 760)
+                       : empty('No segment had enough trades with a positive training result to test.'));
+    }).join('');
+    return card('Where it works · strategy lab', bodies + `<div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:8px">net = after the spread (scaled by each name's liquidity), slippage and fees · q = the chance the result is a false discovery among everything tested · shadow trades keep collecting evidence on every name</div>`, sub);
+  }
+
   // z174: what the universe holds - every US stock / ETF in the books - and what Alpaca's stock API can't trade
   function universeLine(u) {
     const c = u.counts || {}, n = c.symbols || (u.symbols || []).length;
@@ -148,7 +179,7 @@
     const byDay = days.length ? card('By day · live', tbl([['Day'], ['Trades', 'right'], ['P&L', 'right'], ['Win', 'right'], ['Expectancy', 'right']], days.map(([k, v]) => `<tr><td>${esc(k)}</td><td style="text-align:right">${v.n}</td><td style="text-align:right">${usd(v.pnl)}</td><td style="text-align:right">${pct(v.winRate)}</td><td style="text-align:right">${bps(v.expectancyBps)}</td></tr>`), 420)) : '';
     const rulesC = card('Strategies & risk', `${tbl([['Strategy'], ['Family'], ['Looks for'], ['Holds']], Object.entries(STRATS).map(([k, v]) => `<tr><td>${k}</td><td>${v[0]}</td><td style="white-space:normal;min-width:240px">${v[1]}</td><td>${v[2]}</td></tr>`), 640)}
       <div style="font-family:var(--mono);font-size:10px;color:var(--ink-dim);line-height:1.7;margin-top:8px">$100,000 paper book, separate from the swing bot · 0.15 % of capital lost at a stop · ≤ 5 % per position, ≤ 25 positions, ≤ 150 % gross · entries 0940–1540 ET, flat at 1555 ET · no new entries after −1.5 % on the day · spread ≤ 8 bps, price ≥ $5, data ≤ 30 s old · market orders on the Alpaca paper account</div>`);
-    return tiles + status + pos + act + stats + gateC + byDay + rulesC;
+    return tiles + status + labCard(d.lab) + pos + act + stats + gateC + byDay + rulesC;
   }
 
   function ledgerView(d) {
