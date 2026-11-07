@@ -1,5 +1,5 @@
 /* ==========================================================================
-   quantdesk.js — the QUANT BOOK tab (z171, universe line z174, strategy lab z175; card z163, dashboard z170).
+   quantdesk.js — the QUANT BOOK tab (z171, universe line z174, strategy lab z175, curve + stocks / funds z176; card z163, dashboard z170).
    Its own top-level tab, laid out like Bot Bets: ◆ Portfolio (today, record, equity, engine & pipeline, open
    positions, statistics, the backtest gate, by day, strategies & risk) and ▤ Ledger (every closed quant trade,
    filterable and sortable). Separate from the swing bot in every way: data from TRAPP2-QUANT (data/quant/*) and
@@ -78,17 +78,40 @@
     `<tr><td>${esc(label)}</td><td style="text-align:right">${s.n.toLocaleString('en-US')}</td><td style="text-align:right">${pct(s.winRate)}</td><td style="text-align:right;color:var(--ink-faint)">${s.winRateCI95 ? pct(s.winRateCI95[0]) + '–' + pct(s.winRateCI95[1]) : '—'}</td><td style="text-align:right">${bps(s.expectancyBps)}</td><td style="text-align:right">${s.profitFactor == null ? '—' : s.profitFactor.toFixed(2)}</td><td style="text-align:right">${s.tStat == null ? '—' : s.tStat.toFixed(2)}</td>${gate !== undefined ? `<td>${gate}</td>` : ''}</tr>`;
   const runTxt = r => !r ? '—' : r.err ? `<span style="color:var(--ink-faint)">${esc(r.err)}</span>` : r.none ? '<span style="color:var(--ink-faint)">never run</span>'
     : `${r.status !== 'completed' ? `<span style="color:var(--amber)">${esc(r.status)}</span>` : r.conclusion === 'success' ? '<span style="color:var(--pos)">success</span>' : `<span style="color:var(--neg)">${esc(r.conclusion || '?')}</span>`} · ${esc(etTime(r.created_at))} ET <a href="${esc(r.html_url)}" target="_blank" rel="noopener" style="color:var(--amber)">log ↗</a>`;
-  function equitySvg(byDay) {
-    const days = Object.entries(byDay || {}).sort((a, b) => a[0].localeCompare(b[0]));
-    if (days.length < 2) return '';
-    let cum = 0; const pts = days.map(([d, v]) => (cum += (+v.pnl || 0), [d, cum]));
-    const W = 600, H = 120, lo = Math.min(0, ...pts.map(p => p[1])), hi = Math.max(0, ...pts.map(p => p[1])), span = (hi - lo) || 1;
-    const x = i => (i / (pts.length - 1)) * W, y = v => H - ((v - lo) / span) * H;
-    const last = pts[pts.length - 1][1];
-    return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:120px;display:block"><line x1="0" x2="${W}" y1="${y(0).toFixed(1)}" y2="${y(0).toFixed(1)}" stroke="var(--rule)" stroke-dasharray="3 3"/><polyline fill="none" stroke="${last >= 0 ? 'var(--pos)' : 'var(--neg)'}" stroke-width="2" vector-effect="non-scaling-stroke" points="${pts.map((p, i) => `${x(i).toFixed(1)},${y(p[1]).toFixed(1)}`).join(' ')}"/></svg>
-      <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:9px;color:var(--ink-faint)"><span>${esc(pts[0][0])}</span><span>cumulative realized ${usd(last)}</span><span>${esc(pts[pts.length - 1][0])}</span></div>`;
+  // z176: the book's curve - cumulative dollars, live (Alpaca paper) and shadow (simulated) apart, every session
+  function curvePoints(d) {
+    if (d.summ && Array.isArray(d.summ.curve) && d.summ.curve.length) return d.summ.curve;
+    let l = 0, sh = 0;
+    return d.trades.slice().sort((a, b) => String(a.exit_ts).localeCompare(String(b.exit_ts)))
+      .map(t => { if (t.mode === 'live') l += +t.pnl || 0; else if (t.mode === 'shadow') sh += +t.pnl || 0; return [String(t.exit_ts).slice(0, 16), +l.toFixed(2), +sh.toFixed(2)]; });
   }
-  const _ui = { view: 'portfolio', mode: 'all', strat: 'all', sort: 'exit_ts', dir: -1 };
+  function curveSvg(pts) {
+    if (!pts || pts.length < 2) return '';
+    const W = 640, H = 150, n = pts.length;
+    const vals = pts.flatMap(p => [p[1], p[2]]), lo = Math.min(0, ...vals), hi = Math.max(0, ...vals), span = (hi - lo) || 1;
+    const x = i => (i / (n - 1)) * W, y = v => H - ((v - lo) / span) * (H - 6) - 3;
+    const line = k => pts.map((p, i) => `${x(i).toFixed(1)},${y(p[k]).toFixed(1)}`).join(' ');
+    const days = []; pts.forEach((p, i) => { const dd = p[0].slice(0, 10); if (!days.length || days[days.length - 1][0] !== dd) days.push([dd, i]); });
+    const L = pts[n - 1][1], S = pts[n - 1][2], hasLive = pts.some(p => p[1] !== 0);
+    return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:150px;display:block">
+      ${days.slice(1).map(([, i]) => `<line x1="${x(i).toFixed(1)}" x2="${x(i).toFixed(1)}" y1="0" y2="${H}" stroke="var(--rule)" stroke-width="1" vector-effect="non-scaling-stroke"/>`).join('')}
+      <line x1="0" x2="${W}" y1="${y(0).toFixed(1)}" y2="${y(0).toFixed(1)}" stroke="var(--ink-faint)" stroke-dasharray="3 3" vector-effect="non-scaling-stroke"/>
+      <polyline fill="none" stroke="var(--amber)" stroke-width="1.6" stroke-dasharray="5 3" vector-effect="non-scaling-stroke" points="${line(2)}"/>
+      ${hasLive ? `<polyline fill="none" stroke="${L >= 0 ? 'var(--pos)' : 'var(--neg)'}" stroke-width="2.2" vector-effect="non-scaling-stroke" points="${line(1)}"/>` : ''}
+    </svg>
+    <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px 12px;font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:3px">
+      <span>${esc(days[0][0])}${days.length > 1 ? ` … ${esc(days[days.length - 1][0])} (${days.length} sessions)` : ''}</span>
+      <span>— live ${hasLive ? usd(L) : '(no live trades yet)'} &nbsp; <span style="color:var(--amber)">- - shadow ${usd(S)} (simulated, not in the book)</span></span>
+    </div>`;
+  }
+  function byStrategyLine(d) {
+    const by = {};
+    d.trades.forEach(t => { const k = kindOf(t, d), b = by[t.strategy] = by[t.strategy] || { n: 0, stock: 0, fund: 0 }; b.n++; b[k] = (b[k] || 0) + 1; });
+    const parts = Object.entries(by).sort((a, b) => b[1].n - a[1].n).map(([st, b]) => `${esc(st)} ${b.n.toLocaleString('en-US')} (${[b.stock ? `${b.stock.toLocaleString('en-US')} stocks` : '', b.fund ? `${b.fund.toLocaleString('en-US')} funds` : ''].filter(Boolean).join(', ')})`);
+    return parts.length ? `<div style="font-family:var(--mono);font-size:9.5px;color:var(--ink-dim);margin-top:8px">trades on record: ${parts.join(' · ')}</div>` : '';
+  }
+  const kindOf = (t, d) => (t.tags && t.tags.kind) || (t.strategy === 'etf_arb' ? 'fund' : ((d.uni && d.uni.kinds && d.uni.kinds[t.symbol]) || 'stock'));
+  const _ui = { view: 'portfolio', mode: 'all', strat: 'all', kind: 'all', sort: 'exit_ts', dir: -1 };
   // z175: the strategy lab in words - which segments, which parameters
   const SEG_WORDS = { liq: { mega: 'mega names (≥ $1B/day)', large: 'large names ($200M–1B)', mid: 'mid-size names ($50–200M)', small: 'small names (< $50M)', unknown: 'names without volume data' },
                       tod: { open: 'the open (to 1030)', mid: 'midday (1030–1430)', late: 'late (after 1430)' }, side: { long: 'longs', short: 'shorts' } };
@@ -153,7 +176,7 @@
       ${tile('SHADOW RECORD', S.n ? `${S.n.toLocaleString('en-US')} trades` : '—', S.n ? `win ${pct(S.winRate)} · ${bps(S.expectancyBps)}` : 'simulated fills while unproven')}
       ${tile('VS 50.75 %', L.pBeatsBenchmark == null ? '—' : L.pBeatsBenchmark < 0.05 ? '<span style="color:var(--pos)">beats it</span>' : 'not yet shown', L.pBeatsBenchmark == null ? 'needs live trades' : `p = ${L.pBeatsBenchmark}`)}
       ${tile('DATA', d.live && d.live.feed ? (d.live.feed.stream ? '<span style="color:var(--pos)">streaming</span>' : d.live.feed.pollerOk ? 'polling' : '<span style="color:var(--neg)">stale</span>') : '—', d.live && d.live.feed ? esc(d.live.feed.feed || '') : 'engine not running')}
-    </div>${equitySvg(d.summ && d.summ.byDay) ? `<div style="margin-top:12px">${equitySvg(d.summ.byDay)}</div>` : ''}</div>`;
+    </div>${curveSvg(curvePoints(d)) ? `<div style="margin-top:14px">${curveSvg(curvePoints(d))}</div>` : ''}${byStrategyLine(d)}</div>`;
     const r = d.runs || {};
     const status = card('Engine & pipeline', `${why ? `<div style="font-family:var(--mono);font-size:10.5px;color:var(--amber);line-height:1.6;margin-bottom:8px">⚠ ${why}</div>` : ''}
       ${tbl([['Workflow'], ['Latest run']], [['Quant engine (0920 ET → close)', r.engine], ['Quant backtest (the gate, 1840 ET)', r.backtest], ['Tests (every push)', r.tests]].map(([n, x]) => `<tr><td>${n}</td><td>${runTxt(x)}</td></tr>`), 420)}
@@ -184,7 +207,8 @@
 
   function ledgerView(d) {
     const strategies = [...new Set(d.trades.map(t => t.strategy))].sort();
-    let shown = d.trades.filter(t => (_ui.mode === 'all' || t.mode === _ui.mode) && (_ui.strat === 'all' || t.strategy === _ui.strat));
+    let shown = d.trades.filter(t => (_ui.mode === 'all' || t.mode === _ui.mode) && (_ui.strat === 'all' || t.strategy === _ui.strat) && (_ui.kind === 'all' || kindOf(t, d) === _ui.kind));
+    const nStock = d.trades.filter(t => kindOf(t, d) === 'stock').length, nFund = d.trades.length - nStock;
     const key = _ui.sort, num = ['net_bps', 'pnl', 'hold_sec', 'qty'].includes(key);
     shown = shown.slice().sort((a, b) => (num ? ((+a[key] || 0) - (+b[key] || 0)) : String(a[key] || '').localeCompare(String(b[key] || ''))) * _ui.dir);
     const liveT = d.trades.filter(t => t.mode === 'live'), shadowT = d.trades.filter(t => t.mode === 'shadow');
@@ -196,9 +220,10 @@
         <span style="color:var(--ink-faint)">Shadow (simulated, not in the book): <strong>${usd(sum(shadowT))}</strong> (${shadowT.length} trades)</span>
       </div></div>`;
     const ledger = card(`Quant ledger · ${d.trades.length} trade${d.trades.length === 1 ? '' : 's'}`, d.trades.length
-      ? `<div>${chip('mode', 'all', 'All')}${chip('mode', 'live', 'Live')}${chip('mode', 'shadow', 'Shadow')}<span style="display:inline-block;width:10px"></span>${chip('strat', 'all', 'Every strategy')}${strategies.map(x => chip('strat', x, esc(x))).join('')}</div>
+      ? `<div>${chip('kind', 'all', `All ${d.trades.length.toLocaleString('en-US')}`)}${chip('kind', 'stock', `Stocks ${nStock.toLocaleString('en-US')}`)}${chip('kind', 'fund', `ETFs & funds ${nFund.toLocaleString('en-US')}`)}</div>
+         <div>${chip('mode', 'all', 'All')}${chip('mode', 'live', 'Live')}${chip('mode', 'shadow', 'Shadow')}<span style="display:inline-block;width:10px"></span>${chip('strat', 'all', 'Every strategy')}${strategies.map(x => chip('strat', x, esc(x))).join('')}</div>
          ${tbl([['Closed (ET)', 'left', 'exit_ts'], ['Strategy', 'left', 'strategy'], ['Mode'], ['Symbol', 'left', 'symbol'], ['Side'], ['Qty', 'right', 'qty'], ['Entry', 'right'], ['Exit', 'right'], ['Held', 'right', 'hold_sec'], ['Net', 'right', 'net_bps'], ['$', 'right', 'pnl'], ['Why out']],
-           shown.slice(0, 300).map(t => `<tr><td>${esc(etTime(t.exit_ts))}</td><td>${esc(t.strategy)}</td><td>${t.mode === 'shadow' ? '<span style="color:var(--ink-faint)">shadow</span>' : esc(t.mode)}</td><td>${esc(t.symbol)}</td><td>${esc(t.side)}</td><td style="text-align:right">${t.qty}</td><td style="text-align:right">$${(+t.entry_px).toFixed(2)}</td><td style="text-align:right">$${(+t.exit_px).toFixed(2)}</td><td style="text-align:right">${Math.round((t.hold_sec || 0) / 60)} min</td><td style="text-align:right">${bps(t.net_bps)}</td><td style="text-align:right">${usd(t.pnl)}</td><td style="color:var(--ink-faint)">${esc(t.reason_out)}</td></tr>`), 900)}`
+           shown.slice(0, 300).map(t => `<tr><td>${esc(etTime(t.exit_ts))}</td><td>${esc(t.strategy)}</td><td>${t.mode === 'shadow' ? '<span style="color:var(--ink-faint)">shadow</span>' : esc(t.mode)}</td><td>${esc(t.symbol)} <span style="color:var(--ink-faint);font-size:9px">${kindOf(t, d) === 'fund' ? 'fund' : 'stock'}</span></td><td>${esc(t.side)}</td><td style="text-align:right">${t.qty}</td><td style="text-align:right">$${(+t.entry_px).toFixed(2)}</td><td style="text-align:right">$${(+t.exit_px).toFixed(2)}</td><td style="text-align:right">${Math.round((t.hold_sec || 0) / 60)} min</td><td style="text-align:right">${bps(t.net_bps)}</td><td style="text-align:right">${usd(t.pnl)}</td><td style="color:var(--ink-faint)">${esc(t.reason_out)}</td></tr>`), 900)}`
       : empty('No quant trades yet. Every closed trade lands here - live (Alpaca paper fills) and shadow (simulated, for strategies the gate hasn\'t passed) - with entry and exit, hold time, net bps after costs, dollars and why it closed.'),
       d.src ? `source: ${d.src}${shown.length > 300 ? ' · showing 300' : ''} · tap a column to sort` : '');
     const note = `<div class="company-card" style="border-left:3px solid var(--ink-faint)"><div style="font-family:var(--mono);font-size:10px;color:var(--ink-dim);line-height:1.7"><strong style="color:var(--ink)">Separate books:</strong> this ledger is the quant book's alone (TRAPP2-QUANT, Supabase quant_trades). The swing bot's trades live on Bets and never mix with these; shadow trades are simulated and never count toward the book.</div></div>`;
