@@ -4600,7 +4600,7 @@ async function checkStorageHealth() {
   if (mb > 3.5) {
     // Prune order: re-fetchable, biggest-first. NEVER touches portfolio, bets,
     // notes, valuations, personal book, overrides, or settings.
-    const prunable = ['valuatio.desc.cache.v1', 'valuatio.macroData.v1', 'valuatio.bonds.v1', 'valuatio.cryptoPrices.v1', 'valuatio.signalsConsensus.v1'];
+    const prunable = ['valuatio.desc.cache.v1', 'valuatio.macroData.v1', 'valuatio.macroData.v2', 'valuatio.bonds.v1', 'valuatio.cryptoPrices.v1', 'valuatio.signalsConsensus.v1'];
     let freed = 0;
     for (const k of prunable) {
       const v = localStorage.getItem(k);
@@ -7906,7 +7906,7 @@ renderSaved();
 //   CPI YoY rate-of-change.
 // ============================================================
 
-const MACRO_CACHE_KEY = 'valuatio.macroData.v1';
+const MACRO_CACHE_KEY = 'valuatio.macroData.v2';   // z177: v2 = real GDP (v1 cached nominal GDP)
 const MACRO_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const SHEET_CACHE_KEY = 'valuatio.sheet.cache.v1';
 const SHEET_CACHE_TTL_MS = 5 * 60 * 1000; // 5 min — sheets change frequently
@@ -9503,13 +9503,30 @@ function classifyQuad(growthRoC, inflationRoC) {
   return 4;
 }
 
+// z177: same arithmetic as TRAPP2-1/pipeline/fetch_macro_quad.py - the inflation RoC compares with the CPI YoY of the
+// month THREE CALENDAR MONTHS earlier, looked up by date. It used to step back three ROWS: across a month with no CPI
+// (October 2025) that reached four months back (December 2025 read Q3 instead of Q4), and the first two rows of the
+// window used one- and two-month windows. A missing comparison month is interpolated from its neighbours (flagged).
+function _quadMonthShift(d, k) {
+  let y = +String(d).slice(0, 4), m = +String(d).slice(5, 7) - k;
+  while (m <= 0) { m += 12; y -= 1; }
+  while (m > 12) { m -= 12; y += 1; }
+  return `${y}-${String(m).padStart(2, '0')}-01`;
+}
 function buildQuadHistory(gdpYoY, cpiYoY, lookbackPeriods = 24) {
+  const byDate = new Map(cpiYoY.map(c => [c.date, c.yoy]));
+  const yoyAt = d => {
+    if (byDate.has(d)) return { v: byDate.get(d), interp: false };
+    const a = _quadMonthShift(d, 1), b = _quadMonthShift(d, -1);
+    return byDate.has(a) && byDate.has(b) ? { v: (byDate.get(a) + byDate.get(b)) / 2, interp: true } : null;
+  };
   const recent = cpiYoY.slice(-lookbackPeriods);
   const result = [];
-  for (let i = 1; i < recent.length; i++) {
+  for (let i = 0; i < recent.length; i++) {
     const cpiPoint = recent[i];
-    const cpiPrior = recent[Math.max(i - 3, 0)]; // 3-month RoC for inflation
-    const inflationRoC = cpiPoint.yoy - cpiPrior.yoy;
+    const prior = yoyAt(_quadMonthShift(cpiPoint.date, 3));   // 3-month RoC for inflation, by date
+    if (!prior) continue;
+    const inflationRoC = cpiPoint.yoy - prior.v;
 
     const gdpPoint = [...gdpYoY].reverse().find(g => g.date <= cpiPoint.date);
     const gdpPriorPoint = gdpPoint
@@ -9525,6 +9542,8 @@ function buildQuadHistory(gdpYoY, cpiYoY, lookbackPeriods = 24) {
       growthRoC,
       inflationRoC,
       quad: classifyQuad(growthRoC, inflationRoC),
+      gdpQuarter: gdpPoint.date,
+      interpolated: prior.interp,
     });
   }
   return result;
@@ -10256,7 +10275,7 @@ async function fetchMacroFromGitHub(setStatus) {
 
   setStatus && setStatus('Loading macro from GitHub…');
   const [gdpRows, cpiRows, tsyRows, fedRows] = await Promise.all([
-    fetchSeries('GDP'),
+    fetchSeries('GDPC1'),          // z177: REAL GDP - the official quad's series; 'GDP' (nominal) let inflation pose as growth
     fetchSeries('CPIAUCSL'),
     fetchSeries('DGS10'),
     fetchSeries('DFF'),
@@ -10427,6 +10446,7 @@ async function loadMacroTab(forceRefresh = false) {
         if (_qr.ok) {
           const _qj = await _qr.json();
           if (_qj && _qj.current && _qj.current.quad) current = { ...current, ..._qj.current };
+          if (_qj) window._quadDoc = _qj;          // z177: official + nowcast + agreement, for the hero
         }
       }
     } catch (e) { console.warn('[quad] nowcast fetch failed — using FRED point', e.message); }
@@ -10565,11 +10585,18 @@ function renderQuadHero() {
       }).join(' \u00b7 ');
       const offRef = (cur.growthYoY != null && cur.inflationYoY != null)
         ? `<div style="color:var(--ink-faint);font-size:10px;margin-top:5px">Last official print${cur.officialAsOf ? ' (' + cur.officialAsOf + ')' : ''}: GDP ${(cur.growthYoY * 100).toFixed(1)}% YoY \u00b7 CPI ${(cur.inflationYoY * 100).toFixed(1)}% YoY \u2014 the monthly series drives the history chart below.</div>` : '';
+      // z177: name the OFFICIAL quad too - the nowcast and the GDP/CPI quad can disagree, and that matters for trading
+      const _qd = window._quadDoc || {}, _off = _qd.official || _qd.officialLatest, _ag = _qd.agree;
+      const offQuad = (_off && _off.quad && QUADS[_off.quad])
+        ? `<div style="margin-top:6px;font-size:10.5px"><span style="color:var(--ink-dim)">Official GDP/CPI quad:</span> <strong>Quad ${_off.quad} · ${QUADS[_off.quad].name}</strong>`
+          + ` <span style="color:var(--ink-faint)">(CPI ${String(_off.asOf || '').slice(0, 7)}${_off.gdpQuarter ? ' · GDP quarter from ' + String(_off.gdpQuarter).slice(0, 7) : ''} · growth ${_off.growthDir || '—'}, inflation ${_off.inflationDir || '—'})</span>`
+          + (_ag ? `<div style="margin-top:3px;color:${_ag.sameQuad ? 'var(--pos)' : 'var(--data-amber)'}">${_ag.sameQuad ? '✓ ' : '⚠ '}${_ag.note}${_ag.sameQuad ? '' : ' - the bot\'s regime certainty counts this'}</div>` : '') + `</div>`
+        : '';
       ncHost.innerHTML =
         `<span style="color:var(--data-amber);font-size:10px;letter-spacing:0.15em;font-weight:700">MARKET NOWCAST</span>` +
         `<span style="color:var(--ink-faint);margin-left:8px">as of ${cur.asOf || 'today'} \u00b7 ${Math.round((cur.confidence || 0) * 100)}% conf \u00b7 daily market ROC</span>` +
         `<div style="color:var(--ink-dim);font-size:10px;margin-top:4px">Fresh estimate from live markets (independent of the lagged GDP/CPI history). Drivers: ${drivers}</div>` +
-        offRef;
+        offQuad + offRef;
     } else if (ncHost) { ncHost.remove(); }
   }
 
@@ -10686,7 +10713,11 @@ function renderQuadHistory() {
   const yMax = Math.max(...allRoC) * 1.1;
   const yRange = yMax - yMin;
 
-  const x = (i) => padL + (i / (data.length - 1)) * plotW;
+  // z177: points sit at their calendar month, so a month with no CPI (October 2025) shows as a gap in time
+  // instead of silently pulling every later point one month to the left
+  const _mIdx = d => (+String(d).slice(0, 4)) * 12 + (+String(d).slice(5, 7)) - 1;
+  const _m0 = _mIdx(data[0].date), _mSpan = Math.max(1, _mIdx(data[data.length - 1].date) - _m0);
+  const x = (i) => padL + ((_mIdx(data[Math.max(0, Math.min(data.length - 1, i))].date) - _m0) / _mSpan) * plotW;
   const y = (v) => padT + plotH - ((v - yMin) / yRange) * plotH;
 
   // Cache geometry for the hover handler
@@ -10971,9 +11002,9 @@ function attachQuadChartHover() {
       renderQuadHistory(); // clear hover marker
       return;
     }
-    // Find closest data point
-    const fraction = (mx - geom.padL) / geom.plotW;
-    const idx = Math.round(fraction * (geom.data.length - 1));
+    // Find closest data point (z177: by position - points now sit at their calendar month)
+    let idx = 0, best = Infinity;
+    geom.data.forEach((_, i) => { const dd = Math.abs(geom.x(i) - mx); if (dd < best) { best = dd; idx = i; } });
     const d = geom.data[idx];
     if (!d) return;
 
@@ -12691,6 +12722,7 @@ function purgeAllDataCaches() {
     'valuatio.desc.cache.v1',
     'valuatio.taxonomy.cache.v1',
     'valuatio.macroData.v1',
+    'valuatio.macroData.v2',
     'valuatio.bonds.v1',
     'valuatio.news.v1',          // news article cache (can grow to several MB)
     'valuatio.news.mynews.v1',   // per-ticker my-news cache
@@ -13524,9 +13556,9 @@ function attachPriceChartHover() {
       renderPriceChart();
       return;
     }
-    // Find closest data point
-    const fraction = (mx - geom.padL) / geom.plotW;
-    const idx = Math.round(fraction * (geom.data.length - 1));
+    // Find closest data point (z177: by position - points now sit at their calendar month)
+    let idx = 0, best = Infinity;
+    geom.data.forEach((_, i) => { const dd = Math.abs(geom.x(i) - mx); if (dd < best) { best = dd; idx = i; } });
     const d = geom.data[idx];
     if (!d) return;
 
