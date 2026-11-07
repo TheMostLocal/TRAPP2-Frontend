@@ -1,5 +1,5 @@
 /* ==========================================================================
-   quantdesk.js — the QUANT BOOK tab (z171, universe line z174, strategy lab z175, curve + stocks / funds z176; card z163, dashboard z170).
+   quantdesk.js — the QUANT BOOK tab (z171, universe line z174, strategy lab z175, curve + stocks / funds z176, macro quad z177; card z163, dashboard z170).
    Its own top-level tab, laid out like Bot Bets: ◆ Portfolio (today, record, equity, engine & pipeline, open
    positions, statistics, the backtest gate, by day, strategies & risk) and ▤ Ledger (every closed quant trade,
    filterable and sortable). Separate from the swing bot in every way: data from TRAPP2-QUANT (data/quant/*) and
@@ -62,11 +62,11 @@
     return out;
   }
   async function loadAll() {
-    const [lab, summ, gate, bt, uni, st, sbTrades, runs] = await Promise.all([gh('data/quant/lab/latest.json'), gh('data/quant/summary.json'), gh('data/quant/gate.json'), gh('data/quant/backtest/latest.json'),
+    const [quadDoc, lab, summ, gate, bt, uni, st, sbTrades, runs] = await Promise.all([fetch(`${RAW()}/TRAPP2-1/main/data/macro/quad.json?_=${Math.floor(Date.now() / 600000)}`, { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).catch(() => null), gh('data/quant/lab/latest.json'), gh('data/quant/summary.json'), gh('data/quant/gate.json'), gh('data/quant/backtest/latest.json'),
       gh('data/quant/universe.json'), sb('/rest/v1/quant_state?id=eq.live&select=doc,updated_at'), sb('/rest/v1/quant_trades?select=trade&order=closed_at.desc&limit=500'), actionsRuns()]);
     let trades = (sbTrades || []).map(r => r.trade).filter(Boolean), src = trades.length ? 'Supabase (live)' : '';
     if (!trades.length) { trades = (await dayFiles(14)).sort((a, b) => String(b.exit_ts).localeCompare(String(a.exit_ts))); src = trades.length ? 'GitHub (committed every 15 min)' : ''; }
-    return { lab, summ, gate, bt, uni, live: st && st[0] && st[0].doc, liveAt: st && st[0] && st[0].updated_at, trades, src, runs };
+    return { quadDoc, lab, summ, gate, bt, uni, live: st && st[0] && st[0].doc, liveAt: st && st[0] && st[0].updated_at, trades, src, runs };
   }
 
   // ---- shared pieces, styled like Bot Bets ----
@@ -110,14 +110,34 @@
     const parts = Object.entries(by).sort((a, b) => b[1].n - a[1].n).map(([st, b]) => `${esc(st)} ${b.n.toLocaleString('en-US')} (${[b.stock ? `${b.stock.toLocaleString('en-US')} stocks` : '', b.fund ? `${b.fund.toLocaleString('en-US')} funds` : ''].filter(Boolean).join(', ')})`);
     return parts.length ? `<div style="font-family:var(--mono);font-size:9.5px;color:var(--ink-dim);margin-top:8px">trades on record: ${parts.join(' · ')}</div>` : '';
   }
-  const kindOf = (t, d) => (t.tags && t.tags.kind) || (t.strategy === 'etf_arb' ? 'fund' : ((d.uni && d.uni.kinds && d.uni.kinds[t.symbol]) || 'stock'));
+  // z177: stock or fund - the trade's own tag (z176+), the universe's (z176+), else the Stock Book (only funds carry an
+  // expense ratio), else the funds the engine knows (sector / index ETFs and the ETFs it arbitrages). Older trades
+  // (FXI, YINN traded by opening range before z176) no longer fall through to "stock".
+  let _erMap = null;
+  function expenseRatioFund(sym) {
+    if (_erMap === null && typeof state !== 'undefined' && state.stockbook && Array.isArray(state.stockbook.rows) && state.stockbook.rows.length) {
+      _erMap = new Map();
+      state.stockbook.rows.forEach(r => { const er = r && (r.expenseRatio ?? r['expense ratio']); if (r && r.ticker) _erMap.set(String(r.ticker).toUpperCase(), er != null && er !== '' && isFinite(+er)); });
+    }
+    return _erMap ? _erMap.get(String(sym).toUpperCase()) : undefined;
+  }
+  const KNOWN_FUNDS = new Set(['SPY', 'QQQ', 'IWM', 'DIA', 'XLK', 'XLF', 'XLE', 'XLV', 'XLY', 'XLP', 'XLI', 'XLU', 'XLB', 'XLRE', 'XLC']);
+  const kindOf = (t, d) => {
+    if (t.tags && t.tags.kind) return t.tags.kind;
+    if (t.strategy === 'etf_arb') return 'fund';
+    const uk = d.uni && d.uni.kinds && d.uni.kinds[t.symbol];
+    if (uk) return uk;
+    const er = expenseRatioFund(t.symbol);
+    if (er !== undefined) return er ? 'fund' : 'stock';
+    return KNOWN_FUNDS.has(t.symbol) || (d.uni && d.uni.etf_weights && d.uni.etf_weights[t.symbol]) ? 'fund' : 'stock';
+  };
   const _ui = { view: 'portfolio', mode: 'all', strat: 'all', kind: 'all', sort: 'exit_ts', dir: -1 };
   // z175: the strategy lab in words - which segments, which parameters
   const SEG_WORDS = { liq: { mega: 'mega names (≥ $1B/day)', large: 'large names ($200M–1B)', mid: 'mid-size names ($50–200M)', small: 'small names (< $50M)', unknown: 'names without volume data' },
                       tod: { open: 'the open (to 1030)', mid: 'midday (1030–1430)', late: 'late (after 1430)' }, side: { long: 'longs', short: 'shorts' } };
   function segWords(key) {
     if (key === 'all') return 'every name, all day';
-    return key.split('|').map(part => { const [d, v] = part.split(':'); return d === 'sector' ? (v === 'none' ? 'no sector' : `${v} names`) : ((SEG_WORDS[d] || {})[v] || part); }).join(' · ');
+    return key.split('|').map(part => { const [d, v] = part.split(':'); return d === 'sector' ? (v === 'none' ? 'no sector' : `${v} names`) : d === 'quad' ? `official ${v.replace('Q', 'Quad ')}` : ((SEG_WORDS[d] || {})[v] || part); }).join(' · ');
   }
   function variantWords(strategy, p) {
     if (!p) return '—';
@@ -141,6 +161,19 @@
                        : empty('No segment had enough trades with a positive training result to test.'));
     }).join('');
     return card('Where it works · strategy lab', bodies + `<div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:8px">net = after the spread (scaled by each name's liquidity), slippage and fees · q = the chance the result is a false discovery among everything tested · shadow trades keep collecting evidence on every name</div>`, sub);
+  }
+
+  // z177: the macro quad the quant book records on every trade (official GDP/CPI and the market nowcast)
+  const QN = { 1: 'Goldilocks', 2: 'Reflation', 3: 'Stagflation', 4: 'Deflation' };
+  function quadLine(doc) {
+    if (!doc) return '';
+    const cur = doc.current || {}, off = doc.official || doc.officialLatest || (cur.method !== 'market-nowcast' ? cur : null) || {};
+    const nc = doc.nowcast || (cur.method === 'market-nowcast' ? cur : null) || {};
+    const ag = doc.agree || (off.quad && nc.quad ? { sameQuad: off.quad === nc.quad } : null);
+    const part = (q, label, asOf) => q ? `<strong>Q${q} ${QN[q] || ''}</strong> <span style="color:var(--ink-faint)">${label}${asOf ? ' · ' + esc(String(asOf).slice(0, 10)) : ''}</span>` : '';
+    return `<div style="font-family:var(--mono);font-size:10px;line-height:1.7;margin-top:8px;padding:8px 10px;border-left:2px solid ${ag && !ag.sameQuad ? 'var(--amber)' : 'var(--rule)'}">macro quad: ${part(off.quad, 'official GDP/CPI', off.asOf)}${nc.quad ? ` · ${part(nc.quad, 'market nowcast', nc.asOf)}` : ''}`
+      + (ag ? `<br><span style="color:${ag.sameQuad ? 'var(--pos)' : 'var(--amber)'}">${ag.sameQuad ? '✓ they agree' : '⚠ ' + esc(ag.note || 'they disagree')}</span>` : '')
+      + `<br><span style="color:var(--ink-faint)">every quant trade records both; the lab tests each strategy by the official quad as it was known that day - it changes nothing until a segment earns it</span></div>`;
   }
 
   // z174: what the universe holds - every US stock / ETF in the books - and what Alpaca's stock API can't trade
@@ -180,6 +213,7 @@
     const r = d.runs || {};
     const status = card('Engine & pipeline', `${why ? `<div style="font-family:var(--mono);font-size:10.5px;color:var(--amber);line-height:1.6;margin-bottom:8px">⚠ ${why}</div>` : ''}
       ${tbl([['Workflow'], ['Latest run']], [['Quant engine (0920 ET → close)', r.engine], ['Quant backtest (the gate, 1840 ET)', r.backtest], ['Tests (every push)', r.tests]].map(([n, x]) => `<tr><td>${n}</td><td>${runTxt(x)}</td></tr>`), 420)}
+      ${quadLine(d.quadDoc)}
       <div style="font-family:var(--mono);font-size:9.5px;color:var(--ink-faint);margin-top:6px">universe: ${d.uni ? universeLine(d.uni) : 'not built yet'} · gate: ${d.gate ? `from ${esc(etTime(d.gate.asOf))} ET` : 'no backtest yet'} · summary: ${d.summ ? `${esc(etTime(d.summ.asOf))} ET (${ago(d.summ.asOf)})` : 'none yet'} · live state: ${d.live ? `${ago(d.liveAt)} (Supabase)` : 'none'}</div>`);
     const pos = card('Open positions', opn.length ? tbl([['Symbol'], ['Side'], ['Qty', 'right'], ['Strategy'], ['Mode'], ['Entry', 'right'], ['Move', 'right']],
       opn.map(p => `<tr><td>${esc(p.symbol)}</td><td>${esc(p.side)}</td><td style="text-align:right">${p.qty}</td><td>${esc(p.strategy)}</td><td>${p.mode === 'shadow' ? '<span style="color:var(--ink-faint)">shadow</span>' : 'live'}</td><td style="text-align:right">$${(+p.entry).toFixed(2)}</td><td style="text-align:right">${bps(p.moveBps)}</td></tr>`))
