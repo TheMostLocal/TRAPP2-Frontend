@@ -412,6 +412,20 @@ function setFredKey(k) {
 //   SPY261204C00800000 (OCC option contract)
 //   ^125904-USD-STRD (special index format)
 const TICKER_REGEX = /^(?:\^[A-Z0-9.\-]{1,30}|[A-Z]+\d{6}[CP]\d{8}|[A-Z0-9]{1,12}(?:[.\-][A-Z0-9]{1,5})*(?:=F|=X|-USD|-USDT|\.PVT|!)?)$/;
+// z178: exchange-list symbols -> the form the data uses (Yahoo): ABR$D -> ABR-PD (preferred), BRK.B -> BRK-B (class),
+// XYZ.U -> XYZ-UN, XYZ.W -> XYZ-WT, XYZ.R -> XYZ-RI. "$" never passed TICKER_REGEX, so preferreds pasted from an
+// exchange list vanished silently; foreign suffixes (.L .PA .T ...) are left alone. The pipelines do the same.
+function normListedSymbol(raw) {
+  const t = String(raw || '').trim().toUpperCase();
+  if (t.includes('$')) { const i = t.indexOf('$'); const root = t.slice(0, i), ser = t.slice(i + 1); return ser ? `${root}-P${ser}` : `${root}-P`; }
+  let m = t.match(/^([A-Z]{1,5})\.(U|W|WS|R)$/);
+  if (m) return m[1] + ({ U: '-UN', W: '-WT', WS: '-WT', R: '-RI' })[m[2]];
+  m = t.match(/^([A-Z]{1,5})\.([A-C]|V)$/);
+  if (m) return `${m[1]}-${m[2]}`;
+  return t;
+}
+if (typeof window !== 'undefined') window.normListedSymbol = normListedSymbol;
+
 function isValidTicker(raw) {
   if (!raw) return false;
   const t = String(raw).trim().toUpperCase();
@@ -973,7 +987,7 @@ let _signalsConsensus = null;
 // book writes its own data/signals.json. When the consensus file is missing, build it here from the books:
 // market-wide signals from the newest book, per-ticker signals merged (each ticker lives in one book).
 async function _consensusFromBooks() {
-  const books = ['TRAPP2', 'TRAPP2-1', 'TRAPP2-2', 'TRAPP2-3'];
+  const books = ['TRAPP2', 'TRAPP2-1', 'TRAPP2-2', 'TRAPP2-3', 'TRAPP2-4'];   // z178: + TRAPP2-4
   const docs = (await Promise.all(books.map(async b => {
     try { const r = await fetch(`${GH_RAW}/${b}/main/data/signals.json`, { cache: 'no-cache' }); return r.ok ? [b, await r.json()] : null; } catch { return null; }
   }))).filter(Boolean);
@@ -2374,7 +2388,7 @@ function parseSheetCsv(text) {
   for (let i = 0; i < allLineCells.length; i++) {
     const cells = allLineCells[i];
     if (!cells || tickerColIdx < 0) continue;
-    const tic = (cells[tickerColIdx] || '').trim().toUpperCase();
+    const tic = normListedSymbol((cells[tickerColIdx] || '').trim().toUpperCase());   // z178
     if (!tic || tic.includes('#')) continue;
     const stripped = tic.replace(/[.\-]/g, '');
     if (!isValidTicker(tic)) continue;
@@ -2437,7 +2451,7 @@ function parseSheetCsv(text) {
       for (let i = 0; i < allLineCells.length; i++) {
         const cells = allLineCells[i];
         if (!cells) continue;
-        const tic = (cells[tickerColIdx] || '').trim().toUpperCase();
+        const tic = normListedSymbol((cells[tickerColIdx] || '').trim().toUpperCase());   // z178
         if (!tic || tic.includes('#')) continue;
         const stripped = tic.replace(/[.\-]/g, '');
         if (!isValidTicker(tic)) continue;
@@ -2477,7 +2491,7 @@ function parseSheetCsv(text) {
       const rowCells = parseCsvLine(allLines[r]);
       const tickers = {};
       for (let c = 1; c < rowCells.length; c++) {
-        const v = (rowCells[c] || '').trim().toUpperCase();
+        const v = normListedSymbol((rowCells[c] || '').trim().toUpperCase());   // z178
         if (!v) continue;
         if (v.includes('#')) continue;
         if (v === 'CLOSE' || v === 'OPEN' || v === 'HIGH' || v === 'LOW' || v === 'VOLUME') continue;
@@ -2538,7 +2552,7 @@ function parseSheetCsv(text) {
       return obj;
     })
     .filter(r => {
-      const tic = (r['ticker'] || r['symbol'] || r['tickers'] || r['symbols'] || '').trim().toUpperCase();
+      const tic = normListedSymbol((r['ticker'] || r['symbol'] || r['tickers'] || r['symbols'] || '').trim().toUpperCase());   // z178
       if (!tic) return false;
       if (tic.includes('#') || tic === 'N/A' || tic === '#REF!') return false;
       // isValidTicker handles every supported format (equities, ETFs, futures =F,
@@ -4160,7 +4174,7 @@ function parseCsvIntoTab(csvText) {
       return obj;
     })
     .filter(r => {
-      const tic = (r['ticker'] || r['symbol'] || r['tickers'] || r['symbols'] || '').trim().toUpperCase();
+      const tic = normListedSymbol((r['ticker'] || r['symbol'] || r['tickers'] || r['symbols'] || '').trim().toUpperCase());   // z178
       if (!tic) return false;
       if (tic.includes('#') || tic === 'N/A' || tic === '#REF!') return false;
       // Use isValidTicker as the single source of truth — see note in fetchSheetData.
@@ -11710,7 +11724,7 @@ function invalidateStockbookIndex() {
 // The four data repos that make up the universe. TRAPP2/-2 = US equities,
 // TRAPP2-1 = international/FX/ETF + the FX rates + 13F, TRAPP2-3 = supply-chain
 // tickers that were missing data. Seeded into the source list on first run.
-const DEFAULT_DATA_REPOS = ['TRAPP2', 'TRAPP2-1', 'TRAPP2-2', 'TRAPP2-3'];
+const DEFAULT_DATA_REPOS = ['TRAPP2', 'TRAPP2-1', 'TRAPP2-2', 'TRAPP2-3', 'TRAPP2-4'];   // z178: TRAPP2-4 = the NYSE equities that weren't in the app
 function ensureDefaultDataSources() {
   try {
     const existing = (typeof getSheetUrls === 'function') ? getSheetUrls() : [];
@@ -11725,7 +11739,7 @@ function ensureDefaultDataSources() {
     }
     if (seed.length && typeof setSheetUrls === 'function') {
       setSheetUrls([...existing, ...seed]);
-      console.log(`[sources] seeded ${seed.length} default data URLs (incl. TRAPP2-3)`);
+      console.log(`[sources] seeded ${seed.length} default data URLs (incl. TRAPP2-3, TRAPP2-4)`);
     }
   } catch (e) { console.warn('[sources] default-seed failed:', e.message); }
 }
@@ -11752,7 +11766,7 @@ async function loadStockBook(forceRefresh = false) {
       const tickerKey = Object.keys(row).find(k =>
         k === 'ticker' || k === 'symbol' || k.includes('ticker') || k.includes('symbol')
       );
-      const tic = (tickerKey ? row[tickerKey] : '').trim().toUpperCase();
+      const tic = normListedSymbol((tickerKey ? row[tickerKey] : '').trim().toUpperCase());   // z178
       // Strict validation via centralized isValidTicker (allows ES=F, BTC-USD, ^VIX, etc.)
       if (!tic) return;
       if (tic.includes('#')) return;       // sheet errors
@@ -13046,7 +13060,7 @@ document.getElementById('stockbook-diag-btn')?.addEventListener('click', openShe
 document.getElementById('stockbook-add-btn').addEventListener('click', async () => {
   const tic = await appPrompt('Enter ticker symbol (e.g. AAPL):');
   if (!tic) return;
-  const ticker = tic.trim().toUpperCase();
+  const ticker = normListedSymbol(tic.trim().toUpperCase());   // z178: typing ABR$D or BRK.B works
   // Validation: ≤5 chars, alphanumeric only
   const stripped = ticker.replace(/[.\-]/g, '');
   if (!isValidTicker(ticker)) {
@@ -14184,6 +14198,7 @@ async function fetchRepoFinancials(ticker) {
   bases.push(GH_RAW + '/TRAPP2/main/data/');
   bases.push(GH_RAW + '/TRAPP2-2/main/data/');
   bases.push(GH_RAW + '/TRAPP2-3/main/data/');
+  bases.push(GH_RAW + '/TRAPP2-4/main/data/');   // z178
   bases.push(GH_RAW + '/TRAPP2-1/main/data/');
   let sawDefinite404 = false;  // a real "not found" (vs a transient network error)
   let networkError = false;
@@ -19298,7 +19313,7 @@ async function _refreshExtMovers() {
   try {
     const rawBase = (typeof GH_RAW !== 'undefined' ? GH_RAW : 'https://raw.githubusercontent.com/TheMostLocal');
     const all = {}, v = Math.floor(Date.now() / 60000);
-    await Promise.all(['TRAPP2', 'TRAPP2-1', 'TRAPP2-2', 'TRAPP2-3'].map(async b => {
+    await Promise.all(['TRAPP2', 'TRAPP2-1', 'TRAPP2-2', 'TRAPP2-3', 'TRAPP2-4'].map(async b => {   // z178: + TRAPP2-4
       try {
         const r = await fetch(`${rawBase}/${b}/main/data/bars/latest.json?_=${v}`, { cache: 'no-store' });
         if (!r.ok) return;
@@ -47034,7 +47049,7 @@ async function vFetchLiveJson(url, opts) {
 if (typeof window !== 'undefined') { window.vFetchLive = vFetchLive; window.vFetchLiveJson = vFetchLiveJson; }
 
 // ---- The tape --------------------------------------------------------------
-const V_TAPE_REPOS = ['TRAPP2', 'TRAPP2-2', 'TRAPP2-3', 'TRAPP2-1'];
+const V_TAPE_REPOS = ['TRAPP2', 'TRAPP2-2', 'TRAPP2-3', 'TRAPP2-4', 'TRAPP2-1'];   // z178: + TRAPP2-4
 const V_TAPE_BASE = (repo) => `${GH_RAW}/${repo}/main/data/intraday/`;
 // Beyond this, a tape point is no longer "now". Two full 15-minute buckets plus
 // slack for GitHub Actions queue lag, which is routinely minutes and has been
@@ -47497,4 +47512,3 @@ function _ccyLensBar(stock) {
   };
   ['renderSummary', 'renderResults', 'renderProjection', 'renderMonteCarlo', 'renderValuationConfidenceAudit'].forEach(wrapLens);
 })();
-
