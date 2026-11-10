@@ -1970,10 +1970,12 @@ async function renderCompany13fHolders(ticker) {
 async function renderCompanySecFilings(ticker) {
   const host = document.getElementById('company-sec-filings');
   if (!host || !ticker) return;
-  if (typeof loadSecFilings !== 'function') return;
-  let filings = {};
-  try { filings = await loadSecFilings(); } catch { return; }
-  const rec = filings[ticker.toUpperCase()];
+  // z180: one company's file (data/sec_filings/<T>.json), not the whole 1.8 MB list; the combined file is the fallback
+  let rec = null;
+  try {
+    if (typeof loadSecFilingsFor === 'function') rec = await loadSecFilingsFor(ticker);
+    else if (typeof loadSecFilings === 'function') rec = (await loadSecFilings())[ticker.toUpperCase()];
+  } catch { return; }
   if (!rec || !rec.filings || !rec.filings.length) return;  // nothing staged
 
   const formColor = (f) => f.startsWith('10-K') || f === '20-F' ? 'var(--pos)'
