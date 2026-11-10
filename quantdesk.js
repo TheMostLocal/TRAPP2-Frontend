@@ -1,5 +1,5 @@
 /* ==========================================================================
-   quantdesk.js — the QUANT BOOK tab (z171, universe line z174, strategy lab z175, curve + stocks / funds z176, macro quad z177; card z163, dashboard z170).
+   quantdesk.js — the QUANT BOOK tab (z171, universe line z174, strategy lab z175, curve + stocks / funds z176, macro quad z177, lab v2 z180; card z163, dashboard z170).
    Its own top-level tab, laid out like Bot Bets: ◆ Portfolio (today, record, equity, engine & pipeline, open
    positions, statistics, the backtest gate, by day, strategies & risk) and ▤ Ledger (every closed quant trade,
    filterable and sortable). Separate from the swing bot in every way: data from TRAPP2-QUANT (data/quant/*) and
@@ -147,25 +147,35 @@
     if (strategy === 'opening_range') return `${p.range_min}-min range · target ${p.target_mult}× risk · entries to ${hm(p.last_entry)} ET`;
     return Object.entries(p).map(([k, v]) => `${k} ${v}`).join(' · ');
   }
+  // z180: lab v2 - judged by SESSION (trades on one day share one market), so each half shows trades, sessions, net and
+  // the clustered t; ≈ = how many independent trades they behave like. Shadow rows say why. Older verdicts are flagged.
+  const tcl = h => (h.tCl != null ? h.tCl : h.t);
+  const half = (h, test) => !h ? '—' : `${(+h.n).toLocaleString('en-US')}${h.sessions != null ? ` · ${h.sessions} ses` : ''} · ${bps(h.meanBps)} · t ${tcl(h)}${test && h.nEff ? ` · ≈${(+h.nEff).toLocaleString('en-US')}` : ''}`;
   function labCard(lab) {
-    if (!lab || !lab.strategies) return card('Where it works · strategy lab', empty('The lab hasn\'t run yet. Each night (Actions → Quant backtest) it replays the last 40 sessions of real 1-minute bars across every universe name, scores each strategy\'s parameter variants in every segment (liquidity, time of day, side, sector), trains on two thirds and tests on the last third it never saw, with false-discovery control. A strategy trades live only in segments that pass; everywhere else it keeps running in shadow.'));
-    const ses = lab.sessions || {}, r = lab.rules || {};
-    const sub = `retrained ${esc(etTime(lab.asOf))} ET · trained on ${ses.train ? `${esc(ses.train[0])} … ${esc(ses.train[1])} (${ses.train[2]} sessions)` : '—'} · tested on ${ses.test ? `${esc(ses.test[0])} … ${esc(ses.test[1])} (${ses.test[2]})` : '—'} · live needs ≥ ${r.minTrainTrades} / ${r.minTestTrades} trades, ≥ ${r.minTestExpectancyBps} bps a trade out of sample, false-discovery q ≤ ${r.fdr}`;
+    if (!lab || !lab.strategies) return card('Where it works · strategy lab', empty('The lab hasn\'t run yet. Each night (Actions → Quant backtest) it replays the last 60 sessions of real 1-minute bars across every universe name, scores each strategy\'s parameter variants in every segment (liquidity, time of day, side, sector, quad), trains on two thirds and tests on the last third it never saw - judged by session, with false-discovery control. A strategy trades live only in segments that pass; everywhere else it keeps running in shadow.'));
+    const ses = lab.sessions || {}, r = lab.rules || {}, v2 = (+lab.labVersion || 1) >= 2;
+    const sub = `retrained ${esc(etTime(lab.asOf))} ET · trained on ${ses.train ? `${esc(ses.train[0])} … ${esc(ses.train[1])} (${ses.train[2]} sessions)` : '—'} · tested on ${ses.test ? `${esc(ses.test[0])} … ${esc(ses.test[1])} (${ses.test[2]})` : '—'} · live needs ${v2 ? `≥ ${r.minTrainSessions} / ${r.minTestSessions} sessions and ` : ''}≥ ${r.minTrainTrades} / ${r.minTestTrades} trades, ≥ ${r.minTestExpectancyBps} bps a trade out of sample, false-discovery q ≤ ${r.fdr}${v2 ? ', still positive without its best day' : ''}`;
+    const warn = v2 ? '' : `<div style="font-family:var(--mono);font-size:10.5px;color:var(--amber);line-height:1.6;margin:8px 0 4px">⚠ This verdict is from lab v1: it counted every trade as independent evidence, but trades on one day move together - so it overstated the evidence. The engine trades none of it live; the next lab run (v2, judged by session) re-judges every segment.</div>`;
     const bodies = Object.entries(lab.strategies).map(([st, m]) => {
       const variants = Object.assign({}, m.variants || {});
       const best = Object.entries(m.overall || {}).filter(([, v]) => v.test && v.test.n).sort((a, b) => b[1].test.meanBps - a[1].test.meanBps)[0];
-      const rows = (m.report || []).slice(0, 10).map(c => `<tr><td style="white-space:normal;min-width:180px">${esc(segWords(c.segment))}</td><td style="white-space:normal;min-width:170px">${esc(variantWords(st, (m.live || []).find(a => a.variant === c.variant) ? variants[c.variant] : (c.params || null)) || c.variant)}</td>
-        <td style="text-align:right">${c.train.n} · ${bps(c.train.meanBps)} · t ${c.train.t}</td><td style="text-align:right">${c.test.n} · ${bps(c.test.meanBps)} · t ${c.test.t}</td><td style="text-align:right">${c.q}</td><td>${c.approved ? '<span style="color:var(--pos);font-weight:700">LIVE</span>' : '<span style="color:var(--ink-faint)">shadow</span>'}</td></tr>`);
-      return `<div style="font-family:var(--mono);font-size:11px;margin:12px 0 6px"><strong>${esc(st)}</strong> · ${m.tested} segments tested · <span style="color:${(m.live || []).length ? 'var(--pos)' : 'var(--ink-faint)'}">${(m.live || []).length} live</span>${best ? ` · on every name the best variant made ${bps(best[1].test.meanBps)} a trade out of sample` : ''}</div>`
-        + (rows.length ? tbl([['Segment'], ['Variant'], ['Train (n · net · t)', 'right'], ['Test (n · net · t)', 'right'], ['q', 'right'], ['Status']], rows, 760)
-                       : empty('No segment had enough trades with a positive training result to test.'));
+      const status = c => !c.approved ? '<span style="color:var(--ink-faint)">shadow</span>'
+        : !v2 ? '<span style="color:var(--amber)">untrusted (v1)</span>'
+        : c.regimeDependent ? '<span style="color:var(--amber);font-weight:700">LIVE · only while the regime is dialed in</span>'
+        : '<span style="color:var(--pos);font-weight:700">LIVE</span>';
+      const rows = (m.report || []).slice(0, 10).map(c => `<tr><td style="white-space:normal;min-width:180px">${esc(segWords(c.segment))}${(c.reasons && c.reasons.length) ? `<div style="font-size:9px;color:var(--ink-faint);margin-top:2px">${esc(c.reasons.join(' · '))}</div>` : ''}</td><td style="white-space:normal;min-width:170px">${esc(variantWords(st, (m.live || []).find(a => a.variant === c.variant) ? variants[c.variant] : (c.params || null)) || c.variant)}</td>
+        <td style="text-align:right">${half(c.train)}</td><td style="text-align:right">${half(c.test, true)}</td><td style="text-align:right">${c.q}</td><td>${status(c)}</td></tr>`);
+      const nLive = v2 ? (m.live || []).length : 0;
+      return `<div style="font-family:var(--mono);font-size:11px;margin:12px 0 6px"><strong>${esc(st)}</strong> · ${m.tested} segments tested · <span style="color:${nLive ? 'var(--pos)' : 'var(--ink-faint)'}">${nLive} live</span>${!v2 && (m.live || []).length ? ` <span style="color:var(--amber)">(${(m.live || []).length} approved by v1, not trusted)</span>` : ''}${best ? ` · on every name the best variant made ${bps(best[1].test.meanBps)} a trade out of sample` : ''}</div>`
+        + (rows.length ? tbl([['Segment'], ['Variant'], [v2 ? 'Train (n · sessions · net · t)' : 'Train (n · net · t)', 'right'], [v2 ? 'Test (n · sessions · net · t · ≈ indep.)' : 'Test (n · net · t)', 'right'], ['q', 'right'], ['Status']], rows, 820)
+                       : empty('No segment had enough sessions and training evidence of its own to test.'));
     }).join('');
-    return card('Where it works · strategy lab', bodies + `<div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:8px">net = after the spread (scaled by each name's liquidity), slippage and fees · q = the chance the result is a false discovery among everything tested · shadow trades keep collecting evidence on every name</div>`, sub);
+    return card('Where it works · strategy lab', warn + bodies + `<div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:8px">net = after the spread (scaled by each name's liquidity), slippage and fees · ${v2 ? 't = session-clustered (trades on one day count together) · ≈ = how many independent trades they behave like · ' : ''}q = the chance the result is a false discovery among everything tested · a segment split by the macro quad trades live only while the regime is dialed in and the nowcast agrees with the official quad · shadow trades keep collecting evidence on every name</div>`, sub);
   }
 
   // z177: the macro quad the quant book records on every trade (official GDP/CPI and the market nowcast)
   const QN = { 1: 'Goldilocks', 2: 'Reflation', 3: 'Stagflation', 4: 'Deflation' };
-  function quadLine(doc) {
+  function quadLine(doc, live) {
     if (!doc) return '';
     const cur = doc.current || {}, off = doc.official || doc.officialLatest || (cur.method !== 'market-nowcast' ? cur : null) || {};
     const nc = doc.nowcast || (cur.method === 'market-nowcast' ? cur : null) || {};
@@ -173,7 +183,8 @@
     const part = (q, label, asOf) => q ? `<strong>Q${q} ${QN[q] || ''}</strong> <span style="color:var(--ink-faint)">${label}${asOf ? ' · ' + esc(String(asOf).slice(0, 10)) : ''}</span>` : '';
     return `<div style="font-family:var(--mono);font-size:10px;line-height:1.7;margin-top:8px;padding:8px 10px;border-left:2px solid ${ag && !ag.sameQuad ? 'var(--amber)' : 'var(--rule)'}">macro quad: ${part(off.quad, 'official GDP/CPI', off.asOf)}${nc.quad ? ` · ${part(nc.quad, 'market nowcast', nc.asOf)}` : ''}`
       + (ag ? `<br><span style="color:${ag.sameQuad ? 'var(--pos)' : 'var(--amber)'}">${ag.sameQuad ? '✓ they agree' : '⚠ ' + esc(ag.note || 'they disagree')}</span>` : '')
-      + `<br><span style="color:var(--ink-faint)">every quant trade records both; the lab tests each strategy by the official quad as it was known that day - it changes nothing until a segment earns it</span></div>`;
+      + (live && live.regime && live.regime.why ? `<br><span style="color:${live.regime.ok ? 'var(--pos)' : 'var(--amber)'}">regime gate ${live.regime.ok ? 'OPEN' : 'SHUT'} - ${esc(live.regime.why)}${live.regime.ok ? '' : ' · quad-split segments stay in shadow'}</span>` : '')
+      + `<br><span style="color:var(--ink-faint)">every quant trade records both; the lab tests each strategy by the official quad as it was known that day - a quad segment can go live only if the quad varied inside its test window, and only while the regime is dialed in (certainty ≥ 65 % and the two quads agree)</span></div>`;
   }
 
   // z174: what the universe holds - every US stock / ETF in the books - and what Alpaca's stock API can't trade
@@ -213,7 +224,7 @@
     const r = d.runs || {};
     const status = card('Engine & pipeline', `${why ? `<div style="font-family:var(--mono);font-size:10.5px;color:var(--amber);line-height:1.6;margin-bottom:8px">⚠ ${why}</div>` : ''}
       ${tbl([['Workflow'], ['Latest run']], [['Quant engine (0920 ET → close)', r.engine], ['Quant backtest (the gate, 1840 ET)', r.backtest], ['Tests (every push)', r.tests]].map(([n, x]) => `<tr><td>${n}</td><td>${runTxt(x)}</td></tr>`), 420)}
-      ${quadLine(d.quadDoc)}
+      ${quadLine(d.quadDoc, d.live)}
       <div style="font-family:var(--mono);font-size:9.5px;color:var(--ink-faint);margin-top:6px">universe: ${d.uni ? universeLine(d.uni) : 'not built yet'} · gate: ${d.gate ? `from ${esc(etTime(d.gate.asOf))} ET` : 'no backtest yet'} · summary: ${d.summ ? `${esc(etTime(d.summ.asOf))} ET (${ago(d.summ.asOf)})` : 'none yet'} · live state: ${d.live ? `${ago(d.liveAt)} (Supabase)` : 'none'}</div>`);
     const pos = card('Open positions', opn.length ? tbl([['Symbol'], ['Side'], ['Qty', 'right'], ['Strategy'], ['Mode'], ['Entry', 'right'], ['Move', 'right']],
       opn.map(p => `<tr><td>${esc(p.symbol)}</td><td>${esc(p.side)}</td><td style="text-align:right">${p.qty}</td><td>${esc(p.strategy)}</td><td>${p.mode === 'shadow' ? '<span style="color:var(--ink-faint)">shadow</span>' : 'live'}</td><td style="text-align:right">$${(+p.entry).toFixed(2)}</td><td style="text-align:right">${bps(p.moveBps)}</td></tr>`))
