@@ -26,7 +26,7 @@
    ========================================================================== */
 (function () {
   'use strict';
-  const BOOKS = ['TRAPP2', 'TRAPP2-2', 'TRAPP2-3', 'TRAPP2-1'];
+  const BOOKS = ['TRAPP2', 'TRAPP2-2', 'TRAPP2-3', 'TRAPP2-1', 'TRAPP2-4'];   // z180: + TRAPP2-4 (last: its 1,622 names are tried after the busier books)
   const raw = () => { try { if (typeof GH_RAW !== 'undefined') return GH_RAW; } catch (e) {} return 'https://raw.githubusercontent.com/TheMostLocal'; };
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const BASE_VALUE = 20;
