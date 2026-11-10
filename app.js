@@ -199,7 +199,7 @@ const state = {
   mcResults: null,      // monte carlo array
 };
 // ---- z160: page modules - big pages load the first time they open (pages/<name>.js) ----
-const VALUATIO_BUILD = '20260615z160';   // pages/*.js unchanged since z160
+const VALUATIO_BUILD = '20260615z180';   // pages/*.js: company.js changed in z180 (SEC filings per company)
 const _pageLoads = {};
 function _loadPage(name) {
   if (_pageLoads[name]) return _pageLoads[name];
@@ -3871,7 +3871,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // Warm the 13F institutional cache early so the bot's institutional signal
   // (and the Company tab's holders section) have data to read.
   if (typeof load13fByCusip === 'function') load13fByCusip().catch(() => {});
-  if (typeof loadSecFilings === 'function') loadSecFilings().catch(() => {});
+  // z180: the 1.8 MB SEC filings file is no longer downloaded at startup - only the Company tab reads filings, one
+  // company at a time (loadSecFilingsFor); the engine signal that wanted the whole file was retired in z160.
   // Pull XTRAPP (lexicon + posts + human corrections/overwrites — the FINAL data
   // layer). fetchXtrappData re-applies overrides and re-renders when it resolves,
   // so it corrects the view even if the base stockbook rendered from cache first.
@@ -34056,6 +34057,22 @@ async function loadSecFilings() {
     if (r.ok) { const j = await r.json(); _secFilings = j.companies || {}; return _secFilings; }
   } catch (e) { console.warn('[sec] filings load failed:', e.message); }
   return {};
+}
+
+// z180: one company's filings - data/sec_filings/<TICKER>.json (~4 KB; TRAPP2-1 writes one per company for all four
+// equity books) - falling back to the combined file for a company whose own file isn't there yet.
+const _secFilingsOne = {};
+async function loadSecFilingsFor(ticker) {
+  const T = String(ticker || '').toUpperCase();
+  if (!T) return null;
+  if (T in _secFilingsOne) return _secFilingsOne[T];
+  try {
+    const r = await fetch(_13fBase() + 'sec_filings/' + encodeURIComponent(T) + '.json', { cache: 'no-cache' });
+    if (r.ok) { const j = await r.json(); if (j && Array.isArray(j.filings)) return (_secFilingsOne[T] = j); }
+  } catch (e) {}
+  let all = {};
+  try { all = await loadSecFilings(); } catch (e) {}
+  return (_secFilingsOne[T] = all[T] || null);
 }
 
 // Earnings-recency signal: days since the latest 10-K/10-Q. A context signal
