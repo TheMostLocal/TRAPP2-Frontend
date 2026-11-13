@@ -362,8 +362,24 @@
     let h = `<div class="pat-row"><span>${label} · n ${s.n}</span><span>${s.successRate == null ? '—' : s.successRate + '%'}${ci}</span></div>`;
     if (s.identificationSuccessRate != null) h += `<div class="pat-row dim"><span>&nbsp; identification success</span><span>${s.identificationSuccessRate}%</span></div>`;
     if (s.avgReturnPct != null) h += `<div class="pat-row dim"><span>&nbsp; avg return at exit</span><span>${pct(s.avgReturnPct)}</span></div>`;
-    if (s.edgeVsBaselinePct != null) h += `<div class="pat-row dim"><span>&nbsp; 20-bar edge vs baseline</span><span class="${s.edgeVsBaselinePct > 0 ? 'ok' : 'no'}">${pct(s.edgeVsBaselinePct)}</span></div>`;
+    // z184 (patterns-v4): the date-matched edge - the call's 20 bars vs the typical stock's SAME 20 bars - with its
+    // month-clustered 95% interval; EARNED / HARMFUL only when the whole interval sits on one side of zero
+    if (s.edgeAbnPct != null) {
+      const v = s.edgeVerdict || 'unproven', cl = v === 'earned' ? 'ok' : v === 'harmful' ? 'no' : 'dim';
+      const ci = s.edgeAbnCI95 ? ` <span class="dim">[${pct(s.edgeAbnCI95[0])} … ${pct(s.edgeAbnCI95[1])}]</span>` : '';
+      const capTxt = s.extremeCalls ? `; ${s.extremeCalls} move(s) beyond ±50% capped (uncapped mean ${pct(s.edgeAbnRawPct)})` : '';
+      h += `<div class="pat-row" title="20-bar return (capped at ±50%) minus what the typical stock did over the same 20 bars; 95% interval clustered by month (${s.months || 0} months ≈ ${s.nEff || 0} independent calls)${capTxt}"><span>&nbsp; 20-bar edge vs the market, same dates</span><span><span class="${cl}">${pct(s.edgeAbnPct)}</span>${ci} <span class="${cl}" style="font-size:9px;letter-spacing:.06em">${v.toUpperCase()}</span></span></div>`;
+    }
+    if (s.edgeVsBaselinePct != null) h += `<div class="pat-row dim"><span>&nbsp; 20-bar edge vs 20-yr baseline (old yardstick)</span><span class="${s.edgeVsBaselinePct > 0 ? 'ok' : 'no'}">${pct(s.edgeVsBaselinePct)}</span></div>`;
     return h;
+  }
+  // z184: one split's edge - the date-matched one with its verdict when the scan has it, else the old one
+  function splitEdge(x) {
+    if (x.edgeAbnPct != null) {
+      const v = x.edgeVerdict || 'unproven', cl = v === 'earned' ? 'ok' : v === 'harmful' ? 'no' : 'dim';
+      return `<span class="${cl}" title="${v} · 95% ${x.edgeAbnCI95 ? pct(x.edgeAbnCI95[0]) + ' … ' + pct(x.edgeAbnCI95[1]) : '—'} · ${x.months || 0} months">${pct(x.edgeAbnPct)}${v === 'unproven' ? '?' : ''}</span>`;
+    }
+    return `<span class="${(x.edgeVsBaselinePct || 0) > 0 ? 'ok' : 'no'}">${pct(x.edgeVsBaselinePct)}</span>`;
   }
   function renderStats(host, rec) {
     const st = P.stats && P.stats.templates && P.stats.templates[P.tpl];
@@ -374,13 +390,13 @@
       const x = tr[r], cur = r === now;
       return `<div class="pat-row ${x.usable ? '' : 'dim'}" title="${x.usable ? '' : 'fewer than ' + ((P.stats && P.stats.minRegimeN) || 50) + ' judged calls - not used by the bot'}"` +
         `${cur ? ' style="color:var(--amber,#e0b04c)"' : ''}><span>&nbsp; ${cur ? '▸ ' : ''}${r}-trend market · n ${x.judged}</span>` +
-        `<span>${x.successRate == null ? '—' : x.successRate + '%'} <span class="${(x.edgeVsBaselinePct || 0) > 0 ? 'ok' : 'no'}">${pct(x.edgeVsBaselinePct)}</span></span></div>`;
+        `<span>${x.successRate == null ? '—' : x.successRate + '%'} ${splitEdge(x)}</span></div>`;
     }).join('');
     // z103: breakout volume split (confirmation bar vs its 50-bar average)
     const bv = (st && st.byVolume) || {};
     const volRows = ['confirmed', 'unconfirmed'].filter(k => bv[k]).map(k => { const x = bv[k];
       return `<div class="pat-row ${x.usable ? '' : 'dim'}"><span>&nbsp; ${k === 'confirmed' ? `volume ≥ ${(st.volConfirmAt || 1.4)}× avg` : 'lighter volume'} · n ${x.judged}</span>` +
-        `<span>${x.successRate == null ? '—' : x.successRate + '%'} <span class="${(x.edgeVsBaselinePct || 0) > 0 ? 'ok' : 'no'}">${pct(x.edgeVsBaselinePct)}</span></span></div>`; }).join('');
+        `<span>${x.successRate == null ? '—' : x.successRate + '%'} ${splitEdge(x)}</span></div>`; }).join('');
     // z109: macro quad split - labelled with the quad KNOWN at the time (official
     // quad shifted by its publication lag), so it's usable without lookahead
     const qd = (st && st.byRegime && st.byRegime.quad) || {};
@@ -388,14 +404,14 @@
     const QN = { 1: 'Q1 Goldilocks', 2: 'Q2 Reflation', 3: 'Q3 Stagflation', 4: 'Q4 Deflation' };
     const quadRows = ['1', '2', '3', '4'].filter(k => qd[k]).map(k => { const x = qd[k];
       return `<div class="pat-row ${x.usable ? '' : 'dim'}"><span>&nbsp; ${QN[k]}${String(qNow) === k ? ' ← now' : ''} · n ${x.judged}</span>` +
-        `<span>${x.successRate == null ? '—' : x.successRate + '%'} <span class="${(x.edgeVsBaselinePct || 0) > 0 ? 'ok' : 'no'}">${pct(x.edgeVsBaselinePct)}</span></span></div>`; }).join('');
+        `<span>${x.successRate == null ? '—' : x.successRate + '%'} ${splitEdge(x)}</span></div>`; }).join('');
     host.innerHTML = `<h4>STATISTICAL RECORD — ${esc(TPLNAME(P.tpl).toUpperCase())}</h4>` +
       statLine(mine, esc(P.ticker)) + statLine(st && st.backtest, 'Universe · backtest') +
       (regimeRows ? `<div class="pat-row dim" style="margin-top:4px"><span>By market regime (SPY trend${now ? ', now ' + esc(now) : ''})</span><span>success · edge</span></div>` + regimeRows : '') +
       (volRows ? `<div class="pat-row dim" style="margin-top:4px"><span>By breakout volume</span><span>success · edge</span></div>` + volRows : '') +
       (quadRows ? `<div class="pat-row dim" style="margin-top:4px"><span>By macro quad (as known then, ${((P.stats && P.stats.regimeNow) || {}).quadLagMonths || 3}-mo lag)</span><span>success · edge</span></div>` + quadRows : '') +
       statLine(st && st.live, 'Universe · live') +
-      `<div class="pat-note">Success rate with 95% Wilson interval. ${P.tpl === 'minervini' ? 'Success = beat SPY over 63 trading days.' : 'Success = target reached after confirmation.'} Live record since ${esc((P.stats && P.stats.liveStart) || '—')}.</div>`;
+      `<div class="pat-note">Success rate with 95% Wilson interval. ${P.tpl === 'minervini' ? 'Success = beat SPY over 63 trading days.' : 'Success = target reached after confirmation.'} Edge vs the market = each call's 20 bars (moves capped at ±50%) minus the typical stock's over the same 20 bars; calls in one month count together (95% interval clustered by month). EARNED / HARMFUL only when the whole interval is on one side of zero - otherwise UNPROVEN (?) and the bot gives it no weight. Live record since ${esc((P.stats && P.stats.liveStart) || '—')}.</div>`;
   }
   function renderRecord(host, rec) {
     const rows = ((rec && rec.detections) || []).filter(d => d.tp === P.tpl).slice().reverse();
@@ -597,6 +613,7 @@
     const why = (top.fromCall ? `Confidence = a system call (${top.status}) ~${top.bars} bars ago x recency. `
                               : `Confidence = ${top.ok ? 'all' : top.passes + ' of ' + top.of} rules met x recency (last swing ~${top.bars} bars ago). `) +
                 `Historical: ${st && st.successRate != null ? st.successRate + '% reached target (n ' + st.judged + (useRg ? ', ' + now + '-trend markets only' : useVol ? (vkey === 'confirmed' ? ', volume-confirmed breakouts only' : ', light-volume breakouts only') : '') + ')' : 'n/a'}. ` +
+                (st && st.edgeAbnPct != null ? `Edge vs the market over the same 20 bars: ${pct(st.edgeAbnPct)}${st.edgeAbnCI95 ? ' (95% ' + pct(st.edgeAbnCI95[0]) + ' … ' + pct(st.edgeAbnCI95[1]) + ')' : ''} - ${(st.edgeVerdict || 'unproven').toUpperCase()}${st.edgeVerdict === 'earned' ? '' : ': the bot gives this template no weight'}. ` : '') +
                 (list[1] ? `Runner-up: ${TPLNAME(list[1].key)} ${list[1].conf}%.` : '');
     host.title = why;
     host.innerHTML = `<span class="k">PATTERN READ</span>` +
@@ -604,6 +621,8 @@
       `<span>${esc(top.status)}${volTxt ? ' ' + esc(volTxt) : ''}</span>` +
       `<span>confidence <span class="v">${top.conf}%</span></span>` +
       (st && st.successRate != null ? `<span class="k">hist. ${st.successRate}% hit target${useRg ? ' in ' + esc(now) + '-trend markets' : useVol ? (vkey === 'confirmed' ? ' with volume' : ' on light volume') : ''}</span>` : '') +
+      // z184: whether the template has EARNED an edge over the market (date-matched, month-clustered)
+      (st && st.edgeVerdict ? `<span class="${st.edgeVerdict === 'earned' ? 'up' : st.edgeVerdict === 'harmful' ? 'dn' : 'k'}">edge ${esc(st.edgeVerdict)}${st.edgeVerdict === 'earned' ? ' ' + pct(st.edgeAbnPct) : ''}</span>` : '') +
       `<a data-k="${esc(top.key)}">details</a>`;
     const a = $('a', host);
     if (a) a.onclick = () => openInTA(top.key);
