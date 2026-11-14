@@ -23,6 +23,8 @@
    * Escape hatch: localStorage 'valuatio.bot.appTrading' = '1' restores the
      z100–z120 behaviour (pair it with the runner's RUNNER_APP_TRADES=1).
 
+   z186 — the strip also shows the runner's RISK BOOK (drawdown throttle, exposures, sector caps, shorts).
+
    z122 — the bot is AUTONOMOUS: the Bets tab offers nothing that runs, trades or
    sends. Removed there: Run Scan, Rebalance Cash, Retrain, Import Repo / File,
    Commit, the editable cash card, Run now, Send to runner / Discard. Nothing is
@@ -145,7 +147,8 @@
     window.__botMerging = (window.__botMerging || 0) + 1;                     // a merge to botsync: no actions
     try { window.saveBotState(bot); } finally { window.__botMerging--; }
     const info = { at: bot.mirroredAt, journalAt: J.generatedAt || null, trades: bot.bets.length,
-                   open: bot.bets.filter(b => b.status === 'open').length, bankroll: +J.bankroll, aside: aside.size };
+                   open: bot.bets.filter(b => b.status === 'open').length, bankroll: +J.bankroll, aside: aside.size,
+                   risk: (J.risk && typeof J.risk === 'object') ? J.risk : null };              // z186: the runner's risk book
     put(SYNC, info);
     return info;
   }
@@ -239,12 +242,32 @@
           + ` = <strong>portfolio value ${$(pv)}</strong> · <span style="color:${same ? 'var(--pos)' : 'var(--neg)'}">${same ? '✓ app = runner journal (to the cent)' : `⚠ app bankroll ${$(bk.bankroll)} ≠ journal ${$(info.bankroll)} — Refresh`}</span></span>`;
       }
     } catch (e) {}
+    // z186: the risk book - how far below its high the book is, what that does to new trades, where it's concentrated
+    let riskLn = '';
+    try {
+      const R = info && info.risk, dd = R && R.drawdown, L = (R && R.limits) || {};
+      if (dd && isFinite(+dd.dd)) {
+        const pc = x => (isFinite(+x) ? (Math.abs(x * 100) >= 10 ? (x * 100).toFixed(0) : (x * 100).toFixed(1)) + '%' : '—');
+        const sec = Object.entries(R.bySector || {}).filter(([k]) => k && k !== 'Unknown').slice(0, 3).map(([k, v]) => `${esc(k)} ${v > 0 ? '+' : ''}${pc(v)}`).join(' · ');
+        const over = R.overSectorCap || [];
+        const capB = (L.netBetaCap || {})[R.dialedIn ? 'dialedIn' : 'notDialedIn'];
+        const tone = R.halted ? 'var(--neg)' : dd.scale < 1 ? 'var(--amber)' : 'var(--pos)';
+        riskLn = `<span style="flex-basis:100%;color:var(--ink-dim)"><span style="color:${tone};font-weight:700">RISK</span> `
+          + `${dd.dd > 0 ? `${pc(dd.dd)} below the ${$(dd.hwm)} high (${esc(dd.hwmDate || '—')})` : 'at its high'} → new trades sized ×${(+dd.scale).toFixed(2)}`
+          + (R.halted ? ` · <span style="color:var(--neg);font-weight:700">no new trades today</span> (down ${pc(-(R.dayChange || 0))} on the day)` : '')
+          + ` · shares ${pc(R.gross)} of the book · options at risk ${pc(R.optionRisk)}${L.optionBookCap ? ` (cap ${pc(L.optionBookCap)})` : ''}`
+          + ` · net beta ${R.netBeta >= 0 ? '+' : ''}${pc(R.netBeta)}${capB ? ` (cap ±${pc(capB)})` : ''} · shorts ${R.shortsOn ? 'on' : 'off'}`
+          + (sec ? ` · net by sector ${sec}` : '')
+          + (over.length ? ` · <span style="color:var(--amber)">over the ${pc(L.sectorCap)} sector cap: ${over.map(esc).join(', ')} — only trades that shrink them</span>` : '')
+          + `<span style="color:var(--ink-faint)"> · each trade risks ${pc((L.riskPerTrade || [])[0])}–${pc((L.riskPerTrade || [])[1])} of the book at its stop</span></span>`;
+      }
+    } catch (e) {}
     const line = S.busy ? 'syncing with the runner…' : S.err ? `sync failed: ${esc(S.err)} — showing the last synced copy`
       : info ? `runner journal ${esc(when(info.journalAt))} · ${info.trades} trades (${info.open} open) · bankroll ${$(info.bankroll)} (capital + realized, positions at cost) · synced ${ago(info.at)}${S.src === 'supabase' ? ' · live (Supabase)' : S.src === 'github' ? ' · via GitHub' : ''}`
       : 'not synced yet';
     el.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;font-family:var(--mono);font-size:10.5px;padding:7px 12px;border:1px solid var(--rule);border-left:3px solid ${col};border-radius:4px;margin:8px 0;background:var(--bg-elev)">
       <span style="color:${col};font-weight:700">ONE BOOK · RUNNER</span><span style="color:var(--ink-dim)">${esc(s.text)}</span>
-      <span style="flex-basis:100%;color:var(--ink-dim)">${line}</span>${bridge}
+      <span style="flex-basis:100%;color:var(--ink-dim)">${line}</span>${bridge}${riskLn}
       <span style="color:var(--ink-faint)">The bot is autonomous: only the GitHub runner trades, and only while the NYSE is open — new entries once per session after 10:00 ET, exits every pass. Every device shows the same journal.</span>
       <span style="margin-left:auto;display:flex;gap:6px">${btn('Refresh', "BotMirror.sync('button')")}</span></div>`;
     strip();
