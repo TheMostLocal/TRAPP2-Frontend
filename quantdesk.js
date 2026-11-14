@@ -1,5 +1,5 @@
 /* ==========================================================================
-   quantdesk.js — the QUANT BOOK tab (z171, universe line z174, strategy lab z175, curve + stocks / funds z176, macro quad z177, lab v2 z180; card z163, dashboard z170).
+   quantdesk.js — the QUANT BOOK tab (z171, universe line z174, strategy lab z175, curve + stocks / funds z176, macro quad z177, lab v2 z180, signal vs cost z186; card z163, dashboard z170).
    Its own top-level tab, laid out like Bot Bets: ◆ Portfolio (today, record, equity, engine & pipeline, open
    positions, statistics, the backtest gate, by day, strategies & risk) and ▤ Ledger (every closed quant trade,
    filterable and sortable). Separate from the swing bot in every way: data from TRAPP2-QUANT (data/quant/*) and
@@ -247,7 +247,22 @@
     const byDay = days.length ? card('By day · live', tbl([['Day'], ['Trades', 'right'], ['P&L', 'right'], ['Win', 'right'], ['Expectancy', 'right']], days.map(([k, v]) => `<tr><td>${esc(k)}</td><td style="text-align:right">${v.n}</td><td style="text-align:right">${usd(v.pnl)}</td><td style="text-align:right">${pct(v.winRate)}</td><td style="text-align:right">${bps(v.expectancyBps)}</td></tr>`), 420)) : '';
     const rulesC = card('Strategies & risk', `${tbl([['Strategy'], ['Family'], ['Looks for'], ['Holds']], Object.entries(STRATS).map(([k, v]) => `<tr><td>${k}</td><td>${v[0]}</td><td style="white-space:normal;min-width:240px">${v[1]}</td><td>${v[2]}</td></tr>`), 640)}
       <div style="font-family:var(--mono);font-size:10px;color:var(--ink-dim);line-height:1.7;margin-top:8px">$100,000 paper book, separate from the swing bot · 0.15 % of capital lost at a stop · ≤ 5 % per position, ≤ 25 positions, ≤ 150 % gross · entries 0940–1540 ET, flat at 1555 ET · no new entries after −1.5 % on the day · spread ≤ 8 bps, price ≥ $5, data ≤ 30 s old · market orders on the Alpaca paper account</div>`);
-    return tiles + status + labCard(d.lab) + pos + act + stats + gateC + byDay + rulesC;
+    // z186: SIGNAL vs COST - the move from the entry mid to the exit mid (the strategy's signal) against what the fills
+    // cost on top. A losing strategy has either no signal (fix the idea) or a signal smaller than its cost (fix the
+    // execution or the horizon) - this says which.
+    const svRows = [];
+    Object.entries((d.summ && d.summ.byStrategy) || {}).forEach(([k, v]) => ['live', 'shadow'].forEach(m => {
+      const x = v && v[m];
+      if (!x || !x.n || x.signalBps == null) return;
+      const dx = x.diagnosis || '—', col = dx === 'edge' ? 'var(--pos)' : dx === 'signal smaller than cost' ? 'var(--amber)' : 'var(--neg)';
+      svRows.push(`<tr><td>${esc(k)}${m === 'shadow' ? ' <span style="color:var(--ink-faint)">(shadow)</span>' : ''}</td><td style="text-align:right">${x.n.toLocaleString('en-US')}</td>`
+        + `<td style="text-align:right">${bps(x.signalBps)}</td><td style="text-align:right">${x.signalT == null ? '—' : (+x.signalT).toFixed(2)}</td>`
+        + `<td style="text-align:right">${bps(-x.costBps)}</td><td style="text-align:right">${bps(x.expectancyBps)}</td><td style="color:${col};white-space:normal">${esc(dx)}</td></tr>`);
+    }));
+    const sigCost = svRows.length ? card('Signal vs cost · why a strategy does or doesn\'t make money',
+      tbl([['Strategy'], ['Trades', 'right'], ['Signal', 'right'], ['t', 'right'], ['Cost', 'right'], ['Net', 'right'], ['Reading']], svRows, 560)
+      + `<div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:6px;line-height:1.5">signal = the price move from the entry mid to the exit mid in the trade's direction, before any spread, slippage or fee · cost = what the fills took on top · net = signal − cost · no signal: the idea doesn't predict at this horizon (cheaper execution won't save it) · signal smaller than cost: the idea works but the trading eats it (cheaper fills or a longer horizon could)</div>`) : '';
+    return tiles + status + labCard(d.lab) + pos + act + stats + sigCost + gateC + byDay + rulesC;
   }
 
   function ledgerView(d) {
