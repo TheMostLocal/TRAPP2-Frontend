@@ -361,6 +361,7 @@
     const ci = s.successCI95 && s.successCI95[0] != null ? ` <span class="dim">[${s.successCI95[0]}–${s.successCI95[1]}]</span>` : '';
     let h = `<div class="pat-row"><span>${label} · n ${s.n}</span><span>${s.successRate == null ? '—' : s.successRate + '%'}${ci}</span></div>`;
     if (s.identificationSuccessRate != null) h += `<div class="pat-row dim"><span>&nbsp; identification success</span><span>${s.identificationSuccessRate}%</span></div>`;
+    if (s.excludedDataBreaks) h += `<div class="pat-row dim" title="calls whose formation or 20-bar outcome spans a bad print or an unexplained jump in the price file"><span>&nbsp; left out (data breaks)</span><span>${s.excludedDataBreaks}</span></div>`;
     if (s.avgReturnPct != null) h += `<div class="pat-row dim"><span>&nbsp; avg return at exit</span><span>${pct(s.avgReturnPct)}</span></div>`;
     // z184 (patterns-v4): the date-matched edge - the call's 20 bars vs the typical stock's SAME 20 bars - with its
     // month-clustered 95% interval; EARNED / HARMFUL only when the whole interval sits on one side of zero
@@ -419,7 +420,8 @@
     const isT = P.tpl === 'minervini';
     host.innerHTML = `<table><thead><tr><th>identified</th><th>status</th>${isT ? '<th>63d</th><th>vs SPY</th>' : '<th>confirmed</th><th>exit</th><th>return</th>'}<th>+20d</th></tr></thead><tbody>` +
       rows.map(d => { const s = STATUS[d.st] || STATUS.open;
-        return `<tr><td>${esc(d.id)}</td><td style="color:${s.c}" title="${esc(s.t)}">${s.g} ${esc(d.st)}</td>` +
+        // z185: a call spanning a data break (a bad print or an unexplained jump in the price file) is shown, flagged, and left out of the statistics
+        return `<tr${d.db ? ' class="dim" title="spans a data break in the price history - not counted in the statistics"' : ''}><td>${esc(d.id)}${d.db ? ' ⚠' : ''}</td><td style="color:${s.c}" title="${esc(s.t)}">${s.g} ${esc(d.st)}</td>` +
           (isT ? `<td>${pct(d.rt)}</td><td>${pct(d.ex)}</td>` : `<td>${esc(d.cd || '—')}</td><td>${esc(d.xd || '—')}</td><td>${pct(d.rt)}</td>`) +
           `<td>${pct(d.f20)}</td></tr>`; }).join('') + '</tbody></table>';
   }
