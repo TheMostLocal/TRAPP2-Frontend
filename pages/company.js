@@ -43,14 +43,40 @@ function renderFinancials() {
   `;
 }
 
-function computeFinancialRatios(income, balance, cashflow, currentPrice, marketCap) {
+function computeFinancialRatios(income, balance, cashflow, currentPrice, marketCap, opts) {
   if (!income?.length || !balance?.length) return null;
-  // Statements are sorted newest first by FMP; use newest as "current"
+  opts = opts || {};
+  // z187: newest first whatever the source returned (the repo and FMP both do today - not relied on)
+  const _desc = a => (a || []).slice().sort((x, y) => String(y.date || '').localeCompare(String(x.date || '')));
+  income = _desc(income); balance = _desc(balance); cashflow = _desc(cashflow);
   const ic = income[0]   || {};
   const bc = balance[0]  || {};
   const cc = cashflow?.[0] || {};
   const safe = (v) => (v == null || !isFinite(v)) ? null : v;
-  const ratio = (a, b) => (b && isFinite(b) && b !== 0) ? a / b : null;
+  const ratio = (a, b) => (a != null && isFinite(a) && b && isFinite(b) && b !== 0) ? a / b : null;
+  // z187: the QUARTERLY view used one quarter's flows against balance-sheet stocks and the market cap - ROE / ROA /
+  // turnover read ~4x too low and P/E / P/S ~4x too high. Flows are now trailing-12-month sums of the newest four
+  // quarters (annual view: the latest year). And the statements are in the REPORTING currency while price and market
+  // cap are USD: K = USD per unit of the statements' currency (TSM: TWD) - market-cap ratios convert, or stay blank.
+  const Q = !!opts.quarterly;
+  const finCcy = String(opts.finCcy || 'USD').toUpperCase();
+  const K = finCcy === 'USD' ? 1 : (opts.finRate != null && isFinite(opts.finRate) && opts.finRate > 0 ? opts.finRate : null);
+  const usd = v => (v == null || !isFinite(v) || K == null) ? null : v * K;
+  const money = v => (K == null ? safe(v) : usd(v));          // USD when the rate is known, else the statements' own
+  const fcfOf = p => p.freeCashFlow ?? ((p.operatingCashFlow != null && isFinite(p.operatingCashFlow)) ? p.operatingCashFlow - Math.abs(p.capitalExpenditure || 0) : null);
+  const ttm = (rows, fn) => {
+    if (!Q) { const p = (rows || [])[0]; return p ? safe(fn(p)) : null; }
+    const w = (rows || []).slice(0, 4);
+    if (w.length < 4) return null;
+    const span = (Date.parse(w[0].date) - Date.parse(w[3].date)) / 864e5;
+    if (!(span >= 250 && span <= 300)) return null;           // four CONSECUTIVE quarters
+    let s = 0;
+    for (const p of w) { const v = fn(p); if (v == null || !isFinite(v)) return null; s += v; }
+    return s;
+  };
+  const niT = ttm(income, p => p.netIncome), revT = ttm(income, p => p.revenue), opT = ttm(income, p => p.operatingIncome);
+  const cogsT = ttm(income, p => p.costOfRevenue), epsT = ttm(income, p => p.eps), fcfT = ttm(cashflow, fcfOf);
+  const vm = opts.multiples || null;                          // the pipeline's multiples (valuationMultiples) when z187
 
   // Build per-period rows so we can sparkline trends
   const periodMap = {};
@@ -65,6 +91,23 @@ function computeFinancialRatios(income, balance, cashflow, currentPrice, marketC
     const v = computeFn(p);
     return { date: p.date, value: (v == null || !isFinite(v)) ? null : v };
   }).filter(s => s.value != null);
+  // z187: flow / stock history - per year (annual view) or rolling four-quarter sums over each quarter-end stock
+  const ttmSeries = (flowFn, stockFn) => {
+    if (!Q) return series(p => { const st = stockFn(p); return (st != null && st > 0) ? ratio(flowFn(p), st) : null; });
+    const out = [];
+    for (let i = 3; i < periods.length; i++) {
+      const w = periods.slice(i - 3, i + 1);
+      const span = (Date.parse(w[3].date) - Date.parse(w[0].date)) / 864e5;
+      if (!(span >= 250 && span <= 300)) continue;
+      let s = 0, ok = true;
+      for (const p of w) { const v = flowFn(p); if (v == null || !isFinite(v)) { ok = false; break; } s += v; }
+      const st = stockFn(periods[i]);
+      if (ok && st != null && st > 0) out.push({ date: periods[i].date, value: s / st });
+    }
+    return out;
+  };
+  const tangibleOf = p => (p.totalStockholdersEquity != null ? p.totalStockholdersEquity - (p.goodwill || 0) - (p.intangibleAssets || 0) : null);
+  const basisNote = Q ? ' Quarterly view: income and cash-flow items are the newest four quarters (TTM).' : '';
 
   // === Define metrics ===
   // Each metric: { value, history[], formula, description, gradeFn, format }
@@ -170,8 +213,8 @@ function computeFinancialRatios(income, balance, cashflow, currentPrice, marketC
     group: 'Profitability',
     formula: 'Net Income / Total Assets',
     description: 'How efficiently total assets are converted to profit. Asset-light businesses score higher.',
-    value: ratio(safe(ic.netIncome), safe(bc.totalAssets)),
-    history: series(p => ratio(p.netIncome, p.totalAssets)),
+    value: ratio(niT, safe(bc.totalAssets)),
+    history: ttmSeries(p => p.netIncome, p => p.totalAssets),
     format: v => v == null ? null : (v * 100).toFixed(1) + '%',
     gradeFn: v => v == null ? null : v > 0.15 ? 'strong' : v > 0.08 ? 'good' : v > 0.04 ? 'neutral' : v > 0 ? 'weak' : 'poor',
   };
@@ -180,8 +223,8 @@ function computeFinancialRatios(income, balance, cashflow, currentPrice, marketC
     group: 'Profitability',
     formula: 'Net Income / Shareholders Equity',
     description: 'Profit generated per dollar of shareholder equity. Buffett favorite — above 15% sustained is excellent.',
-    value: ratio(safe(ic.netIncome), safe(bc.totalStockholdersEquity)),
-    history: series(p => ratio(p.netIncome, p.totalStockholdersEquity)),
+    value: ratio(niT, safe(bc.totalStockholdersEquity)),
+    history: ttmSeries(p => p.netIncome, p => p.totalStockholdersEquity),
     format: v => v == null ? null : (v * 100).toFixed(1) + '%',
     gradeFn: v => v == null ? null : v > 0.20 ? 'strong' : v > 0.12 ? 'good' : v > 0.06 ? 'neutral' : v > 0 ? 'weak' : 'poor',
   };
@@ -191,16 +234,10 @@ function computeFinancialRatios(income, balance, cashflow, currentPrice, marketC
     formula: 'Net Income / (Equity − Goodwill − Intangibles)',
     description: 'Return on the hard capital actually in the business, stripping out acquisition goodwill and intangibles. More demanding than ROE — the gold standard for capital-allocation quality, especially for banks and acquisitive companies. Above 20% sustained signals a durable advantage.',
     value: (() => {
-      const eq = safe(bc.totalStockholdersEquity);
-      const ni = safe(ic.netIncome);
-      if (eq == null || ni == null) return null;
-      const tangible = eq - (safe(bc.goodwill) || 0) - (safe(bc.intangibleAssets) || 0);
-      return tangible > 0 ? ni / tangible : null;
+      const tangible = tangibleOf(bc);
+      return (tangible != null && tangible > 0) ? ratio(niT, tangible) : null;
     })(),
-    history: series(p => {
-      const tangible = (p.totalStockholdersEquity || 0) - (p.goodwill || 0) - (p.intangibleAssets || 0);
-      return tangible > 0 ? ratio(p.netIncome, tangible) : null;
-    }),
+    history: ttmSeries(p => p.netIncome, tangibleOf),
     format: v => v == null ? null : (v * 100).toFixed(1) + '%',
     gradeFn: v => v == null ? null : v > 0.20 ? 'strong' : v > 0.12 ? 'good' : v > 0.06 ? 'neutral' : v > 0 ? 'weak' : 'poor',
   };
@@ -209,8 +246,8 @@ function computeFinancialRatios(income, balance, cashflow, currentPrice, marketC
     group: 'Profitability',
     formula: 'NOPAT / (Debt + Equity)',
     description: 'True economic return on all capital employed. Above the cost of capital = value creation.',
-    value: ratio(safe(ic.operatingIncome) * (1 - 0.21), safe(bc.totalDebt) + safe(bc.totalStockholdersEquity)),
-    history: series(p => ratio((p.operatingIncome || 0) * 0.79, (p.totalDebt || 0) + (p.totalStockholdersEquity || 0))),
+    value: ratio(opT != null ? opT * (1 - 0.21) : null, (safe(bc.totalDebt) || 0) + (safe(bc.totalStockholdersEquity) || 0)),
+    history: ttmSeries(p => (p.operatingIncome != null ? p.operatingIncome * 0.79 : null), p => (p.totalDebt || 0) + (p.totalStockholdersEquity || 0)),
     format: v => v == null ? null : (v * 100).toFixed(1) + '%',
     gradeFn: v => v == null ? null : v > 0.15 ? 'strong' : v > 0.10 ? 'good' : v > 0.05 ? 'neutral' : v > 0 ? 'weak' : 'poor',
   };
@@ -221,8 +258,8 @@ function computeFinancialRatios(income, balance, cashflow, currentPrice, marketC
     group: 'Efficiency',
     formula: 'Revenue / Total Assets',
     description: 'How much revenue is generated per dollar of assets. Retailers high, banks low.',
-    value: ratio(safe(ic.revenue), safe(bc.totalAssets)),
-    history: series(p => ratio(p.revenue, p.totalAssets)),
+    value: ratio(revT, safe(bc.totalAssets)),
+    history: ttmSeries(p => p.revenue, p => p.totalAssets),
     format: v => v == null ? null : v.toFixed(2) + 'x',
     gradeFn: v => v == null ? null : v > 1.5 ? 'strong' : v > 1 ? 'good' : v > 0.5 ? 'neutral' : v > 0.2 ? 'weak' : 'poor',
   };
@@ -231,8 +268,8 @@ function computeFinancialRatios(income, balance, cashflow, currentPrice, marketC
     group: 'Efficiency',
     formula: 'Cost of Goods Sold / Inventory',
     description: 'How quickly inventory is sold and replaced. Higher = leaner operations (n/a for service companies).',
-    value: ratio(safe(ic.costOfRevenue), safe(bc.inventory)),
-    history: series(p => ratio(p.costOfRevenue, p.inventory)),
+    value: ratio(cogsT, safe(bc.inventory)),
+    history: ttmSeries(p => p.costOfRevenue, p => p.inventory),
     format: v => v == null ? null : v.toFixed(1) + 'x',
     gradeFn: v => v == null ? null : v > 12 ? 'strong' : v > 6 ? 'good' : v > 3 ? 'neutral' : v > 1 ? 'weak' : 'poor',
   };
@@ -242,9 +279,9 @@ function computeFinancialRatios(income, balance, cashflow, currentPrice, marketC
     label: 'Free Cash Flow',
     group: 'Cash Flow',
     formula: 'Operating Cash Flow − Capital Expenditures',
-    description: 'Cash available after maintaining/growing the business. The lifeblood of a healthy company.',
-    value: safe(cc.freeCashFlow) ?? (safe(cc.operatingCashFlow) - Math.abs(safe(cc.capitalExpenditure) ?? 0)),
-    history: series(p => p.freeCashFlow ?? ((p.operatingCashFlow || 0) - Math.abs(p.capitalExpenditure || 0))),
+    description: 'Cash available after maintaining/growing the business. The lifeblood of a healthy company. In USD (converted from the reporting currency at the current rate).' + basisNote,
+    value: money(fcfT),
+    history: series(p => money(fcfOf(p))),
     format: v => formatLargeCurrency(v),
     gradeFn: v => v == null ? null : v > 1e10 ? 'strong' : v > 1e9 ? 'good' : v > 0 ? 'neutral' : v > -1e9 ? 'weak' : 'poor',
   };
@@ -269,10 +306,7 @@ function computeFinancialRatios(income, balance, cashflow, currentPrice, marketC
     group: 'Cash Flow',
     formula: 'Free Cash Flow / Market Cap',
     description: 'Free cash return relative to market value. Higher = cheaper relative to cash generation.',
-    value: (() => {
-      const fcf = safe(cc.freeCashFlow) ?? (safe(cc.operatingCashFlow) - Math.abs(safe(cc.capitalExpenditure) ?? 0));
-      return ratio(fcf, marketCap);
-    })(),
+    value: ratio(usd(fcfT), marketCap),             // z187: TTM free cash flow in USD over the USD market cap
     history: [],  // requires historical mcap which we don't track
     format: v => v == null ? null : (v * 100).toFixed(2) + '%',
     gradeFn: v => v == null ? null : v > 0.08 ? 'strong' : v > 0.05 ? 'good' : v > 0.02 ? 'neutral' : v > 0 ? 'weak' : 'poor',
@@ -312,8 +346,9 @@ function computeFinancialRatios(income, balance, cashflow, currentPrice, marketC
     label: 'P / E (TTM)',
     group: 'Valuation',
     formula: 'Price / Earnings per Share',
-    description: 'Price paid per dollar of trailing earnings. Lower = cheaper. Compare to sector median.',
-    value: ratio(currentPrice, safe(ic.eps)),
+    description: 'Price paid per dollar of trailing-12-month earnings. Lower = cheaper. Compare to sector median. Today\'s price; per share as the pipeline reports it (an ADR\'s EPS per ADR in USD), else market cap / TTM net income in USD.' + basisNote,
+    value: (vm && vm.z187 && opts.rowPe != null && opts.rowPe > 0) ? opts.rowPe
+         : (niT != null && niT > 0 ? ratio(marketCap, usd(niT)) : null),
     history: [],
     format: v => v == null ? null : v.toFixed(1),
     gradeFn: v => v == null ? null : v < 0 ? 'poor' : v < 12 ? 'strong' : v < 20 ? 'good' : v < 35 ? 'neutral' : v < 60 ? 'weak' : 'poor',
@@ -322,8 +357,9 @@ function computeFinancialRatios(income, balance, cashflow, currentPrice, marketC
     label: 'Price / Book',
     group: 'Valuation',
     formula: 'Market Cap / Book Value of Equity',
-    description: 'How much investors pay per dollar of net assets. Below 1 = trading below book.',
-    value: ratio(marketCap, safe(bc.totalStockholdersEquity)),
+    description: 'How much investors pay per dollar of net assets, at today\'s price over the latest balance sheet, both in USD. Below 1 = trading below book; a negative book has no P/B.',
+    value: (vm && vm.z187) ? vm.pb
+         : ((safe(bc.totalStockholdersEquity) || 0) > 0 ? ratio(marketCap, usd(safe(bc.totalStockholdersEquity))) : null),
     history: [],
     format: v => v == null ? null : v.toFixed(2),
     gradeFn: v => v == null ? null : v < 1 ? 'strong' : v < 3 ? 'good' : v < 6 ? 'neutral' : v < 10 ? 'weak' : 'poor',
@@ -332,8 +368,8 @@ function computeFinancialRatios(income, balance, cashflow, currentPrice, marketC
     label: 'Price / Sales',
     group: 'Valuation',
     formula: 'Market Cap / Revenue',
-    description: 'Used when earnings are negative or volatile. Useful for growth companies and SaaS.',
-    value: ratio(marketCap, safe(ic.revenue)),
+    description: 'Market cap over trailing-12-month revenue, both in USD, at today\'s price. Used when earnings are negative or volatile. Useful for growth companies and SaaS.' + basisNote,
+    value: (vm && vm.z187) ? vm.ps : (revT != null && revT > 0 ? ratio(marketCap, usd(revT)) : null),
     history: [],
     format: v => v == null ? null : v.toFixed(2),
     gradeFn: v => v == null ? null : v < 2 ? 'strong' : v < 5 ? 'good' : v < 10 ? 'neutral' : v < 20 ? 'weak' : 'poor',
@@ -344,8 +380,8 @@ function computeFinancialRatios(income, balance, cashflow, currentPrice, marketC
     label: 'EPS (TTM)',
     group: 'Per Share',
     formula: 'Net Income / Shares Outstanding',
-    description: 'Earnings attributable to each share. The numerator of P/E.',
-    value: safe(ic.eps),
+    description: 'Earnings attributable to each share, in the reporting currency (' + finCcy + ').' + basisNote,
+    value: epsT,
     history: series(p => p.eps),
     format: v => v == null ? null : fmt$(v),
     gradeFn: v => v == null ? null : v > 5 ? 'strong' : v > 2 ? 'good' : v > 0 ? 'neutral' : 'poor',
@@ -363,69 +399,80 @@ function computeFinancialRatios(income, balance, cashflow, currentPrice, marketC
 
   // Pull individual metric "currents" into the canonical stockbook row so the
   // health engine consumes them. Same data, no parallel sources.
+  // z187: GAPS only - the pipeline's row is the reference (P/B and P/S at today's price from the latest quarter, in
+  // USD); this page used to overwrite it with one quarter's figures and, for an ADR, the statements' currency (TSM's
+  // TWD cash went into a USD row)
   const sbRow = getCanonicalStockData(state.stock?.ticker);
   if (sbRow) {
-    sbRow.currentRatio  = metrics.currentRatio.value  ?? sbRow.currentRatio;
-    sbRow.debtToEquity  = metrics.debtToEquity.value  ?? sbRow.debtToEquity;
-    sbRow.netMargin     = metrics.netMargin.value     ?? sbRow.netMargin;
-    sbRow.roe           = metrics.roe.value           ?? sbRow.roe;
-    sbRow.priceToBook   = metrics.priceToBook.value   ?? sbRow.priceToBook;
-    sbRow.priceToSales  = metrics.priceToSales.value  ?? sbRow.priceToSales;
-    sbRow.cash          = safe(bc.cashAndCashEquivalents) ?? sbRow.cash;
-    sbRow.totalDebt     = safe(bc.totalDebt) ?? sbRow.totalDebt;
+    const fill = (k, v) => { if (v != null && isFinite(v) && (sbRow[k] == null || sbRow[k] === '')) sbRow[k] = v; };
+    fill('currentRatio', metrics.currentRatio.value);
+    fill('debtToEquity', metrics.debtToEquity.value);
+    fill('netMargin', metrics.netMargin.value);
+    fill('roe', metrics.roe.value);
+    fill('priceToBook', metrics.priceToBook.value);
+    fill('priceToSales', metrics.priceToSales.value);
+    fill('cash', usd(safe(bc.cashAndCashEquivalents)));
+    fill('totalDebt', usd(safe(bc.totalDebt)));
   }
 
   return {
     metrics,
     topLine: {
+      // z187: money in USD when the statements' rate is known (TSM's TWD showed with a $ sign); flows are TTM in the
+      // quarterly view; growth is year over year (quarterly view: against the same quarter a year earlier, not the
+      // previous quarter)
       // Balance sheet totals
-      totalAssets:           safe(bc.totalAssets),
-      totalCurrentAssets:    safe(bc.totalCurrentAssets),
-      totalLiabilities:      safe(bc.totalLiabilities),
-      totalCurrentLiab:      safe(bc.totalCurrentLiabilities),
-      totalEquity:           safe(bc.totalStockholdersEquity),
-      cash:                  safe(bc.cashAndCashEquivalents),
-      totalDebt:             safe(bc.totalDebt),
+      totalAssets:           money(bc.totalAssets),
+      totalCurrentAssets:    money(bc.totalCurrentAssets),
+      totalLiabilities:      money(bc.totalLiabilities),
+      totalCurrentLiab:      money(bc.totalCurrentLiabilities),
+      totalEquity:           money(bc.totalStockholdersEquity),
+      cash:                  money(bc.cashAndCashEquivalents),
+      totalDebt:             money(bc.totalDebt),
       // Income statement totals
-      revenue:               safe(ic.revenue),
-      netIncome:             safe(ic.netIncome),
+      revenue:               money(ic.revenue),        // the period's (the income waterfall's base)
+      netIncome:             money(ic.netIncome),
+      revenueTTM:            money(Q ? revT : ic.revenue),
+      netIncomeTTM:          money(Q ? niT : ic.netIncome),
       freeCashFlow:          metrics.freeCashFlow.value,
       sharesOutstanding:     safe(ic.weightedAverageShsOut),
-      revenueGrowth:         (income.length >= 2 && income[1]?.revenue) ? ((ic.revenue - income[1].revenue) / Math.abs(income[1].revenue)) : null,
-      earningsGrowth:        (income.length >= 2 && income[1]?.netIncome) ? ((ic.netIncome - income[1].netIncome) / Math.abs(income[1].netIncome)) : null,
+      revenueGrowth:         (() => { const b = income[Q ? 4 : 1]; return (b && b.revenue) ? ((ic.revenue - b.revenue) / Math.abs(b.revenue)) : null; })(),
+      earningsGrowth:        (() => { const b = income[Q ? 4 : 1]; return (b && b.netIncome) ? ((ic.netIncome - b.netIncome) / Math.abs(b.netIncome)) : null; })(),
 
       // === Income statement composition — for revenue waterfall pie ===
       // Each piece of revenue is consumed by COGS, opex, interest, taxes,
       // leaving net income as the residual. Components may be null if FMP
       // doesn't supply them; we'll filter nulls before charting.
-      costOfRevenue:         safe(ic.costOfRevenue),
-      grossProfit:           safe(ic.grossProfit),
-      operatingExpenses:     safe(ic.operatingExpenses),
-      operatingIncome:       safe(ic.operatingIncome),
-      researchAndDev:        safe(ic.researchAndDevelopmentExpenses),
-      sellingGenAdmin:       safe(ic.sellingGeneralAndAdministrativeExpenses),
-      interestExpense:       safe(ic.interestExpense),
-      incomeTaxExpense:      safe(ic.incomeTaxExpense),
-      ebitda:                safe(ic.ebitda),
-      depreciation:          safe(ic.depreciationAndAmortization),
+      costOfRevenue:         money(ic.costOfRevenue),
+      grossProfit:           money(ic.grossProfit),
+      operatingExpenses:     money(ic.operatingExpenses),
+      operatingIncome:       money(ic.operatingIncome),
+      researchAndDev:        money(ic.researchAndDevelopmentExpenses),
+      sellingGenAdmin:       money(ic.sellingGeneralAndAdministrativeExpenses),
+      interestExpense:       money(ic.interestExpense),
+      incomeTaxExpense:      money(ic.incomeTaxExpense),
+      ebitda:                money(ic.ebitda),
+      depreciation:          money(ic.depreciationAndAmortization),
 
       // === Balance sheet composition — for asset + liability pies ===
       // Asset side: cash / receivables / inventory / PP&E / intangibles + goodwill / other
-      receivables:           safe(bc.netReceivables),
-      inventory:             safe(bc.inventory),
-      ppe:                   safe(bc.propertyPlantEquipmentNet),
-      goodwill:              safe(bc.goodwill),
-      intangibles:           safe(bc.intangibleAssets),
-      shortTermInvestments:  safe(bc.shortTermInvestments),
-      longTermInvestments:   safe(bc.longTermInvestments),
+      receivables:           money(bc.netReceivables),
+      inventory:             money(bc.inventory),
+      ppe:                   money(bc.propertyPlantEquipmentNet),
+      goodwill:              money(bc.goodwill),
+      intangibles:           money(bc.intangibleAssets),
+      shortTermInvestments:  money(bc.shortTermInvestments),
+      longTermInvestments:   money(bc.longTermInvestments),
       // Liability side: short-term debt / long-term debt / payables / accrued / deferred / other
-      shortTermDebt:         safe(bc.shortTermDebt),
-      longTermDebt:          safe(bc.longTermDebt),
-      accountsPayable:       safe(bc.accountPayables),
-      deferredRevenue:       safe(bc.deferredRevenue),
+      shortTermDebt:         money(bc.shortTermDebt),
+      longTermDebt:          money(bc.longTermDebt),
+      accountsPayable:       money(bc.accountPayables),
+      deferredRevenue:       money(bc.deferredRevenue),
     },
     asOf: ic.date || bc.date,
     periodCount: periods.length,
+    ccyNote: (finCcy !== 'USD' ? (K != null ? ` · amounts in USD (from ${finCcy} at the current rate)` : ` · amounts in ${finCcy} (no USD rate loaded - market-cap ratios left blank)`) : '')
+      + (Q ? ' · quarterly view: income & cash flow are the newest four quarters (TTM) where a ratio needs a year' : ''),
   };
 }
 
@@ -575,12 +622,18 @@ function renderFinancialsOverview(el, data, stock) {
     el.innerHTML = `<div class="empty" style="padding:40px;text-align:center;color:var(--ink-dim)">Load a ticker to see financial overview.</div>`;
     return;
   }
-  const result = computeFinancialRatios(data.income, data.balance, data.cashflow, stock.price, stock.marketCap);
+  // z187: the statements' currency (repo file / FMP's reportedCurrency / the row) and the pipeline's multiples
+  const _row = (typeof getCanonicalStockData === 'function' ? getCanonicalStockData(stock.ticker) : null) || stock;
+  const _finCcy = String(data._ccy || ((data.income || [])[0] || {}).reportedCurrency || _row.financialCurrency || _row._finCurrency || 'USD').toUpperCase();
+  const _finRate = _finCcy === 'USD' ? 1 : (typeof _fxRateToUSD === 'function' ? _fxRateToUSD(_finCcy) : null);
+  const _vm = (typeof valuationMultiples === 'function') ? valuationMultiples(_row) : null;
+  const result = computeFinancialRatios(data.income, data.balance, data.cashflow, stock.price, stock.marketCap,
+    { quarterly: state.financials.period === 'quarter', finCcy: _finCcy, finRate: _finRate, multiples: _vm, rowPe: (+_row.pe > 0 ? +_row.pe : null) });
   if (!result) {
     el.innerHTML = `<div class="empty" style="padding:40px;text-align:center;color:var(--ink-dim)">Insufficient statement data to compute ratios.</div>`;
     return;
   }
-  const { metrics, topLine, asOf, periodCount } = result;
+  const { metrics, topLine, asOf, periodCount, ccyNote } = result;
 
   // Group metrics by group
   const groups = {};
@@ -598,8 +651,8 @@ function renderFinancialsOverview(el, data, stock) {
     { label: 'Current Liabilities',  value: topLine.totalCurrentLiab,     format: formatLargeCurrency, tooltip: 'Obligations due within 12 months — short-term debt, payables, accrued expenses.' },
     { label: 'Cash & Equivalents',   value: topLine.cash,                 format: formatLargeCurrency, tooltip: 'Most liquid assets — physical cash, demand deposits, money market funds.' },
     { label: 'Total Debt',           value: topLine.totalDebt,            format: formatLargeCurrency, tooltip: 'All interest-bearing obligations — short-term + long-term debt.' },
-    { label: 'Revenue (TTM)',        value: topLine.revenue,              format: formatLargeCurrency, tooltip: 'Top-line sales over the trailing twelve months.' },
-    { label: 'Net Income (TTM)',     value: topLine.netIncome,            format: formatLargeCurrency, tooltip: 'Bottom-line profit after all expenses, interest, and taxes.' },
+    { label: 'Revenue (TTM)',        value: topLine.revenueTTM,           format: formatLargeCurrency, tooltip: 'Top-line sales over the trailing twelve months.' },
+    { label: 'Net Income (TTM)',     value: topLine.netIncomeTTM,         format: formatLargeCurrency, tooltip: 'Bottom-line profit after all expenses, interest, and taxes.' },
     { label: 'Free Cash Flow (TTM)', value: topLine.freeCashFlow,         format: formatLargeCurrency, tooltip: 'Operating cash flow minus capital expenditures — cash available for dividends, buybacks, debt paydown, M&A.' },
   ];
   const topLineHtml = topLineCards.map(c => {
@@ -884,7 +937,7 @@ function renderFinancialsOverview(el, data, stock) {
       </div>
       ${groupHtml}
       <div class="financials-meta">
-        Computed from FMP statements · ${periodCount} period${periodCount === 1 ? '' : 's'} available · As of ${asOf || 'unknown'} · Hover any card for the full formula + description
+        Computed from FMP statements · ${periodCount} period${periodCount === 1 ? '' : 's'} available · As of ${asOf || 'unknown'}${ccyNote || ''} · Hover any card for the full formula + description
       </div>
     </div>
   `;
