@@ -34834,7 +34834,10 @@ async function loadBackendResearch() {
   try {
     if (typeof analyticsSupabaseLoadGrades === 'function' && typeof analyticsSupabaseConfigured === 'function' && analyticsSupabaseConfigured()) {
       const sb = await analyticsSupabaseLoadGrades();
-      if (sb && sb.byTicker && Object.keys(sb.byTicker).length) {
+      // z188: a Supabase read whose size is an exact multiple of 1,000 may be a capped page - the repo file decides then
+      const nSb = sb && sb.byTicker ? Object.keys(sb.byTicker).length : 0;
+      if (nSb && nSb % 1000 === 0) console.warn(`[analytics-supabase] ${nSb} grades - a round number, checking the repo file instead`);
+      if (sb && sb.byTicker && nSb && nSb % 1000 !== 0) {
         _backendResearch = sb;
         idbSet('backendResearch', sb);
         if (typeof renderResearchTab === 'function' &&
@@ -38562,10 +38565,18 @@ function _analyticsSupabaseHeaders() {
 async function analyticsSupabaseLoadGrades() {
   if (!analyticsSupabaseConfigured()) return null;
   try {
-    const r = await fetch(`${getAnalyticsSupabaseUrl()}/rest/v1/research_grades?select=ticker,grades,updated_at`, { headers: _analyticsSupabaseHeaders() });
-    if (!r.ok) { console.warn('[analytics-supabase] grades load failed', r.status); return null; }
-    const rows = await r.json();
-    if (!Array.isArray(rows) || !rows.length) return null;
+    // z188: PAGED. Supabase answers at most 1,000 rows a request, so the single read loaded 1,000 of the 2,471 graded
+    // tickers - research lost every grade past the first 1,000 and Home listed ~1,470 of the books' own tickers as
+    // "needing backend addition". Pages of 1,000 in ticker order until an empty page.
+    const rows = [];
+    for (let page = 0; page < 20; page++) {
+      const r = await fetch(`${getAnalyticsSupabaseUrl()}/rest/v1/research_grades?select=ticker,grades,updated_at&order=ticker.asc&limit=1000&offset=${rows.length}`, { headers: _analyticsSupabaseHeaders() });
+      if (!r.ok) { console.warn('[analytics-supabase] grades load failed', r.status); if (!rows.length) return null; break; }
+      const part = await r.json();
+      if (!Array.isArray(part) || !part.length) break;
+      rows.push(...part);
+    }
+    if (!rows.length) return null;
     const byTicker = {};
     let newest = 0;
     for (const row of rows) {
@@ -45596,6 +45607,61 @@ function renderHomeStats() {
   renderBackendCoverageGaps();
 }
 
+// ============================================================
+//   z188 - COPY THAT WORKS EVERYWHERE
+//   The async Clipboard API inside the tap; the legacy execCommand path when that is refused (older iOS Safari, a
+//   non-secure frame); and when both are, a box with the text selected so it can be copied by hand. (The Home page's
+//   "Copy all ... for tickers.txt" never ran: its list was written into the button's onclick attribute as JSON, whose
+//   double quotes closed the attribute - every tap hit a syntax error.)
+// ============================================================
+async function copyTextRobust(text, label) {
+  text = String(text == null ? '' : text);
+  const done = ok => {
+    if (ok) { if (typeof flashStatus === 'function') flashStatus(`${label || 'Text'} copied`, 'success'); }
+    else _showCopyBox(text, label);
+    return ok;
+  };
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function' && window.isSecureContext !== false) {
+    try { await navigator.clipboard.writeText(text); return done(true); } catch (e) { /* refused - try the legacy path */ }
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:0;left:0;width:2px;height:2px;padding:0;border:0;opacity:0;font-size:16px';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try { ta.setSelectionRange(0, text.length); } catch (e) {}
+    const ok = !!(document.execCommand && document.execCommand('copy'));
+    ta.remove();
+    return done(ok);
+  } catch (e) { return done(false); }
+}
+function _showCopyBox(text, label) {
+  const old = document.getElementById('copy-box-overlay');
+  if (old) old.remove();
+  const ov = document.createElement('div');
+  ov.id = 'copy-box-overlay';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.65);display:flex;align-items:center;justify-content:center;padding:16px';
+  ov.innerHTML = `<div style="background:var(--bg-card);border:1px solid var(--rule);border-radius:4px;max-width:640px;width:100%;padding:14px;box-sizing:border-box;font-family:var(--mono)">
+      <div style="font-size:10px;color:var(--ink-dim);letter-spacing:0.08em;text-transform:uppercase;line-height:1.6;margin-bottom:8px">${escapeHtml(label || 'Copy')} — this browser blocked automatic copying. The text below is selected: copy it from here.</div>
+      <textarea readonly style="width:100%;height:240px;box-sizing:border-box;font-family:var(--mono);font-size:12px;background:var(--bg);color:var(--ink);border:1px solid var(--rule);border-radius:3px;padding:8px"></textarea>
+      <div style="display:flex;justify-content:flex-end;margin-top:10px"><button class="btn btn-ghost" style="font-size:10px" data-act="close">Close</button></div>
+    </div>`;
+  document.body.appendChild(ov);
+  const ta = ov.querySelector('textarea');
+  ta.value = text;
+  ov.addEventListener('click', e => { if (e.target === ov || (e.target.dataset && e.target.dataset.act === 'close')) ov.remove(); });
+  setTimeout(() => { try { ta.focus(); ta.select(); ta.setSelectionRange(0, text.length); } catch (e) {} }, 30);
+}
+function copyBackendGaps() {
+  const list = Array.isArray(window._backendGapList) ? window._backendGapList : [];
+  if (!list.length) return;
+  copyTextRobust(list.join('\n'), `${list.length} tickers (one per line, for tickers.txt)`);
+}
+if (typeof window !== 'undefined') Object.assign(window, { copyTextRobust, copyBackendGaps });
+
 function renderBackendCoverageGaps() {
   let host = document.getElementById('home-backend-gaps');
   // Create the section if the HTML doesn't already have it (graceful inject).
@@ -45622,12 +45688,19 @@ function renderBackendCoverageGaps() {
     return;
   }
 
-  const missing = [...watched].filter(t => !backend[t]).sort();
+  // z188: equities are graded in byTicker, everything else (ETFs, futures, FX, indices, crypto) in nonEquity - both
+  // are "in the backend". (Every non-equity used to be listed here as missing.)
+  const nonEq = _backendResearch?.nonEquity || {};
+  const missing = [...watched].filter(t => !backend[t] && !nonEq[t]).sort();
   const covered = watched.size - missing.length;
+  const nBackend = Object.keys(backend).length + Object.keys(nonEq).length;
+  const srcNote = `backend: ${nBackend.toLocaleString()} graded tickers loaded from ${_backendResearch?._source === 'supabase' ? 'Supabase' : 'the repo'}${_backendResearch?._ageHours != null ? `, ${_backendResearch._ageHours} h old` : ''}`;
+  window._backendGapList = missing;
 
   if (!missing.length) {
     host.innerHTML = `<div class="home-section-title" style="font-family:var(--mono);font-size:11px;color:var(--ink-faint);letter-spacing:0.1em;text-transform:uppercase;margin-bottom:8px">Backend Coverage</div>
-      <div style="font-family:var(--mono);font-size:10px;color:var(--pos)">✓ All ${watched.size} of your tickers are in the backend — full research available.</div>`;
+      <div style="font-family:var(--mono);font-size:10px;color:var(--pos)">✓ All ${watched.size} of your tickers are in the backend — full research available.</div>
+      <div style="font-family:var(--mono);font-size:9.5px;color:var(--ink-faint);margin-top:4px">${escapeHtml(srcNote)}</div>`;
     return;
   }
 
@@ -45635,11 +45708,12 @@ function renderBackendCoverageGaps() {
     <div class="home-section-title" style="font-family:var(--mono);font-size:11px;color:var(--amber);letter-spacing:0.1em;text-transform:uppercase;margin-bottom:8px">Tickers Needing Backend Addition (${missing.length})</div>
     <div style="font-family:var(--mono);font-size:10px;color:var(--ink-dim);line-height:1.6;margin-bottom:10px">
       ${covered} of ${watched.size} of your tickers have full backend research. The ${missing.length} below are NOT in any data repo — the app shows only live-pulled data for them, with no nightly fundamentals, history, or grades. Add them to a repo's <span style="color:var(--amber)">data/tickers.txt</span> (and the master fetch) for deep research.
+      <div style="color:var(--ink-faint);margin-top:4px">${escapeHtml(srcNote)}</div>
     </div>
     <div style="display:flex;flex-wrap:wrap;gap:6px">
-      ${missing.map(t => `<span style="font-family:var(--mono);font-size:10px;font-weight:700;padding:3px 8px;border:1px solid var(--amber);color:var(--amber);border-radius:3px;cursor:pointer" onclick="navigator.clipboard&&navigator.clipboard.writeText('${escapeHtml(t)}')" title="Click to copy">${escapeHtml(t)}</span>`).join('')}
+      ${missing.map(t => `<span style="font-family:var(--mono);font-size:10px;font-weight:700;padding:3px 8px;border:1px solid var(--amber);color:var(--amber);border-radius:3px;cursor:pointer" data-tk="${escapeHtml(t)}" onclick="copyTextRobust(this.dataset.tk, this.dataset.tk)" title="Tap to copy">${escapeHtml(t)}</span>`).join('')}
     </div>
-    <button class="btn btn-ghost" style="font-size:10px;margin-top:10px" onclick="(function(){const list=${JSON.stringify(missing)}.join('\\n');navigator.clipboard&&navigator.clipboard.writeText(list);if(typeof flashStatus==='function')flashStatus('${missing.length} tickers copied — paste into tickers.txt','success');})()">Copy all ${missing.length} for tickers.txt</button>`;
+    <button class="btn btn-ghost" style="font-size:10px;margin-top:10px" onclick="copyBackendGaps()">Copy all ${missing.length} for tickers.txt</button>`;
 }
 if (typeof window !== 'undefined') window.renderBackendCoverageGaps = renderBackendCoverageGaps;
 
