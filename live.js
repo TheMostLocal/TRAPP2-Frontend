@@ -2,8 +2,10 @@
    live.js — z159, PHASE 2: live data from Supabase, GitHub as the fallback.
    · quotes   Analytics project, live_quotes - polled every 60 s while the page is visible, only rows newer
               than the last poll (incremental), applied to the Stock Book's US rows (price, day change, high /
-              low / open / prior close, volume; market cap scaled with price). Foreign-currency rows keep
-              their GitHub path (their USD conversion happens on load).
+              low / open / prior close, volume). z187: market cap, P/E, yield, P/B, P/S and the EV ratios move
+              with the price (repriceValuation, from the row's USD anchors), and USD-quoted ADRs that report in
+              another currency (TSM, ASML, BABA ...) get live quotes too - they were skipped as "converted".
+              Rows quoted in another currency keep their GitHub path (their USD conversion happens on load).
    · bars     Analytics project, live_bars_day - one row per ticker per day (charts.js asks here first)
    · journal  Bot project, bot_state 'journal' - a 1-row head check first; the full journal only when the
               runner has written a newer one (botmirror.js asks here first)
@@ -44,12 +46,15 @@
     let n = 0;
     for (const lv of rows) {
       const t = String(lv.ticker || '').toUpperCase(), r = byT.get(t);
-      if (!r || !usTicker(t) || r._usdNormalized || r._currencyUnconverted) continue;
+      // z187: skip only a row whose PRICE was converted from another currency - an ADR quoted in USD that reports
+      // in TWD / EUR is "_usdNormalized" for its statements, but its live quote is already in dollars
+      if (!r || !usTicker(t) || r._currencyUnconverted || (r._localCurrency && r._localCurrency !== 'USD')) continue;
       const px = +lv.price;
       if (!(px > 0)) continue;
       const old = +r.price;
       r.price = px;
-      if (old > 0 && +r.marketCap > 0) r.marketCap = +r.marketCap * px / old;
+      if (old > 0 && typeof window.repriceValuation === 'function') window.repriceValuation(r, old, px);
+      else if (old > 0 && +r.marketCap > 0) r.marketCap = +r.marketCap * px / old;
       if (lv.volume != null) r.volume = +lv.volume;
       const raw = r.rawRow;
       if (raw && typeof raw === 'object') {
