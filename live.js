@@ -1,7 +1,7 @@
 /* ==========================================================================
    live.js — z159, PHASE 2: live data from Supabase, GitHub as the fallback.
    · quotes   Analytics project, live_quotes - polled every 60 s while the page is visible, only rows newer
-              than the last poll (incremental), applied to the Stock Book's US rows (price, day change, high /
+              than the last poll (incremental; z188: paged 1,000 at a time - Supabase's per-request cap), applied to the Stock Book's US rows (price, day change, high /
               low / open / prior close, volume). z187: market cap, P/E, yield, P/B, P/S and the EV ratios move
               with the price (repriceValuation, from the row's USD anchors), and USD-quoted ADRs that report in
               another currency (TSM, ASML, BABA ...) get live quotes too - they were skipped as "converted".
@@ -71,12 +71,23 @@
     if (!force && document.hidden) return 0;
     if (!proj('analytics')) return 0;
     const f = S.since ? `&fetched_at=gt.${encodeURIComponent(S.since)}` : '';
-    const rows = await q('analytics', `/rest/v1/live_quotes?select=ticker,price,change,changepct,priceopen,high,low,closeyest,volume,fetched_at${f}&order=fetched_at.asc&limit=5000`);
+    // z188: PAGED inside one poll. Supabase answers at most 1,000 rows a request (the limit=5000 was ignored): the
+    // first poll (~2,500 quotes) took three polls to fill, and a page that ended inside a batch sharing one fetched_at
+    // skipped the rest of that batch for good, because the next poll asks for rows AFTER that time. Pages of 1,000 in
+    // (fetched_at, ticker) order; the cursor only moves when every page arrived.
+    const base = `/rest/v1/live_quotes?select=ticker,price,change,changepct,priceopen,high,low,closeyest,volume,fetched_at${f}&order=fetched_at.asc,ticker.asc`;
+    let rows = null, complete = true;
+    for (let page = 0; page < 8; page++) {
+      const part = await q('analytics', `${base}&limit=1000&offset=${rows ? rows.length : 0}`);
+      if (!Array.isArray(part)) { if (rows) complete = false; break; }
+      rows = (rows || []).concat(part);
+      if (part.length < 1000) break;
+    }
     S.polls++;
     if (!Array.isArray(rows)) { S.src = 'github'; return 0; }
     S.src = 'supabase'; S.lastAt = Date.now();
     if (!rows.length) return 0;
-    S.since = rows[rows.length - 1].fetched_at;
+    if (complete) S.since = rows[rows.length - 1].fetched_at;
     const n = applyQuotes(rows);
     S.applied += n; S.lastN = n;
     try { if (n && visible('stockbook') && typeof renderStockBook === 'function') renderStockBook(); } catch (e) {}
