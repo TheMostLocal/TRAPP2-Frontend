@@ -199,7 +199,7 @@ const state = {
   mcResults: null,      // monte carlo array
 };
 // ---- z160: page modules - big pages load the first time they open (pages/<name>.js) ----
-const VALUATIO_BUILD = '20260615z180';   // pages/*.js: company.js changed in z180 (SEC filings per company)
+const VALUATIO_BUILD = '20260615z187';   // pages/*.js: company.js changed in z187 (TTM quarterly ratios, one currency)
 const _pageLoads = {};
 function _loadPage(name) {
   if (_pageLoads[name]) return _pageLoads[name];
@@ -1158,7 +1158,8 @@ function ensureRowNormalized(row) {
   const conv = (f, k) => { if (typeof row[f] === 'number' && isFinite(row[f]) && k != null && k !== 1) { row._localFinancials[f] = row[f]; row[f] = row[f] * k; } };
   for (const f of ['priorClose', 'high52', 'low52', 'fmpHigh52', 'fmpLow52']) conv(f, priceRate);   // prices (sub-unit aware)
   if (finRate != null && finRate > 0) {
-    for (const f of ['totalAssets', 'totalLiabilities', 'totalEquity', 'bookValue', 'cash', 'totalDebt', 'freeCashFlow', 'revenue', 'netIncome', 'ebitda']) conv(f, finRate);
+    for (const f of ['totalAssets', 'totalLiabilities', 'totalEquity', 'bookValue', 'cash', 'totalDebt', 'freeCashFlow', 'revenue', 'netIncome', 'ebitda',
+                     'stockBasedComp', 'goodwill', 'intangibleAssets', 'intangibles']) conv(f, finRate);   // z187: + SBC, goodwill, intangibles
   } else row._finUnconverted = finCcy;
   // EPS: per share in the reporting currency on a home listing; Yahoo quotes an ADR's EPS per ADR in USD.
   conv('eps', (tradeCcy && tradeCcy !== 'USD') ? (finRate != null ? finRate : norm.rate) : 1);
@@ -11921,6 +11922,9 @@ async function loadStockBook(forceRefresh = false) {
           put('revenueGrowth', 'revenuegrowth'); put('earningsGrowth', 'earningsgrowth');
           put('freeCashFlow', 'freecashflow'); put('netIncome', 'netincome'); put('stockBasedComp', 'stockbasedcomp');
           put('priceToBook', 'pricetobook'); put('evToEbitda', 'evtoebitda'); put('evToRevenue', 'evtorevenue');
+          // z187: P/S and the USD anchors the multiples are built from (live quotes re-price them - see repriceValuation)
+          put('priceToSales', 'pricetosales'); put('fxQuote', 'fxquote'); put('fxFin', 'fxfin');
+          put('bookUSD', 'bookusd'); put('revenueUSD', 'revenueusd'); put('ebitdaUSD', 'ebitdausd'); put('netDebtUSD', 'netdebtusd');
           put('totalDebt', 'totaldebt'); put('totalEquity', 'totalequity'); put('totalAssets', 'totalassets');
           put('currentRatio', 'currentratio'); put('quickRatio', 'quickratio'); put('payoutRatio', 'payoutratio');
           put('pegRatio', 'pegratio'); put('heldPctInsiders', 'heldpctinsiders');
@@ -11941,6 +11945,14 @@ async function loadStockBook(forceRefresh = false) {
         country:     sheetStr(row, 'country'),
         ipoDate:     sheetStr(row, 'ipodate', 'ipo date'),
         currency:    sheetStr(row, 'currency'),
+        // z187: the statements' (reporting) currency - without it ensureRowNormalized treated an ADR's TWD / EUR / JPY
+        // statements as USD (TSM P/S 0.4, cash / market cap 1.9) because the field never reached the app row
+        financialCurrency: sheetStr(row, 'financialcurrency') || null,
+        valuationNote: sheetStr(row, 'valuationnote') || '',
+        bookAsOf: sheetStr(row, 'bookasof') || null,
+        revenueAsOf: sheetStr(row, 'revenueasof') || null,
+        nameWas: sheetStr(row, 'namewas') || null,
+        _z187: Object.prototype.hasOwnProperty.call(row, 'valuationnote'),   // the row was priced by the z187 pipeline
         website:     sheetStr(row, 'web_url', 'website', 'url'),
         image:       sheetStr(row, 'image', 'logo'),
         phone:       sheetStr(row, 'phone'),
@@ -14376,9 +14388,12 @@ async function fnFA(ticker) {
   // TTM summary block (always shown when state.stock exists)
   let ttmHtml = '';
   if (s) {
+    // z187: the multiples from valuationMultiples() - the pipeline's (today's price, one currency, EV with minority
+    // interest; blank for a bank's EV or a negative book) or the same rules on the row's own USD figures
+    const _vm = (typeof valuationMultiples === 'function') ? valuationMultiples(s) : {};
     const ev = s.marketCap && s.totalDebt != null ? s.marketCap + s.totalDebt - (s.cash || 0) : null;
-    const evToRev = ev && s.revenue ? ev / s.revenue : null;
-    const evToEbitda = ev && s.ebitda ? ev / s.ebitda : s.evToEbitda;
+    const evToRev = _vm.z187 ? _vm.evRev : (_vm.evRev != null ? _vm.evRev : (ev && s.revenue ? ev / s.revenue : null));
+    const evToEbitda = _vm.z187 ? _vm.evEbitda : (_vm.evEbitda != null ? _vm.evEbitda : (ev && s.ebitda ? ev / s.ebitda : null));
     const fcfYield = s.freeCashFlow && s.marketCap ? s.freeCashFlow / s.marketCap : null;
     ttmHtml = `
       <div class="fn-section">
@@ -14395,8 +14410,10 @@ async function fnFA(ticker) {
           <div><div class="l">ROE</div><div class="v">${s.returnOnEquity != null ? (s.returnOnEquity * 100).toFixed(2) + '%' : '—'}</div></div>
           <div><div class="l">ROA</div><div class="v">${s.returnOnAssets != null ? (s.returnOnAssets * 100).toFixed(2) + '%' : '—'}</div></div>
           <div><div class="l">Operating Margin</div><div class="v">${s.operatingMargin != null ? (s.operatingMargin * 100).toFixed(2) + '%' : '—'}</div></div>
-          <div><div class="l">P/B</div><div class="v">${s.priceToBook != null ? s.priceToBook.toFixed(2) : '—'}</div></div>
+          <div><div class="l">P/B</div><div class="v">${_vm.pb != null ? _vm.pb.toFixed(2) : (_vm.negBook ? 'neg. book' : '—')}</div></div>
+          <div><div class="l">P/S</div><div class="v">${_vm.ps != null ? _vm.ps.toFixed(2) : '—'}</div></div>
         </div>
+        <div style="font-family:var(--mono);font-size:9.5px;color:var(--ink-faint);margin-top:6px;line-height:1.5">${escapeHtml(typeof valuationBasisNote === 'function' ? valuationBasisNote(s) : '')}</div>
       </div>
     `;
   }
@@ -18180,7 +18197,7 @@ async function loadFinancials(ticker, forceRefresh = false) {
       const cf  = wantQuarterly ? (repoFin.cashflowQuarterly || []) : (repoFin.cashflow || []);
       if (inc.length || bal.length || cf.length) {
         state.financials.ticker = cacheKey;
-        state.financials.data = { income: inc, balance: bal, cashflow: cf, _source: 'repo' };
+        state.financials.data = { income: inc, balance: bal, cashflow: cf, _source: 'repo', _ccy: repoFin.financialCurrency || repoFin.currency || null };   // z187: the statements' currency
         renderFinancials();
         return;
       }
@@ -20624,6 +20641,7 @@ const _NUMERIC_ROW_FIELDS = [
   'priceToBook','evToEbitda','evToRevenue','totalDebt','totalEquity','totalAssets',
   'cash','stockBasedComp','goodwill','intangibleAssets','intangibles','employees',
   'currentRatio','quickRatio','payoutRatio','pegRatio','heldPctInsiders','heldPctInstitutions','shortPctFloat',
+  'priceToSales','fxQuote','fxFin','bookUSD','revenueUSD','ebitdaUSD','netDebtUSD',   // z187
 ];
 function normalizeRowFields(row) {
   if (!row) return row;
@@ -26429,7 +26447,10 @@ function evaluateValuation(s) {
   } else if (s.pe != null && s.pe < 0) {
     score -= 10; checks.push(`P/E negative (loss-making — P/S more meaningful)`);
   }
-  if (s.priceToBook != null) {
+  // z187: P/B and P/S from valuationMultiples() (one currency, today's price); a negative book is not "below book"
+  const _vm = (typeof valuationMultiples === 'function') ? valuationMultiples(s) : null;
+  if (_vm) { s.priceToBook = _vm.pb; s.priceToSales = _vm.ps; if (_vm.negBook) checks.push('negative book (P/B not meaningful)'); }
+  if (s.priceToBook != null && s.priceToBook > 0) {
     if (s.priceToBook < 1)     { score += 10; checks.push(`P/B ${s.priceToBook.toFixed(2)} (below book)`); }
     else if (s.priceToBook < 3) { score += 3; checks.push(`P/B ${s.priceToBook.toFixed(2)} (fair)`); }
     else if (s.priceToBook < 8) {             checks.push(`P/B ${s.priceToBook.toFixed(2)} (premium)`); }
@@ -26825,11 +26846,28 @@ function financialReasoningChain(s) {
     note: bsNotes.length ? bsNotes.join(' · ') : 'No balance-sheet data.' });
 
   // STEP 4: Valuation at this price, given quality
+  // z187: SECTOR-RELATIVE, the bot's rule (valuationRelative): each multiple against its sector's median - a grocer at
+  // 0.3x sales isn't cheap, software at 6x may not be dear - and a negative book is never "below book". The absolute
+  // rules below only apply when there's no universe to compare with.
   let valPass = null, valPoints = null;
   const valNotes = [];
-  if (pe != null || pb != null || ps != null) {
+  const qualityGrower = (roe != null && roe > 0.15) || (revGrowth != null && revGrowth > 0.15);
+  const _rel = (typeof valuationRelative === 'function') ? valuationRelative(s, qualityGrower) : null;
+  const _vmS = (typeof valuationMultiples === 'function') ? valuationMultiples(s) : { pb, ps };
+  if (_rel) {
+    const NAME = { pe: 'P/E', ps: 'P/S', pb: 'P/B', evEbitda: 'EV/EBITDA' };
+    for (const p of _rel.parts) {
+      const d = (p.m === 'pe' || p.m === 'evEbitda') ? 1 : 2;
+      valNotes.push(`${NAME[p.m]} ${p.v.toFixed(d)} vs ${p.of} median ${p.med.toFixed(d)} (${p.score > 0.35 ? 'cheap' : p.score < -0.35 ? 'rich' : 'in line'})`);
+    }
+    if (_vmS.negBook) valNotes.push('negative book - P/B not meaningful');
+    if (_vmS.suspect) valNotes.push('market cap disagrees with the P/E - judged on P/E only');
+    if (qualityGrower && pe != null && pe > 0) valNotes.push('quality grower - a P/E premium counts 40% less');
+    valPoints = Math.max(0, Math.min(100, _rel.points));
+    valPass = valPoints >= 50;
+  } else if (pe != null || _vmS.pb != null || _vmS.ps != null) {
     let pts = 50;
-    const qualityGrower = (roe != null && roe > 0.15) || (revGrowth != null && revGrowth > 0.15);
+    const ps = _vmS.ps, pb = _vmS.pb;
     if (pe != null && pe > 0) {
       const peFair = qualityGrower ? 35 : 20;
       if (pe < peFair * 0.6) { pts += 18; valNotes.push(`P/E ${pe.toFixed(1)} cheap for this quality`); }
@@ -26843,7 +26881,7 @@ function financialReasoningChain(s) {
       if (ps < 2) { pts += 8; valNotes.push(`P/S ${ps.toFixed(1)} cheap`); }
       else if (ps > 12) { pts -= 10; valNotes.push(`P/S ${ps.toFixed(1)} rich`); }
     }
-    if (pb != null && pb < 1) { pts += 10; valNotes.push(`P/B ${pb.toFixed(2)} below book - potential value`); }
+    if (pb != null && pb > 0 && pb < 1) { pts += 10; valNotes.push(`P/B ${pb.toFixed(2)} below book - potential value`); }
     valPoints = Math.max(0, Math.min(100, pts));
     valPass = valPoints >= 50;
   }
@@ -34250,6 +34288,164 @@ async function fn13F(ticker) {
 // higherIsBetter, format(v)→string. Only EQUITIES are ranked (FX/index/futures
 // have no fundamentals); the extractor returns null for those and they're
 // excluded per-metric automatically.
+// ============================================================
+//   z187 - VALUATION MULTIPLES, ONE RULE SET
+//   P/B, P/S, EV/EBITDA and EV/Revenue for research, the reasoning chain, the health engine and the company page:
+//   * a row priced by the z187 pipeline: its own figures - market cap at the row's price over latest-quarter common
+//     equity / trailing-12-month revenue, both in USD (blank for a negative book; EV blank for banks / insurers)
+//   * any other row: rebuilt from the row's USD figures (market cap / total equity, market cap / revenue) - never a
+//     source's P/B that divides a USD price by local-currency book (TSM 76, ASML 1,284) or a class-B price by class-A
+//     book (BRK-B 0.001); EV ratios only when price and statements share a currency
+//   * suspect - the market cap disagrees with the row's own P/E (valuationNote 'mcap?': an ADR ratio, one share class):
+//     every market-cap multiple is withheld; P/E, per share, still counts
+//   The same rules as TRAPP2-ANALYTICS compute_research.py and the bot (bot_runner.py _norm_fund / valuation_points).
+// ============================================================
+const _VM_SUB = { GBp: 'GBP', GBX: 'GBP', ZAc: 'ZAR', ZAC: 'ZAR', ILA: 'ILS', ILa: 'ILS', USX: 'USD', USd: 'USD' };
+function _vmMain(c) { c = String(c || '').trim(); return c ? (_VM_SUB[c] || c.toUpperCase()) : 'USD'; }
+function _vmNum(v) { const x = (typeof v === 'string' && v.trim() !== '') ? +v : v; return (typeof x === 'number' && isFinite(x)) ? x : null; }
+function valuationMultiples(r) {
+  const out = { pb: null, ps: null, evEbitda: null, evRev: null, suspect: false, negBook: false, z187: false, note: '' };
+  if (!r) return out;
+  const pos = v => { const x = _vmNum(v); return (x != null && x > 0) ? x : null; };
+  const note = String(r.valuationNote || '');
+  const eq = _vmNum(r.totalEquity);
+  out.note = note;
+  out.z187 = !!r._z187;
+  out.suspect = note.includes('mcap?');
+  out.negBook = note.includes('neg-book') || (eq != null && eq <= 0);
+  if (out.suspect) return out;
+  if (out.z187) {
+    out.pb = out.negBook ? null : pos(r.priceToBook);
+    out.ps = pos(r.priceToSales);
+    out.evEbitda = pos(r.evToEbitda);
+    out.evRev = pos(r.evToRevenue);
+    return out;
+  }
+  const qc = _vmMain(r.currency), fc = _vmMain(r.financialCurrency || r.currency), same = qc === fc;
+  const mcUsd = !r._currencyUnconverted && (qc === 'USD' || !!r._usdNormalized);
+  const finUsd = !r._finUnconverted && (fc === 'USD' || !!r._usdNormalized);
+  const mc = pos(r.marketCap), rev = pos(r.revenue);
+  if (mc && mcUsd && finUsd) {
+    if (eq != null && eq > 0) out.pb = mc / eq;
+    if (rev) out.ps = mc / rev;
+  }
+  // no equity on the row: no P/B (the bot and the backend never use a source's own P/B on a row from before z187)
+  if (out.ps == null && same) out.ps = pos(r.priceToSales);
+  if (same) { out.evEbitda = pos(r.evToEbitda); out.evRev = pos(r.evToRevenue); }
+  return out;
+}
+// Sector medians of P/E, P/S, P/B, EV/EBITDA over the Stock Book's equities (>= 8 with the figure) and over all of them
+let _vmMedCache = { rows: null, n: -1, at: 0, val: null };
+function valuationMedians() {
+  const rows = (typeof state !== 'undefined' && state.stockbook && Array.isArray(state.stockbook.rows)) ? state.stockbook.rows : [];
+  const c = _vmMedCache;
+  if (c.val && c.rows === rows && c.n === rows.length && Date.now() - c.at < 60000) return c.val;
+  const by = {};
+  for (const r of rows) {
+    try {
+      if ((typeof classifyAssetRow === 'function' ? classifyAssetRow(r) : 'equity') !== 'equity') continue;
+      const vm = valuationMultiples(r), vals = {};
+      const pe = _vmNum(r.pe);
+      if (pe != null && pe > 0) vals.pe = pe;
+      if (!vm.suspect) { if (vm.ps) vals.ps = vm.ps; if (vm.pb) vals.pb = vm.pb; if (vm.evEbitda) vals.evEbitda = vm.evEbitda; }
+      for (const key of [r.sector || 'Unknown', '_all']) {
+        const d = by[key] || (by[key] = {});
+        for (const m in vals) (d[m] || (d[m] = [])).push(vals[m]);
+      }
+    } catch (e) {}
+  }
+  const out = {};
+  for (const key in by) {
+    const med = {};
+    for (const m in by[key]) {
+      const vs = by[key][m];
+      if (vs.length < 8) continue;
+      vs.sort((a, b) => a - b);
+      const k = vs.length >> 1;
+      med[m] = vs.length % 2 ? vs[k] : (vs[k - 1] + vs[k]) / 2;
+    }
+    if (Object.keys(med).length) out[key] = med;
+  }
+  _vmMedCache = { rows, n: rows.length, at: Date.now(), val: out };
+  return out;
+}
+// The sector-relative valuation step (the bot's valuation_points): ln(multiple / median) through tanh - 30% cheaper
+// scores about +0.6, twice as dear about -0.9; P/E 1.0 (a quality grower's premium counts 40% less), P/S 0.7 (1.0 with
+// no earnings), EV/EBITDA 0.8, P/B by how much book means in the sector. 50 = fairly valued, 14..86.
+const VAL_PB_SECTOR_W = { 'Financial Services': 1.0, 'Real Estate': 0.9, 'Energy': 0.55, 'Basic Materials': 0.55, 'Utilities': 0.55, 'Industrials': 0.4 };
+const VAL_REL_W = { pe: 1.0, ps: 0.7, evEbitda: 0.8 };
+function valuationRelative(s, quality) {
+  if (!s) return null;
+  const meds = valuationMedians();
+  const sec = s.sector || 'Unknown';
+  const st = meds[sec] || {}, al = meds._all || {};
+  const vm = valuationMultiples(s), use = {};
+  const pe = _vmNum(s.pe);
+  if (pe != null && pe > 0) use.pe = pe;
+  if (!vm.suspect) { if (vm.ps) use.ps = vm.ps; if (vm.pb) use.pb = vm.pb; if (vm.evEbitda) use.evEbitda = vm.evEbitda; }
+  let num = 0, den = 0;
+  const parts = [];
+  for (const m in use) {
+    const v = use[m], med = st[m] || al[m];
+    if (!med || med <= 0) continue;
+    let sc = -Math.tanh(Math.log(v / med) / 0.5);
+    if (m === 'pe' && quality && sc < 0) sc *= 0.6;
+    let w = m === 'pb' ? (VAL_PB_SECTOR_W[sec] != null ? VAL_PB_SECTOR_W[sec] : 0.3) : VAL_REL_W[m];
+    if (m === 'ps' && !('pe' in use)) w = 1.0;
+    num += w * sc; den += w;
+    parts.push({ m, v, med, score: sc, w, of: st[m] ? sec : 'all equities' });
+  }
+  return den ? { points: 50 + 36 * num / den, parts, vm } : null;
+}
+// A live price moves every price-dependent field with it (the 15-minute pipeline refresh does the same): market cap,
+// P/E, yield, and P/B / P/S / EV ratios rebuilt from the row's USD anchors (bookUSD, revenueUSD, ebitdaUSD, netDebtUSD).
+function _vmSplitLike(k) {
+  if (!(k > 0) || Math.abs(Math.log(k)) < Math.log(1.4)) return false;
+  const r = k > 1 ? k : 1 / k;
+  return [1.5, 2, 2.5, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 40, 50, 100].some(n => Math.abs(r / n - 1) < 0.04);
+}
+function repriceValuation(row, oldPx, newPx) {
+  if (!row || !(oldPx > 0) || !(newPx > 0)) return false;
+  const k = newPx / oldPx;
+  if (_vmSplitLike(k)) return false;                       // a split-sized jump is a data event - left for the pipeline
+  const mc0 = _vmNum(row.marketCap);
+  if (mc0 != null && mc0 > 0) row.marketCap = mc0 * k;
+  const pe = _vmNum(row.pe);
+  if (pe != null && pe > 0) row.pe = pe * k;
+  const dy = _vmNum(row.dividendYield);
+  if (dy != null && dy > 0) row.dividendYield = dy / k;
+  const m = _vmNum(row.marketCap);
+  const book = _vmNum(row.bookUSD), rev = _vmNum(row.revenueUSD), ebitda = _vmNum(row.ebitdaUSD), nd = _vmNum(row.netDebtUSD);
+  if (row._z187 && m > 0 && !row._currencyUnconverted && (book != null || rev != null)) {
+    if (book > 0 && _vmNum(row.priceToBook) != null) row.priceToBook = m / book;
+    if (rev > 0 && _vmNum(row.priceToSales) != null) row.priceToSales = m / rev;
+    if (nd != null) {
+      if (rev > 0 && _vmNum(row.evToRevenue) != null) row.evToRevenue = (m + nd) / rev;
+      if (ebitda > 0 && _vmNum(row.evToEbitda) != null) row.evToEbitda = (m + nd) / ebitda;
+    }
+  } else {
+    for (const f of ['priceToBook', 'priceToSales']) { const v = _vmNum(row[f]); if (v != null && v > 0) row[f] = v * k; }
+  }
+  row._valuedAt = newPx;
+  return true;
+}
+// What the multiples on screen are based on - shown under every place they are displayed
+function valuationBasisNote(s) {
+  if (!s) return '';
+  const vm = valuationMultiples(s), bits = [];
+  const px = _vmNum(s.price);
+  if (px) bits.push(`at ${s._live ? 'the live' : 'the latest'} price ${px.toFixed(2)}`);
+  if (vm.z187) {
+    if (s.bookAsOf) bits.push(`book: quarter ending ${s.bookAsOf}`);
+    if (s.revenueAsOf) bits.push(`sales: 12 months to ${s.revenueAsOf}`);
+    bits.push('one currency (USD)');
+  } else bits.push("rebuilt from the row's last annual statements");
+  if (vm.negBook) bits.push('negative book - no P/B');
+  if (vm.suspect) bits.push('market cap disagrees with the P/E (ADR ratio / share class?) - market-cap multiples withheld');
+  return 'Multiples ' + bits.join(' · ');
+}
+if (typeof window !== 'undefined') Object.assign(window, { valuationMultiples, valuationMedians, valuationRelative, repriceValuation, valuationBasisNote });
+
 function _researchDivYield(r) {
   // After normalizeRowFields, dividendYield is a DECIMAL (0.0257 = 2.57%).
   // Prefer that. If the row wasn't normalized (rare), fall back to the raw
@@ -34284,12 +34480,16 @@ const RESEARCH_METRICS = [
   { key: 'epsGrowth',  label: 'Earnings Growth',         cat: 'Growth',        higher: true,  fmt: v => (v*100).toFixed(1)+'%', get: r => _num(r.earningsGrowth) },
   // --- Valuation (lower is better) ---
   { key: 'pe',         label: 'P/E Ratio',               cat: 'Valuation',     higher: false, fmt: v => v.toFixed(1)+'x', get: r => { const v=_num(r.pe); return (v!=null&&v>0)?v:null; } },
-  { key: 'pb',         label: 'Price / Book',            cat: 'Valuation',     higher: false, fmt: v => v.toFixed(2)+'x', get: r => { const v=_num(r.priceToBook); return (v!=null&&v>0)?v:null; } },
-  { key: 'evEbitda',   label: 'EV / EBITDA',             cat: 'Valuation',     higher: false, fmt: v => v.toFixed(1)+'x', get: r => { const v=_num(r.evToEbitda); return (v!=null&&v>0)?v:null; } },
-  { key: 'evRev',      label: 'EV / Revenue',            cat: 'Valuation',     higher: false, fmt: v => v.toFixed(2)+'x', get: r => { const v=_num(r.evToRevenue); return (v!=null&&v>0)?v:null; } },
+  // z187: P/B, P/S and the EV ratios through valuationMultiples() - the pipeline's (market cap at today's price over
+  // latest-quarter equity / trailing revenue, one currency); rows from before z187 rebuilt the same way as the backend
+  // and the bot; left out when the market cap disagrees with the P/E ('mcap?')
+  { key: 'pb',         label: 'Price / Book',            cat: 'Valuation',     higher: false, fmt: v => v.toFixed(2)+'x', get: r => valuationMultiples(r).pb },
+  { key: 'ps',         label: 'Price / Sales',           cat: 'Valuation',     higher: false, fmt: v => v.toFixed(2)+'x', get: r => valuationMultiples(r).ps },
+  { key: 'evEbitda',   label: 'EV / EBITDA',             cat: 'Valuation',     higher: false, fmt: v => v.toFixed(1)+'x', get: r => valuationMultiples(r).evEbitda },
+  { key: 'evRev',      label: 'EV / Revenue',            cat: 'Valuation',     higher: false, fmt: v => v.toFixed(2)+'x', get: r => valuationMultiples(r).evRev },
   // --- Financial strength ---
   { key: 'debtEquity', label: 'Debt / Equity',           cat: 'Balance Sheet', higher: false, fmt: v => v.toFixed(2), get: r => { const d=_num(r.totalDebt), e=_num(r.totalEquity); return (d!=null&&e&&e>0)? d/e : null; } },
-  { key: 'cashRatio',  label: 'Cash / Market Cap',       cat: 'Balance Sheet', higher: true,  fmt: v => (v*100).toFixed(1)+'%', get: r => { const c=_num(r.cash), m=_num(r.marketCap); return (c!=null&&m&&m>0)? c/m : null; } },
+  { key: 'cashRatio',  label: 'Cash / Market Cap',       cat: 'Balance Sheet', higher: true,  fmt: v => (v*100).toFixed(1)+'%', get: r => { if (valuationMultiples(r).suspect) return null; const c=_num(r.cash), m=_num(r.marketCap); return (c!=null&&m&&m>0)? c/m : null; } },
   { key: 'currentRatio', label: 'Current Ratio',         cat: 'Balance Sheet', higher: true,  fmt: v => v.toFixed(2), get: r => { const v=_num(r.currentRatio); return (v!=null&&v>0)?v:null; } },
   { key: 'quickRatio', label: 'Quick Ratio',             cat: 'Balance Sheet', higher: true,  fmt: v => v.toFixed(2), get: r => { const v=_num(r.quickRatio); return (v!=null&&v>0)?v:null; } },
   // --- Income ---
@@ -34342,6 +34542,7 @@ const RESEARCH_METRIC_WEIGHTS = {
                    //   (TSM, software, brands), so it carries little weight.
   evEbitda: 1.3,   // cleaner valuation signal → counts more
   evRev:    1.2,   // useful for unprofitable/growth names where P/E is N/A
+  ps:       0.5,   // z187: price / sales - the equity-side sales multiple (the only one for banks, whose EV isn't meaningful)
 };
 
 // Compress a metric's percentile toward neutral so EXTREME ranks barely move the
@@ -37489,6 +37690,7 @@ function _mergeBotTrainingData(data, sourceLabel) {
         status: t.status || (t.exitDate ? 'closed' : 'open'), exitReason: t.exitReason,
         conviction: t.conviction, confidence: t.confidence != null ? t.confidence : t.conviction,
         rationale: t.rationale || [],
+        valuation: t.valuation || null,   // z187: the multiples the runner judged it on, next to its sector's medians
         tradeStyle: t.style || t.tradeStyle, horizonType: t.horizonType, horizonDays: t.horizonDays,
         dalioEnv: t.dalioEnv, longTermTrend: t.longTermTrend, holdDays: t.holdDays,
         soldStillStrong: t.soldStillStrong || false, exitMomentum: t.exitMomentum,
@@ -38929,6 +39131,21 @@ function showBotReceipt(betId) {
     ? `<ul style="margin:0;padding-left:16px;color:var(--ink-dim);font-size:11px;line-height:1.6">${r.rationale.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul>`
     : '';
 
+  // z187: VALUATION AT ENTRY - the multiples the runner judged it on (one currency, at the entry scan's price) against
+  // its sector's medians, and the valuation step's points (50 = fairly valued)
+  const V = bet.valuation;
+  const valHtml = (V && typeof V === 'object') ? (() => {
+    const NAME = { pe: 'P/E', ps: 'P/S', pb: 'P/B', evEbitda: 'EV/EBITDA' };
+    const parts = Object.keys(NAME).filter(k => V[k] != null).map(k => {
+      const med = V[k + 'Median'];
+      const rich = med ? V[k] / med : null;
+      const col = rich == null ? 'var(--ink)' : rich < 0.8 ? 'var(--pos)' : rich > 1.25 ? 'var(--neg)' : 'var(--ink)';
+      return `<span style="margin-right:14px">${NAME[k]} <strong style="color:${col}">${(+V[k]).toFixed(k === 'pe' || k === 'evEbitda' ? 1 : 2)}</strong>${med ? ` <span style="color:var(--ink-faint)">vs ${(+med).toFixed(k === 'pe' || k === 'evEbitda' ? 1 : 2)}</span>` : ''}</span>`;
+    });
+    const note = V.note ? `<div style="color:var(--ink-faint);margin-top:3px">${escapeHtml(String(V.note).replace('neg-book', 'negative book (no P/B)').replace('ev-na', 'EV n/a (lender / insurer)').replace('mcap?', 'market cap disagrees with P/E - judged on P/E'))}</div>` : '';
+    return parts.length ? `<div style="font-family:var(--mono);font-size:11px;color:var(--ink-dim);line-height:1.7">${parts.join('')}${V.points != null ? `<div>valuation step <strong style="color:var(--ink)">${V.points}</strong>/100 <span style="color:var(--ink-faint)">· vs ${escapeHtml(V.sector || 'sector')} medians</span></div>` : ''}${note}</div>` : '';
+  })() : '';
+
   // WHAT IT LEARNED.
   const learned = r.learned ? `
     <div style="font-size:11px;color:var(--ink-dim);line-height:1.6">
@@ -38963,6 +39180,7 @@ function showBotReceipt(betId) {
         ${c('Sizing & cash', `<div style="font-family:var(--mono);font-size:11px;color:var(--ink-dim);line-height:1.6">${escapeHtml(r.sizing || ('$' + (bet.dollars||0).toFixed(0)))}<br>Cash after this trade: <strong style="color:var(--ink)">$${(r.cashAfter ?? bet.cashAfter ?? 0).toLocaleString(undefined, {maximumFractionDigits: 0})}</strong></div>`)}
         ${c('Conviction', `${pill((r.confidence ?? Math.round((bet.confidence||0)*100)) + '% confidence', 'var(--amber)')}${r.style ? pill(r.style, '#7faaca') : ''}${r.horizon ? pill(r.horizon, '#9c7aaf') : ''}${r.dalioEnv ? pill(r.dalioEnv, '#4ec9a8') : ''}`)}
         ${c('Market regime', r.regime ? `<div style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)">${escapeHtml(r.regime)}</div>` : '')}
+        ${c('Valuation at entry', valHtml)}
         ${c('What it saw (top signals)', `<div>${drivers}</div>`)}
         ${c('Why it acted', rationale)}
         ${c('What it learned', learned)}
