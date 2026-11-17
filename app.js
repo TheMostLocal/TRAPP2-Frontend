@@ -5,7 +5,7 @@
    ============================================================ */
 // z192: this file's build - index.html checks it right after loading this script and says so on screen when it isn't the
 // build the page was shipped with (11-16 20:43 ET an older app.js, z177-era, was committed over z191 and ran unnoticed).
-var APP_JS_BUILD = '20260615z192';
+var APP_JS_BUILD = '20260615z193';
 if (typeof window !== 'undefined') window.APP_JS_BUILD = APP_JS_BUILD;
 
 // ============================================================
@@ -2116,25 +2116,27 @@ async function fetchStock(ticker) {
   const useSheet = sheetUrl && (sourcePref === 'sheet' || sourcePref === 'auto' || sourcePref === 'github');
   const useAV = key && (sourcePref === 'av' || sourcePref === 'auto');
 
+  // z193: each source under a plain label for the load-progress card (a pass-through when no stock load is open)
+  const T = (k, p) => ((typeof window !== 'undefined' && window.LoadStatus) ? window.LoadStatus.track(k, p) : p);
   const tasks = [
-    fetchStooqPrice(ticker),
-    fetchYahooQuote(ticker),
+    T('quote', fetchStooqPrice(ticker)),
+    T('quote', fetchYahooQuote(ticker)),
   ];
-  if (useSheet) tasks.push(fetchSheetData());
+  if (useSheet) tasks.push(T('book', fetchSheetData()));
   if (useAV) {
-    tasks.push(fetchAlphaVantageOverview(ticker, key));
-    tasks.push(fetchAlphaVantageIncomeStatement(ticker, key));
-    tasks.push(fetchAlphaVantageCashFlow(ticker, key));
-    tasks.push(fetchAlphaVantageBalanceSheet(ticker, key));
+    tasks.push(T('profile', fetchAlphaVantageOverview(ticker, key)));
+    tasks.push(T('income', fetchAlphaVantageIncomeStatement(ticker, key)));
+    tasks.push(T('cashflow', fetchAlphaVantageCashFlow(ticker, key)));
+    tasks.push(T('balance', fetchAlphaVantageBalanceSheet(ticker, key)));
   }
   // Polygon.io — fires whenever a key is configured. Adds logo, fundamentals,
   // and cross-source value for market cap / shares outstanding.
   const usePolygon = !!getPolygonKey();
-  if (usePolygon) tasks.push(fetchPolygonOverview(ticker));
+  if (usePolygon) tasks.push(T('profile', fetchPolygonOverview(ticker)));
   // FCS API — global coverage fallback, especially for non-US tickers.
   // Adds sector, description, ISIN, and another logo source.
   const useFcs = !!getFcsKey();
-  if (useFcs) tasks.push(fetchFcsProfile(ticker));
+  if (useFcs) tasks.push(T('profile', fetchFcsProfile(ticker)));
 
   const results = await Promise.allSettled(tasks);
   let idx = 0;
@@ -4585,6 +4587,123 @@ function idbSetDebounced(key, getVal, ms = 800) {
   _idbWriteTimers[key] = setTimeout(() => { idbSet(key, getVal()); }, ms);
 }
 
+// ---- z193: the big stores - taxonomy cache, intraday ticks, the bot state's backup copy ----
+// localStorage was at its hard quota (Chrome: 5,242,880 characters = the Settings meter's 10.00 MB). The 7 MB taxonomy
+// cache was parsed, rebuilt and re-written on every stock load and every Stock Book load - and the write failed against
+// the full quota, then pruned and retried; every intraday tick re-parsed and re-wrote a 0.8 MB blob (a tape refresh
+// records ~2,500 ticks): the "page unresponsive" stalls. These stores now live in IndexedDB behind a memory mirror -
+// a read is a pointer, a write is batched in the background - and nothing is written to disk before the copy already
+// there has been merged in (an early write would replace older data with a partial set).
+let _idbOk = null;                          // null = not known yet · false = IndexedDB unusable on this browser
+let _taxMem = null;                         // taxonomy cache  { TICKER: { t, ...stable fields } }
+let _intraMem = null;                       // intraday ticks  { 'YYYY-MM-DD': { TICKER: [{ t, p, b, firm? }] } }
+let _botBackupJson = null;                  // the bot state's last known-good JSON (its backup copy)
+const _bigReady = {}, _bigDirty = {};
+function _bigPersist(key, getVal, ms = 2000) {
+  if (!_bigReady[key]) { _bigDirty[key] = getVal; return; }          // flushed once the disk copy is merged in
+  if (_idbOk === false) {                                             // no IndexedDB: only the bot backup falls back
+    if (key === 'botBackup') { try { localStorage.setItem('valuatio.bot.v1.bak', getVal()); } catch {} }
+    return;
+  }
+  idbSetDebounced(key, getVal, ms);
+}
+// A write that resolves only once its transaction has COMMITTED - what a move needs before deleting the original.
+async function idbPutDurable(key, val) {
+  const db = await idbOpen();
+  return await new Promise((res, rej) => {
+    let tx;
+    try { tx = db.transaction(IDB_STORE, 'readwrite', { durability: 'strict' }); } catch { tx = db.transaction(IDB_STORE, 'readwrite'); }
+    tx.oncomplete = () => res(true);
+    tx.onerror = () => rej(tx.error);
+    tx.onabort = () => rej(tx.error || new Error('IndexedDB write aborted'));
+    tx.objectStore(IDB_STORE).put(val, key);
+  });
+}
+async function idbKeys() {
+  try {
+    const db = await idbOpen();
+    return await new Promise((res, rej) => {
+      const rq = db.transaction(IDB_STORE, 'readonly').objectStore(IDB_STORE).getAllKeys();
+      rq.onsuccess = () => res(rq.result || []);
+      rq.onerror = () => rej(rq.error);
+    });
+  } catch { return []; }
+}
+// Move one localStorage value into IndexedDB. The original is removed only after the write has committed and reads
+// back the same (key count / text); otherwise it stays where it was. Returns the value moved, null when there was
+// nothing to move, false when it was kept in localStorage.
+async function idbMigrateLsKey(lsKey, idbKey, parse = true) {
+  let raw = null;
+  try { raw = localStorage.getItem(lsKey); } catch {}
+  if (raw == null) return null;
+  let val = raw;
+  if (parse) { try { val = JSON.parse(raw); } catch { console.warn(`[idb] ${lsKey} is not JSON - left in localStorage`); return false; } }
+  try {
+    await idbPutDurable(idbKey, val);
+    const back = await idbGet(idbKey);
+    const same = parse
+      ? (back != null && typeof back === 'object' && Object.keys(back).length === Object.keys(val || {}).length)
+      : back === raw;
+    if (!same) { console.warn(`[idb] ${lsKey}: read-back differs - left in localStorage`); return false; }
+    localStorage.removeItem(lsKey);
+    console.log(`[idb] moved ${lsKey} (${(raw.length * 2 / 1048576).toFixed(2)}MB) localStorage → IndexedDB '${idbKey}'`);
+    return val;
+  } catch (e) { console.warn(`[idb] ${lsKey} left in localStorage:`, e && e.message); return false; }
+}
+function _taxMerge(disk) {
+  const mem = loadTaxonomyCache();
+  for (const [t, e] of Object.entries(disk || {})) {
+    if (!mem[t] || (mem[t].t || 0) < ((e && e.t) || 0)) mem[t] = e;
+  }
+  // The instant cold-start skeleton (names, sectors) - now that the cache is here, if the Stock Book isn't yet.
+  try {
+    if (Object.keys(mem).length && typeof state !== 'undefined' && (state.stockbook?.rows?.length ?? 0) === 0 &&
+        typeof hydrateStockbookFromCache === 'function' && hydrateStockbookFromCache()) {
+      try { renderStockBook(); } catch {}
+      try { maybeShowTickerTape(); } catch {}
+    }
+  } catch (e) { console.warn('[idb] taxonomy skeleton:', e && e.message); }
+}
+function _intraMerge(disk) {
+  const mem = _loadIntraday();
+  for (const [d, byTk] of Object.entries(disk || {})) {
+    if (!mem[d]) { mem[d] = byTk; continue; }
+    for (const [tk, arr] of Object.entries(byTk || {})) {
+      const cur = mem[d][tk];
+      if (!cur || !cur.length) { mem[d][tk] = arr; continue; }
+      const byBucket = new Map();
+      for (const p of arr || []) byBucket.set(p.b != null ? p.b : p.t, p);
+      for (const p of cur) byBucket.set(p.b != null ? p.b : p.t, p);      // this session's tick wins its 15-min bucket
+      mem[d][tk] = [...byBucket.values()].sort((a, b) => a.t - b.t);
+    }
+  }
+  const dates = Object.keys(mem).sort();
+  while (dates.length > 2) delete mem[dates.shift()];
+}
+async function _hydrateBigStores() {
+  try { await idbOpen(); _idbOk = true; } catch { _idbOk = false; }
+  const specs = [
+    ['taxonomy', 'valuatio.taxonomy.cache.v1', true, _taxMerge],
+    ['intraday', 'valuatio.intraday.v1', true, _intraMerge],
+    ['botBackup', 'valuatio.bot.v1.bak', false, disk => { if (_botBackupJson == null && typeof disk === 'string') _botBackupJson = disk; }],
+  ];
+  for (const [key, lsKey, parse, merge] of specs) {
+    try {
+      if (_idbOk) {
+        await idbMigrateLsKey(lsKey, key, parse);
+        const disk = await idbGet(key);
+        if (disk != null) merge(disk);
+      } else {
+        // no IndexedDB here: the localStorage copy stays put and is read into memory (nothing is deleted)
+        const raw = localStorage.getItem(lsKey);
+        if (raw != null) merge(parse ? JSON.parse(raw) : raw);
+      }
+    } catch (e) { console.warn('[idb] hydrate', key, e && e.message); }
+    _bigReady[key] = true;
+    if (_bigDirty[key]) { const g = _bigDirty[key]; delete _bigDirty[key]; _bigPersist(key, g, 500); }
+  }
+}
+
 // ---- In-memory mirrors (the synchronous read surface) ----
 let _sheetMemCache = null;        // { t, data } | null
 let _newsMemCache = null;         // { fetchedAt, items } | null
@@ -4602,16 +4721,11 @@ async function hydrateIdbCaches() {
     [SHEET_CACHE_KEY_NAME(), 'sheetCache'],
     [PRICE_HIST_CACHE_KEY, 'priceHist'],
   ];
+  // z193: a move deletes the original only after a committed, read-back write (was: deleted even if the write failed)
   for (const [lsKey, idbKey] of migrations) {
-    try {
-      const raw = lsKey && localStorage.getItem(lsKey);
-      if (raw) {
-        await idbSet(idbKey, JSON.parse(raw));
-        localStorage.removeItem(lsKey);
-        console.log(`[idb] migrated ${lsKey} (${(raw.length / 1024).toFixed(0)}KB) localStorage → IndexedDB`);
-      }
-    } catch (e) { console.warn('[idb] migration failed for', lsKey, e.message); }
+    if (lsKey) { try { await idbMigrateLsKey(lsKey, idbKey, true); } catch {} }
   }
+  try { await _hydrateBigStores(); } catch (e) { console.warn('[idb] big stores:', e && e.message); }
   // Hydrate memory mirrors.
   try {
     const [sheet, news, hist] = await Promise.all([idbGet('sheetCache'), idbGet('newsCache'), idbGet('priceHist')]);
@@ -4661,17 +4775,19 @@ async function checkStorageHealth() {
       console.log(`[storage] persistent storage ${granted ? 'GRANTED — data survives disk pressure' : 'not granted (browser may evict under pressure)'}`);
     }
   } catch {}
-  const bytes = localStorageBytes();
+  // z193: measured as the Settings meter does (UTF-16 bytes, 2 per character) against the 5 MB budget - the quota is
+  // 5,242,880 characters (10 MB in this unit) and it was full
+  const bytes = localStorageBytes() * 2;
   const mb = bytes / 1048576;
-  console.log(`[storage] localStorage at ${(mb).toFixed(2)}MB`);
-  if (mb > 3.5) {
+  console.log(`[storage] localStorage at ${(mb).toFixed(2)}MB of the 5MB budget`);
+  if (mb > 4) {
     // Prune order: re-fetchable, biggest-first. NEVER touches portfolio, bets,
     // notes, valuations, personal book, overrides, or settings.
     const prunable = ['valuatio.desc.cache.v1', 'valuatio.macroData.v1', 'valuatio.macroData.v2', 'valuatio.bonds.v1', 'valuatio.cryptoPrices.v1', 'valuatio.signalsConsensus.v1'];
     let freed = 0;
     for (const k of prunable) {
       const v = localStorage.getItem(k);
-      if (v) { freed += v.length; localStorage.removeItem(k); }
+      if (v) { freed += (k.length + v.length) * 2; localStorage.removeItem(k); }
       if ((bytes - freed) / 1048576 < 3.0) break;
     }
     console.warn(`[storage] soft ceiling hit — pruned ${(freed / 1024).toFixed(0)}KB of re-fetchable caches`);
@@ -7351,9 +7467,9 @@ function syncStockToStockbook(stock) {
     rows.push({ ...mirror, source: 'valuation-canonical' });
   }
 
-  // Persist taxonomy cache so cold-start has the latest fields
+  // Persist taxonomy cache so cold-start has the latest fields - z193: this row only (was all 2,470 on every load)
   if (typeof updateTaxonomyCache === 'function') {
-    try { updateTaxonomyCache(rows); } catch {}
+    try { updateTaxonomyCache(idx >= 0 ? [rows[idx]] : rows.slice(-1)); } catch {}
   }
 }
 
@@ -7424,6 +7540,130 @@ if (typeof window !== 'undefined') {
   window.engineValue = engineValue;
 }
 
+// ============================================================
+//   z193: STOCK-LOAD PROGRESS - a rotating ring and what is being fetched right now
+//   (owner, 11-17: "say what's fetching like fetching price history, fetching financials, fetching options,
+//   fetching company info"). loadValuation opens a session; every fetch it starts is tracked under a plain label
+//   (only what is actually fetched appears); the line under the title rotates through what is in flight; the card
+//   closes on its own when the last tracked fetch settles. Outside a session track() is a pass-through.
+// ============================================================
+const LoadStatus = (() => {
+  const STEPS = {
+    quote:      ['Quote', 'Fetching live quote'],
+    book:       ['Stock Book', 'Reading the Stock Book'],
+    profile:    ['Company', 'Fetching company info'],
+    income:     ['Income', 'Fetching income statement'],
+    cashflow:   ['Cash flow', 'Fetching cash-flow statement'],
+    balance:    ['Balance sheet', 'Fetching balance sheet'],
+    models:     ['Models', 'Running valuation models'],
+    history:    ['Price history', 'Fetching price history'],
+    financials: ['Financials', 'Fetching financials'],
+    options:    ['Options', 'Fetching options chain'],
+  };
+  let S = null, el = null;
+  const reduced = () => { try { return matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; } };
+  const esc = s => (typeof escapeHtml === 'function' ? escapeHtml(s) : String(s));
+  function _el() {
+    if (el && document.body.contains(el)) return el;
+    el = document.createElement('div');
+    el.id = 'load-status'; el.className = 'load-status'; el.hidden = true;
+    el.setAttribute('role', 'status'); el.setAttribute('aria-live', 'polite');
+    el.innerHTML = '<div class="ls-ring" aria-hidden="true"></div><div class="ls-body"><div class="ls-title"></div>' +
+      '<div class="ls-now" aria-hidden="true"></div><div class="ls-steps"></div><span class="ls-sr"></span></div>';
+    document.body.appendChild(el);
+    return el;
+  }
+  function begin(ticker) {
+    if (S) _close(S, true);
+    const s = { tk: String(ticker || '').toUpperCase(), steps: new Map(), main: true, rot: 0, t0: Date.now(), timers: [] };
+    S = s;
+    const e = _el();
+    e.classList.remove('done', 'gaps', 'on');
+    e.hidden = false;
+    requestAnimationFrame(() => { if (S === s) e.classList.add('on'); });
+    s.timers.push(setInterval(() => { if (S === s) { s.rot++; _render(s, true); } }, 900));
+    s.timers.push(setTimeout(() => { if (S === s) { s.main = false; _finish(s); } }, 30000));   // never a stuck card
+    _render(s);
+    return s;
+  }
+  function _step(s, key) {
+    let st = s.steps.get(key);
+    if (!st) { st = { key, pending: 0, ok: false, miss: false }; s.steps.set(key, st); }
+    return st;
+  }
+  // Track a fetch: a value means it delivered; null / false / a rejection means that source had nothing.
+  function track(key, p) {
+    const s = S;
+    if (!s || !p || typeof p.then !== 'function' || !STEPS[key]) return p;
+    const st = _step(s, key);
+    st.pending++; _render(s);
+    const fin = ok => { st.pending--; if (ok) st.ok = true; else if (!st.pending && !st.ok) st.miss = true; _settle(s); };
+    return p.then(v => { fin(v != null && v !== false); return v; }, e => { fin(false); throw e; });
+  }
+  // A synchronous phase (the models): open it, let the label paint, close it.
+  function phase(key) {
+    const s = S;
+    if (!s || !STEPS[key]) return () => {};
+    const st = _step(s, key);
+    st.pending++; _render(s);
+    return (ok = true) => { st.pending--; if (ok) st.ok = true; else if (!st.pending && !st.ok) st.miss = true; _settle(s); };
+  }
+  function paint() { return new Promise(r => requestAnimationFrame(() => setTimeout(r, 0))); }
+  function endMain(ok) { const s = S; if (!s) return; s.main = false; s.mainOk = ok !== false; _settle(s); }
+  function _settle(s) {
+    if (S !== s) return;
+    _render(s);
+    if (!s.main && ![...s.steps.values()].some(x => x.pending > 0)) _finish(s);
+  }
+  function _finish(s) {
+    if (S !== s) return;
+    const miss = [...s.steps.values()].filter(x => x.miss && !x.ok).length;
+    const bad = s.mainOk === false;
+    const e = _el();
+    e.classList.add(bad || miss ? 'gaps' : 'done');
+    const t = e.querySelector('.ls-title'), now = e.querySelector('.ls-now');
+    if (t) t.innerHTML = `<b>${esc(s.tk)}</b> · ${bad ? 'no data - manual mode' : miss ? 'loaded · some sources had nothing' : 'ready'}`;
+    if (now) now.textContent = `${((Date.now() - s.t0) / 1000).toFixed(1)} s`;
+    _render(s, false, true);
+    s.timers.forEach(clearInterval);
+    s.timers = [];
+    s.timers.push(setTimeout(() => _close(s), bad || miss ? 1800 : 900));
+  }
+  function _close(s, immediate) {
+    s.timers.forEach(clearInterval);
+    s.timers = [];
+    if (S !== s) return;
+    S = null;
+    const e = _el();
+    e.classList.remove('on');
+    setTimeout(() => { if (!S) e.hidden = true; }, immediate ? 0 : 260);
+  }
+  function _render(s, rotateOnly, final) {
+    if (S !== s) return;
+    const e = _el();
+    const all = [...s.steps.values()];
+    if (!final) {
+      const t = e.querySelector('.ls-title');
+      if (t && !rotateOnly) t.innerHTML = `Loading <b>${esc(s.tk)}</b>`;
+      const now = e.querySelector('.ls-now');
+      const active = all.filter(x => x.pending > 0);
+      const cur = active.length ? active[s.rot % active.length] : null;
+      const txt = cur ? STEPS[cur.key][1] + '…' : (s.main ? 'Starting…' : 'Finishing…');
+      if (now && now.textContent !== txt) {
+        if (rotateOnly && !reduced()) { now.classList.add('swap'); setTimeout(() => { now.textContent = txt; now.classList.remove('swap'); }, 160); }
+        else now.textContent = txt;
+      }
+      if (rotateOnly) return;
+    }
+    const steps = e.querySelector('.ls-steps');
+    if (steps) steps.innerHTML = all.map(x => `<span class="ls-step${x.pending > 0 ? ' active' : x.ok ? ' ok' : x.miss ? ' miss' : ''}">${STEPS[x.key][0]}</span>`).join('');
+    const sr = e.querySelector('.ls-sr');
+    if (sr) sr.textContent = final ? `${s.tk} loaded` : `Loading ${s.tk}: ${all.filter(x => !x.pending).length} of ${all.length} done`;
+  }
+  return { begin, track, phase, paint, endMain, get active() { return !!S; }, STEPS };
+})();
+if (typeof window !== 'undefined') window.LoadStatus = LoadStatus;
+
 async function loadValuation(savedRecord = null) {
   const ticker = document.getElementById('ticker').value.toUpperCase().trim();
   if (!ticker) {
@@ -7438,6 +7678,11 @@ async function loadValuation(savedRecord = null) {
   const btn = document.getElementById('fetch-btn');
   btn.disabled = true;
   btn.textContent = 'Loading…';
+  // z193: the load-progress card - what is being fetched, until the last background fetch lands
+  const _ls = (typeof window !== 'undefined' && window.LoadStatus) || null;
+  const _lt = (k, p) => (_ls ? _ls.track(k, p) : p);
+  let _ok = false;
+  if (_ls) _ls.begin(ticker);
   try {
     const raw = await fetchStock(ticker);
     const stock = normalizeStock(raw);
@@ -7469,6 +7714,8 @@ async function loadValuation(savedRecord = null) {
     // same numbers. This is the single source of truth — no more discrepancies
     // between what Valuation shows and what Stock Book shows for the same ticker.
     syncStockToStockbook(stock);
+    const _models = _ls ? _ls.phase('models') : null;
+    if (_ls) await _ls.paint();                        // let "Running valuation models" show before the sync work
     buildInputs(stock);
 
     // If we're loading a saved valuation, overlay the saved inputs on top
@@ -7488,6 +7735,7 @@ async function loadValuation(savedRecord = null) {
 
     renderSummary(stock);
     recalculate();
+    if (_models) _models(true);
     document.getElementById('intro').style.display = 'none';
     document.getElementById('workspace').classList.add('visible');
     document.getElementById('save-btn').disabled = false;
@@ -7499,20 +7747,28 @@ async function loadValuation(savedRecord = null) {
       }).catch(() => {});
     }
 
-    // Async: load price history from sheet and render chart
-    loadPriceChart(stock.ticker).catch(e => console.warn('Price chart skipped', e));
+    // Async: load price history from sheet and render chart (z193: tracked - delivered = a chart with 2+ points)
+    _lt('history', loadPriceChart(stock.ticker).then(() => (state.priceChart && state.priceChart.history && state.priceChart.history.length > 1) || null))
+      .catch(e => console.warn('Price chart skipped', e));
 
     // If user is on Financials sub-tab, fetch new financials too
     if (state.valSubtab === 'financials') {
-      loadFinancials(stock.ticker).catch(e => console.warn('Financials skipped', e));
+      _lt('financials', loadFinancials(stock.ticker).then(() => (state.financials && state.financials.data) || null))
+        .catch(e => console.warn('Financials skipped', e));
     } else {
       // Reset cached financials so the next sub-tab visit fetches fresh
       if (state.financials) { state.financials.ticker = null; state.financials.data = null; }
     }
+    // z193: on the Options sub-tab the new ticker's chain loads now (it kept the previous ticker's until re-clicked)
+    if (state.valSubtab === 'options' && typeof renderOptionsTab === 'function') {
+      _lt('options', Promise.resolve(renderOptionsTab(stock.ticker)).then(() => true))
+        .catch(e => console.warn('Options skipped', e));
+    }
 
     // If FMP key set, auto-merge most recent annual statements into assumptions
     if (getFmpKey() && !savedRecord) {
-      autoMergeFmpToAssumptions(stock.ticker).catch(e => console.warn('FMP auto-merge skipped', e));
+      _lt('financials', autoMergeFmpToAssumptions(stock.ticker).then(() => true))
+        .catch(e => console.warn('FMP auto-merge skipped', e));
     }
 
     const sourceMsg = savedRecord
@@ -7521,6 +7777,7 @@ async function loadValuation(savedRecord = null) {
           ? 'Loaded ' + stock.ticker + ' · ' + stock.dataSource
           : stock.ticker + ' · ' + stock.dataSource);
     flashStatus(sourceMsg, 'success');
+    _ok = true;
   } catch (e) {
     console.error(e);
     flashStatus(e.message + ' — manual mode', 'error');
@@ -7528,6 +7785,7 @@ async function loadValuation(savedRecord = null) {
   } finally {
     btn.disabled = false;
     btn.textContent = 'Fetch & Value';
+    if (_ls) _ls.endMain(_ok);
   }
 }
 
@@ -7870,11 +8128,15 @@ updateSourcesBtnHint();
 
 // Hydrate from taxonomy cache instantly so the ticker tape + stockbook
 // can render immediately while the fresh sheet fetch runs in background.
-if (hydrateStockbookFromCache()) {
-  // Render the cached skeleton right away
-  try { renderStockBook(); } catch {}
-  try { maybeShowTickerTape(); } catch {}
-}
+// z193: guarded - this runs before the cache's constants (TTL, overrides) are initialised further down the file; it
+// threw, silently, inside loadTaxonomyCache before. The skeleton now arrives with the IndexedDB copy (_taxMerge).
+try {
+  if (hydrateStockbookFromCache()) {
+    // Render the cached skeleton right away
+    try { renderStockBook(); } catch {}
+    try { maybeShowTickerTape(); } catch {}
+  }
+} catch {}
 
 // Load stockbook quietly in background so the ticker tape can populate
 if (getSheetUrls().length > 0) {
@@ -8017,25 +8279,23 @@ const TAXONOMY_FIELDS = [
   'employees', 'address', 'city', 'state', 'phone',
 ];
 
+// z193: memory first - the cache lives in IndexedDB ('taxonomy'). The legacy localStorage copy is read once, until it
+// has been moved: it was a 7 MB parse on every stock load, and its re-write failed against the full quota.
 function loadTaxonomyCache() {
+  if (_taxMem) return _taxMem;
   try {
-    const raw = localStorage.getItem(TAXONOMY_CACHE_KEY);
-    if (!raw) return {};
-    return JSON.parse(raw) || {};
-  } catch { return {}; }
+    // the key by name: the cold-start skeleton calls this before TAXONOMY_CACHE_KEY's line has run (it threw there, so
+    // the instant skeleton never appeared)
+    const raw = localStorage.getItem('valuatio.taxonomy.cache.v1');
+    if (raw) { _taxMem = JSON.parse(raw) || {}; return _taxMem; }
+  } catch {}
+  _taxMem = {};
+  return _taxMem;
 }
 
 function saveTaxonomyCache(cache) {
-  try {
-    localStorage.setItem(TAXONOMY_CACHE_KEY, JSON.stringify(cache));
-  } catch (e) {
-    // QuotaExceededError — drop the oldest 50% and retry once
-    if (e.name === 'QuotaExceededError') {
-      const pruned = pruneOldestEntries(cache, 0.5);
-      try { localStorage.setItem(TAXONOMY_CACHE_KEY, JSON.stringify(pruned)); }
-      catch { console.warn('Taxonomy cache write failed even after pruning'); }
-    }
-  }
+  _taxMem = cache || {};
+  _bigPersist('taxonomy', () => _taxMem, 2500);
 }
 
 // Drop the oldest N% of entries by timestamp
@@ -12827,7 +13087,8 @@ function purgeAllDataCaches() {
   ];
   dataCacheKeys.forEach(k => localStorage.removeItem(k));
   // Same caches now live in IndexedDB + memory mirrors — clear those too.
-  try { idbDel('sheetCache'); idbDel('newsCache'); idbDel('priceHist'); } catch {}
+  try { idbDel('sheetCache'); idbDel('newsCache'); idbDel('priceHist'); idbDel('taxonomy'); } catch {}
+  _taxMem = {};
   _sheetMemCache = null;
   _newsMemCache = null;
   if (typeof _priceHistMemCache === 'object') { for (const k of Object.keys(_priceHistMemCache)) delete _priceHistMemCache[k]; }
@@ -12842,6 +13103,8 @@ function clearSheetCache() {
 // Clear ONLY the taxonomy (stable identity fields) cache — rebuilds from stockbook.
 function clearTaxonomyCache() {
   localStorage.removeItem('valuatio.taxonomy.cache.v1');
+  _taxMem = {};                                          // z193: + its IndexedDB copy and memory mirror
+  try { idbDel('taxonomy'); } catch {}
 }
 if (typeof window !== 'undefined') { window.clearSheetCache = clearSheetCache; window.clearTaxonomyCache = clearTaxonomyCache; }
 
@@ -13039,8 +13302,8 @@ async function openSheetDiagnostics() {
                 <span style="color:var(--ink-dim)">Holds: name, sector, sub-sector, industry, CEO, country, exchange, IPO date, image, website, description</span>
               </div>
               <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
-                <button class="btn btn-ghost" style="font-size:10px;padding:4px 10px" onclick="(()=>{localStorage.removeItem('valuatio.taxonomy.cache.v1');document.getElementById('diag-modal').remove();flashStatus('Taxonomy cache cleared','success');})()">Clear Cache</button>
-                <button class="btn btn-ghost" style="font-size:10px;padding:4px 10px" onclick="(()=>{const c=JSON.parse(localStorage.getItem('valuatio.taxonomy.cache.v1')||'{}');console.log('Taxonomy cache:',c);document.getElementById('diag-modal').remove();flashStatus('Logged to console','success');})()">Log to Console</button>
+                <button class="btn btn-ghost" style="font-size:10px;padding:4px 10px" onclick="(()=>{clearTaxonomyCache();document.getElementById('diag-modal').remove();flashStatus('Taxonomy cache cleared','success');})()">Clear Cache</button>
+                <button class="btn btn-ghost" style="font-size:10px;padding:4px 10px" onclick="(()=>{console.log('Taxonomy cache:',loadTaxonomyCache());document.getElementById('diag-modal').remove();flashStatus('Logged to console','success');})()">Log to Console</button>
               </div>
             `;
           })()}
@@ -21560,12 +21823,15 @@ function getHistoryForTicker(ticker) {
 const INTRADAY_KEY = 'valuatio.intraday.v1';
 
 // Current US-Eastern wall-clock parts (handles EST/EDT automatically).
+// z193: one formatter for the whole app - building an Intl.DateTimeFormat on every call cost ~0.1 ms, three times per
+// intraday tick (2,500 ticks a tape refresh). `var` so a call made before this line runs still works (no TDZ).
+var _ET_PARTS_FMT = null;
 function _etParts(d = new Date()) {
   try {
-    const fmt = new Intl.DateTimeFormat('en-US', {
+    const fmt = _ET_PARTS_FMT || (_ET_PARTS_FMT = new Intl.DateTimeFormat('en-US', {
       timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
       hour: '2-digit', minute: '2-digit', hour12: false,
-    });
+    }));
     const parts = {};
     for (const p of fmt.formatToParts(d)) if (p.type !== 'literal') parts[p.type] = p.value;
     let hour = parseInt(parts.hour, 10); if (hour === 24) hour = 0;
@@ -21716,11 +21982,20 @@ if (typeof window !== 'undefined') {
   window.isMarketOpenET = isMarketOpenET;
 }
 
+// z193: memory first (IndexedDB 'intraday' behind it). Every tick used to parse and re-write the whole 0.8 MB store -
+// ~2,500 ticks per tape refresh, seconds of a frozen page - and every chart read parsed it again.
 function _loadIntraday() {
-  try { return JSON.parse(localStorage.getItem(INTRADAY_KEY) || '{}'); } catch { return {}; }
+  if (_intraMem) return _intraMem;
+  try {
+    const raw = localStorage.getItem(INTRADAY_KEY);
+    if (raw) { _intraMem = JSON.parse(raw) || {}; return _intraMem; }
+  } catch {}
+  _intraMem = {};
+  return _intraMem;
 }
 function _saveIntraday(obj) {
-  try { localStorage.setItem(INTRADAY_KEY, JSON.stringify(obj)); } catch {}
+  _intraMem = obj || {};
+  _bigPersist('intraday', () => _intraMem, 3000);
 }
 
 // Record one intraday tick for a ticker at the current price. Called on every
@@ -39525,9 +39800,9 @@ function loadBotState() {
   } catch (e) {
     console.warn('[bot] state parse failed — trying backup:', e.message);
   }
-  // Backup slot (last known-good full state).
+  // Backup slot (last known-good full state) - z193: kept in IndexedDB ('botBackup', mirrored in memory)
   try {
-    const bak = localStorage.getItem(BOT_KEY + '.bak');
+    const bak = localStorage.getItem(BOT_KEY + '.bak') || _botBackupJson;
     if (bak) {
       const p = JSON.parse(bak);
       if (p && Array.isArray(p.bets)) { console.log('[bot] recovered from backup'); return p; }
@@ -39561,13 +39836,16 @@ function _slimBetForLocal(b) {
 function saveBotState(b) {
   // Primary save. If it fails (quota), progressively slim and retry so the bot
   // NEVER silently loses its state again.
-  const attempt = (obj) => { localStorage.setItem(BOT_KEY, JSON.stringify(obj)); };
+  const attempt = (obj) => { const json = JSON.stringify(obj); localStorage.setItem(BOT_KEY, json); return json; };
   try {
-    attempt(b);
-    // Write a backup copy too (best-effort) so a future corrupt write is recoverable.
-    try { localStorage.setItem(BOT_KEY + '.bak', JSON.stringify(b)); } catch {}
+    const json = attempt(b);
+    // The backup copy (so a future corrupt write is recoverable) - z193: in IndexedDB, written in the background from
+    // the same JSON; it used to double the bot's 1 MB in localStorage.
+    _botBackupJson = json;
+    _bigPersist('botBackup', () => _botBackupJson, 4000);
     return true;
   } catch (e1) {
+    try { _botBackupJson = JSON.stringify(b); _bigPersist('botBackup', () => _botBackupJson, 500); } catch {}   // the full state survives in IndexedDB
     console.warn('[bot] save failed (quota?) — slimming closed-bet detail and retrying:', e1.message);
     try {
       const slim = { ...b, bets: (b.bets || []).map(_slimBetForLocal) };
@@ -45850,6 +46128,7 @@ function renderStorageStats() {
       : k.startsWith('valuatio.sb.columns')    ? 'Column Settings'
       : k.startsWith('valuatio.theme')         ? 'Preferences'
       : k.startsWith('sb-col-widths')          ? 'Column Settings'
+      : k.startsWith('valuatio.bot.v1')        ? 'Bot (mirror of the server journal)'
       : 'Other';
     buckets[bucket] = (buckets[bucket] || 0) + size;
     if (bucket === 'Other') otherKeys.push({ key: k, size });
@@ -45869,8 +46148,40 @@ function renderStorageStats() {
         ${otherKeys.length > 15 ? `<div style="padding-left:8px" class="key">…and ${otherKeys.length - 15} more</div>` : ''}
       </div>`;
   }
+  // z193: against the 5 MB budget (synchronous storage - everything here is parsed on the main thread); the big caches
+  // live in IndexedDB, listed below with what they hold
+  const budget = 5 * 1048576, pct = Math.min(100, total / budget * 100);
+  const barCol = pct > 80 ? 'var(--red)' : pct > 60 ? 'var(--data-amber)' : 'var(--pos)';
   wrap.innerHTML = rows + otherDetail +
-    `<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--rule)"><span class="key">Total used:</span> <span class="val">${fmt(total)}</span> <span class="key">· browsers typically allow ~5-10MB</span></div>`;
+    `<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--rule)"><span class="key">Total used:</span> <span class="val">${fmt(total)}</span> <span class="key">· of a 5MB budget (localStorage)</span>
+      <div style="height:4px;background:var(--rule);margin-top:5px"><div style="height:4px;width:${pct.toFixed(1)}%;background:${barCol}"></div></div></div>
+     <div id="home-storage-idb" style="margin-top:10px;padding-top:8px;border-top:1px dashed var(--rule)"><div class="key">IndexedDB (async, not counted above) — reading…</div></div>`;
+  _renderIdbStorageStats();
+}
+// z193: what lives in IndexedDB - sized on demand (JSON length ≈ bytes) so opening Settings costs one read per store.
+async function _renderIdbStorageStats() {
+  const el = document.getElementById('home-storage-idb');
+  if (!el) return;
+  const NAMES = { taxonomy: 'Taxonomy Cache', intraday: 'Intraday ticks', botBackup: 'Bot state backup', sheetCache: 'Sheet Cache',
+                  newsCache: 'News', priceHist: 'Price History', backendResearch: 'Research grades', botScanCheckpoint: 'Bot scan checkpoint' };
+  const fmt = (b) => b < 1024 ? `${b}B` : b < 1048576 ? `${(b / 1024).toFixed(1)}KB` : `${(b / 1048576).toFixed(2)}MB`;
+  try {
+    const keys = await idbKeys();
+    const sized = [];
+    for (const k of keys) {
+      let n = 0;
+      try { const v = await idbGet(k); n = v == null ? 0 : (typeof v === 'string' ? v.length : JSON.stringify(v).length); } catch {}
+      sized.push([k, n]);
+      await new Promise(r => setTimeout(r, 0));
+    }
+    sized.sort((a, b) => b[1] - a[1]);
+    let est = '';
+    try { if (navigator.storage?.estimate) { const e = await navigator.storage.estimate(); est = ` · origin uses ${fmt(e.usage || 0)} of ${fmt(e.quota || 0)}`; } } catch {}
+    if (!document.body.contains(el)) return;
+    el.innerHTML = `<div class="key" style="margin-bottom:4px">IndexedDB (async, not counted above)${est}:</div>` +
+      (sized.length ? sized.map(([k, n]) => `<div style="padding-left:8px"><span class="key" style="font-size:9px">${escapeHtml(NAMES[k] || String(k))}</span> <span class="val">≈${fmt(n)}</span></div>`).join('')
+                    : `<div style="padding-left:8px" class="key">empty${_idbOk === false ? ' — IndexedDB is not available in this browser' : ''}</div>`);
+  } catch (e) { if (document.body.contains(el)) el.innerHTML = `<div class="key">IndexedDB unavailable: ${escapeHtml(String(e && e.message || e))}</div>`; }
 }
 
 // ============================================================
