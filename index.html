@@ -8960,7 +8960,25 @@
       'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
   }
 </script>
-<script src="app.js?v=20260615z191"></script>
+<script src="app.js?v=20260615z192"></script>
+<script>
+  // z192: the app.js this page runs must be the build it was shipped with - else say so on screen (11-16 20:43 ET an
+  // older app.js was committed over z191 and the app ran on it unnoticed). A stale cached copy shows the same bar.
+  (function () {
+    var want = '20260615z192', got = window.APP_JS_BUILD;
+    if (got === want) return;
+    try { console.error('[valuatio] app.js build ' + (got || 'unknown (pre-z192)') + ' - this page expects ' + want); } catch (e) {}
+    function show() {
+      if (document.getElementById('build-mismatch')) return;
+      var d = document.createElement('div');
+      d.id = 'build-mismatch'; d.setAttribute('role', 'alert');
+      d.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:2147483647;padding:6px 12px;background:#7a1f1f;color:#fff;font:600 12px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;text-align:center';
+      d.textContent = 'app.js is build ' + (got || 'unknown (older than z192)') + ', this page expects ' + want + ' - reload; if it stays, the app.js committed to TRAPP2-Frontend is the wrong file.';
+      document.body.appendChild(d);
+    }
+    if (document.body) show(); else document.addEventListener('DOMContentLoaded', show);
+  })();
+</script>
 <!-- Patterns & Templates (TA tool + overview pattern read) - z87 WIP; standalone, loads after app.js -->
 <script src="patterns.js?v=20260615z185"></script>
 <!-- UX: tickers clickable everywhere -> Valuation (z88) -->
@@ -8977,7 +8995,7 @@
 <script src="datatab.js?v=20260615z133"></script>
 <!-- bot: app ↔ runner action outbox - z100 -->
 <script src="botsync.js?v=20260615z122"></script>
-<script src="botmirror.js?v=20260615z186"></script>
+<script src="botmirror.js?v=20260615z192"></script>
 <script src="optionshub.js?v=20260615z125"></script>
 <script src="credit.js?v=20260615z132"></script>
 <script src="earnings.js?v=20260615z136"></script>
