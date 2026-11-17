@@ -142,6 +142,8 @@
     bot.transactions = (J.transactions || []).map(x => Object.assign({}, x, { origin: x.origin || 'runner' }));
     if (isFinite(+J.bankroll)) bot.bankroll = +J.bankroll;
     if (J.learnedWeights && typeof J.learnedWeights === 'object') bot.learnedWeights = J.learnedWeights;
+    // z192: the bot learns from every closed trade - its learning summary (what it replayed, what it trusts now)
+    if (J.learning && typeof J.learning === 'object') bot.learning = J.learning;
     bot.runnerJournalAt = J.generatedAt || null;
     bot.mirroredAt = new Date().toISOString();
     window.__botMerging = (window.__botMerging || 0) + 1;                     // a merge to botsync: no actions
