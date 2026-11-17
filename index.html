@@ -6860,6 +6860,37 @@
     .fn-overlay-body .fn-corner-hint { display: none !important; }
   }
 
+  /* z193: stock-load progress - a rotating ring and what is being fetched right now (LoadStatus in app.js).
+     Fixed under the header, never in the way (no pointer events), gone when the last fetch lands. */
+  .load-status{position:fixed;top:84px;left:50%;transform:translateX(-50%);z-index:9500;width:min(440px,calc(100vw - 24px));
+    box-sizing:border-box;display:flex;gap:12px;align-items:flex-start;padding:11px 14px;background:var(--bg-card);
+    border:1px solid var(--rule);border-left:3px solid var(--amber);box-shadow:0 8px 28px rgba(0,0,0,.35);
+    font-family:var(--mono);color:var(--ink);pointer-events:none;opacity:0;transition:opacity .25s ease}
+  .load-status.on{opacity:1}
+  .load-status[hidden]{display:none}
+  .load-status .ls-ring{flex:0 0 auto;width:20px;height:20px;margin-top:2px;border-radius:50%;box-sizing:border-box;
+    border:2px solid var(--rule);border-top-color:var(--amber);animation:ls-spin .8s linear infinite}
+  .load-status.done .ls-ring{animation:none;border-color:var(--pos)}
+  .load-status.gaps .ls-ring{animation:none;border-color:var(--data-amber)}
+  .load-status .ls-body{flex:1;min-width:0}
+  .load-status .ls-title{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-dim)}
+  .load-status .ls-title b{color:var(--amber);font-weight:700}
+  .load-status .ls-now{font-size:12px;margin:3px 0 7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:opacity .16s ease}
+  .load-status .ls-now.swap{opacity:.2}
+  .load-status .ls-steps{display:flex;flex-wrap:wrap;gap:3px 10px;font-size:9.5px;color:var(--ink-faint)}
+  .load-status .ls-step::before{content:'\25CB\00A0'}
+  .load-status .ls-step.active{color:var(--amber)}
+  .load-status .ls-step.active::before{content:'\25CF\00A0';animation:ls-pulse 1s ease-in-out infinite}
+  .load-status .ls-step.ok{color:var(--ink-dim)}
+  .load-status .ls-step.ok::before{content:'\2713\00A0';color:var(--pos)}
+  .load-status .ls-step.miss{text-decoration:line-through}
+  .load-status .ls-step.miss::before{content:'\2013\00A0'}
+  .load-status .ls-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+  @keyframes ls-spin{to{transform:rotate(360deg)}}
+  @keyframes ls-pulse{50%{opacity:.3}}
+  @media (max-width:600px){.load-status{top:64px}}
+  @media (prefers-reduced-motion:reduce){.load-status{transition:none}.load-status .ls-ring,.load-status .ls-step.active::before{animation:none}
+    .load-status .ls-now{transition:none}}
 </style>
 <!-- layout corrections (mobile + desktop) - z88 -->
 <link rel="stylesheet" href="layout.css?v=20260615z129">
@@ -8960,12 +8991,12 @@
       'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
   }
 </script>
-<script src="app.js?v=20260615z192"></script>
+<script src="app.js?v=20260615z193"></script>
 <script>
   // z192: the app.js this page runs must be the build it was shipped with - else say so on screen (11-16 20:43 ET an
   // older app.js was committed over z191 and the app ran on it unnoticed). A stale cached copy shows the same bar.
   (function () {
-    var want = '20260615z192', got = window.APP_JS_BUILD;
+    var want = '20260615z193', got = window.APP_JS_BUILD;
     if (got === want) return;
     try { console.error('[valuatio] app.js build ' + (got || 'unknown (pre-z192)') + ' - this page expects ' + want); } catch (e) {}
     function show() {
