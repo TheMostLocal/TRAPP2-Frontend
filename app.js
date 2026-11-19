@@ -10146,6 +10146,28 @@ function setMacroBaseOverride(url) {
 const _optionsCache = {};            // ticker -> { data, t }
 const OPTIONS_TTL_MS = 30 * 60 * 1000;
 let _optionsManifest = null;
+// z196: TRAPP2-OPTIONS covers every optionable name in the books (~2,300 chains, ~70 MB). The app no longer downloads
+// every chain for the market read: the pipeline writes market.json (the same market read, precomputed, + universe
+// breadth) and signals.json (each name's options signal, ~120 KB). Chains load one at a time, when a ticker is opened.
+let _optionsMarketDoc = null, _optionsSignals = null, _optionsMarketAt = 0, _optionsMarketPending = null;
+const OPTIONS_MARKET_TTL_MS = 10 * 60 * 1000;
+async function loadOptionsMarket(force) {
+  if (!force && _optionsMarketAt && (Date.now() - _optionsMarketAt) < OPTIONS_MARKET_TTL_MS) return _optionsMarketDoc;
+  if (_optionsMarketPending) return _optionsMarketPending;
+  _optionsMarketPending = (async () => {
+    const base = GH_RAW + '/TRAPP2-OPTIONS/main/data/options/';
+    const get = async f => { try { const r = await fetch(base + f, { cache: 'no-store' }); return r.ok ? await r.json() : null; } catch (e) { return null; } };
+    const [mk, sg] = await Promise.all([get('market.json'), get('signals.json')]);
+    if (mk) _optionsMarketDoc = mk;
+    if (sg && sg.tickers) _optionsSignals = sg;
+    _optionsMarketAt = Date.now();
+    _marketOptionsCache = { at: 0, data: null };
+    _optionsMarketPending = null;
+    return _optionsMarketDoc;
+  })();
+  return _optionsMarketPending;
+}
+if (typeof window !== 'undefined') window.loadOptionsMarket = loadOptionsMarket;
 
 // Options live with the equity history (TRAPP2). Reuse the history-manifest base
 // when present, else fall back to the default raw base for the equity repo.
@@ -10168,7 +10190,7 @@ async function loadOptionsManifest() {
   for (const base of optionsBases()) {
     try {
       const r = await fetch(base + 'manifest.json', { cache: 'no-store' });
-      if (r.ok) { const m = await r.json(); (m.tickers || []).forEach(t => tickers.add(t)); asOf = asOf || m.asOf; }
+      if (r.ok) { const m = await r.json(); (m.tickers || []).forEach(t => { if (t && t !== 'run_report' && !String(t).startsWith('_')) tickers.add(t); }); asOf = asOf || m.asOf; }
     } catch {}
   }
   _optionsManifest = tickers.size ? { asOf, tickers: [...tickers].sort(), count: tickers.size } : null;
@@ -10188,7 +10210,14 @@ function extractOptionsSignal(ticker) {
     const tk = (ticker || '').toUpperCase();
     const c = (typeof _optionsCache === 'object') ? _optionsCache[tk] : null;
     const od = c && c.data;
-    if (!od || !Array.isArray(od.expiries) || !od.expiries.length) return null;
+    if (!od || !Array.isArray(od.expiries) || !od.expiries.length) {
+      // z196: no chain loaded for this name - the pipeline's signals.json row (the same arithmetic on the same chain)
+      const row = _optionsSignals && _optionsSignals.tickers ? _optionsSignals.tickers[tk] : null;
+      if (!Array.isArray(row) || row[0] == null) return null;
+      const ageD = row[5] ? (Date.now() - Date.parse(row[5] + 'T21:00:00Z')) / 86400000 : 99;
+      if (!(ageD <= 5)) return null;
+      return { iv: row[0], atmIV: row[0], skew: row[1], termSlope: row[2], ivSignal: row[3], refExpiry: null, refDte: row[4], source: 'signals.json' };
+    }
     const spot = od.spot;
     if (!spot) return null;
     // Use the nearest monthly-ish expiry (20-60 DTE) for the headline read; fall
@@ -10255,20 +10284,15 @@ if (typeof window !== 'undefined') window.extractOptionsSignal = extractOptionsS
 const _MKT_OPT_INDEXES = ['SPY', 'QQQ', 'IWM'];
 let _marketOptionsCache = { at: 0, data: null };
 
-// Load every options file in the manifest into _optionsCache (parallel, capped).
+// The market options read. z196: TRAPP2-OPTIONS precomputes it (market.json) and every name's signal (signals.json);
+// this used to download EVERY chain in the manifest on startup (~530 chains, 25+ MB - ~2,300 / 70 MB since z196).
+// Only when market.json is missing does it fall back to the index ETFs' chains.
 async function loadAllOptions(force) {
-  const man = await loadOptionsManifest();
+  const [man, mk] = await Promise.all([loadOptionsManifest(), loadOptionsMarket(force)]);
   const tickers = (man && Array.isArray(man.tickers)) ? man.tickers.slice() : [];
-  if (!tickers.length) return [];
-  // Fetch any not already fresh in cache.
-  const need = tickers.filter(t => {
-    const c = _optionsCache[(t || '').toUpperCase()];
-    return force || !c || !c.data || (Date.now() - (c.t || 0)) > OPTIONS_TTL_MS;
-  });
-  // Cap concurrency to be kind to raw.githubusercontent.
-  const CONC = 6;
-  for (let i = 0; i < need.length; i += CONC) {
-    await Promise.all(need.slice(i, i + CONC).map(t => loadOptionsForTicker(t, force)));
+  if (!(mk && mk.appSignal)) {
+    const idx = _MKT_OPT_INDEXES.filter(t => tickers.includes(t));
+    await Promise.all(idx.map(t => loadOptionsForTicker(t, force)));
   }
   return tickers;
 }
@@ -10276,6 +10300,17 @@ async function loadAllOptions(force) {
 // Aggregate per-ticker option signals into a single market read.
 function computeOptionsMarketSignal() {
   if (_marketOptionsCache.data && (Date.now() - _marketOptionsCache.at) < 60000) return _marketOptionsCache.data;
+  // z196: the pipeline's read over the index ETFs + the 400 largest names (and breadth over every chain)
+  const mk = _optionsMarketDoc;
+  const fresh = mk && mk.appSignal && mk.asOf && (Date.now() - Date.parse(mk.asOf)) < 3 * 86400000;
+  if (fresh) {
+    const a = mk.appSignal;
+    const data = Object.assign({ asOf: Date.parse(mk.asOf), rows: [], source: 'market.json', breadth: mk.breadth || null,
+                                 chains: mk.chains, fresh: mk.fresh, ladders: mk.ladders }, a,
+                               { richestIV: a.richestIV || [], heaviestSkew: a.heaviestSkew || [] });
+    _marketOptionsCache = { at: Date.now(), data };
+    return data;
+  }
   const rows = [];
   let indexIVsum = 0, indexIVn = 0;
   for (const tk of Object.keys(_optionsCache)) {
@@ -10386,7 +10421,7 @@ async function renderOptionsTab(ticker) {
     body.innerHTML = `<div class="company-card" style="margin:0">
       <div style="font-family:var(--mono);font-size:11px;color:var(--ink-dim);line-height:1.6;padding:8px">
         ${has ? `No <strong>live</strong> options for ${escapeHtml(tk)} right now (all near-term contracts may have expired — they refresh on the next pipeline run).`
-              : `${escapeHtml(tk)} isn't in the options universe yet. Options are pulled for a curated list of liquid names; add ${escapeHtml(tk)} to <code>data/options_universe.txt</code> in TRAPP2 to include it.`}
+              : `${escapeHtml(tk)} has no options chain on file. Since z196 every optionable US stock / ETF in the books is covered (refreshed each evening); a name Yahoo lists no options for is re-checked every 14 days. Use Options → Request chain to fetch one now.`}
         <div style="margin-top:8px;color:var(--ink-faint);font-size:10px">Options data is produced by the TRAPP2 <code>options.yml</code> pipeline (yfinance chains + Black-Scholes Greeks).</div>
       </div></div>`;
     return;
@@ -10516,7 +10551,7 @@ function _renderMarketOptionsPanel() {
   if (!mo) {
     return `<div class="company-card" id="mkt-opt-panel" style="margin:0 0 12px;border-left:3px solid var(--ink-faint)">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
-        <div style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)"><strong style="color:var(--amber)">Market Options</strong> — load every chain in the repo for a market-wide IV / skew read.</div>
+        <div style="font-family:var(--mono);font-size:11px;color:var(--ink-dim)"><strong style="color:var(--amber)">Market Options</strong> — the market-wide IV / skew read and breadth across every chain (TRAPP2-OPTIONS market.json).</div>
         <button class="btn" id="mkt-opt-load" style="font-size:10px">Load market options</button>
       </div>
     </div>`;
@@ -10527,7 +10562,7 @@ function _renderMarketOptionsPanel() {
   return `<div class="company-card" id="mkt-opt-panel" style="margin:0 0 12px;border-left:3px solid ${rc}">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap">
       <div>
-        <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);letter-spacing:0.1em;text-transform:uppercase">Market Options · ${mo.count} names · index-led</div>
+        <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);letter-spacing:0.1em;text-transform:uppercase">Market Options · ${mo.count} names · index-led${mo.source === 'market.json' && mo.chains ? ` · ${mo.fresh}/${mo.chains} chains fresh` : ''}</div>
         <div style="display:flex;align-items:baseline;gap:10px;margin-top:3px">
           <span style="font-family:var(--mono);font-size:26px;font-weight:800;color:${rc};line-height:1">${(mo.indexIV*100).toFixed(1)}%</span>
           <span style="font-family:var(--mono);font-size:12px;font-weight:700;color:${rc};text-transform:uppercase">${mo.volRegime}</span>
@@ -10541,7 +10576,8 @@ function _renderMarketOptionsPanel() {
       <div><span style="font-family:var(--mono);font-size:8px;color:var(--ink-faint);text-transform:uppercase">Richest IV: </span>${lead(mo.richestIV, 'iv', v => (v*100).toFixed(0)+'%')}</div>
       ${mo.heaviestSkew.length ? `<div><span style="font-family:var(--mono);font-size:8px;color:var(--ink-faint);text-transform:uppercase">Heaviest downside skew: </span>${lead(mo.heaviestSkew, 'skew', v => (v*100).toFixed(1)+'pp')}</div>` : ''}
     </div>
-    <div style="font-family:var(--mono);font-size:8px;color:var(--ink-faint);margin-top:8px;opacity:0.85">Aggregated across the repo's option chains. Feeds the bot's regime (rich IV / fear de-risks) and a market-trend tilt. Index IV is the market's expected move; downside skew = crash-protection bid; term slope &gt;0 = near-term event risk.</div>
+    ${mo.breadth ? `<div style="font-family:var(--mono);font-size:9px;color:var(--ink-dim);margin-top:8px">Breadth (${mo.breadth.n} names): term structure inverted <span style="color:${(mo.breadth.invertedShare || 0) >= 0.3 ? 'var(--neg)' : 'var(--ink)'}">${mo.breadth.invertedShare != null ? (mo.breadth.invertedShare * 100).toFixed(0) + '%' : '—'}</span> · 25Δ skew ≥ 6 pts ${mo.breadth.skewHighShare != null ? (mo.breadth.skewHighShare * 100).toFixed(0) + '%' : '—'} · IV rank ≥ 80 ${mo.breadth.ivRankHighShare != null ? (mo.breadth.ivRankHighShare * 100).toFixed(0) + '%' : '—'} · put/call OI ${mo.breadth.putCallOI != null ? mo.breadth.putCallOI.toFixed(2) : '—'} · unusual activity put-led ${mo.breadth.unusualPutLedShare != null ? (mo.breadth.unusualPutLedShare * 100).toFixed(0) + '%' : '—'}</div>` : ''}
+    <div style="font-family:var(--mono);font-size:8px;color:var(--ink-faint);margin-top:8px;opacity:0.85">${mo.source === 'market.json' ? 'Precomputed by TRAPP2-OPTIONS: the read over the index ETFs and the full-ladder names (core list + 400 largest); breadth over every fresh chain.' : 'Aggregated across the loaded option chains.'} Feeds the bot's regime (rich IV / fear de-risks) and a market-trend tilt. Index IV is the market's expected move; downside skew = crash-protection bid; term slope &gt;0 = near-term event risk.</div>
   </div>`;
 }
 
@@ -12360,9 +12396,9 @@ async function loadStockBook(forceRefresh = false) {
   // Capture an intraday tick per charted ticker so a refresh becomes a new chart
   // point (Robinhood-style "today"). No-op outside market hours.
   try { if (typeof captureIntradaySnapshot === 'function') captureIntradaySnapshot(); } catch {}
-  // Background-load the market option chains (non-blocking) so the market-options
-  // signal is ready for the engine/regime without the user opening the tab.
-  try { if (typeof loadAllOptions === 'function') loadAllOptions(false).then(() => { try { computeOptionsMarketSignal(); } catch {} }).catch(() => {}); } catch {}
+  // Background-load the market options read (non-blocking) so the market-options signal is ready for the
+  // engine/regime without the user opening the tab. z196: two small files (market.json + signals.json), not every chain.
+  try { if (typeof loadOptionsMarket === 'function') loadOptionsMarket(false).then(() => { try { computeOptionsMarketSignal(); } catch {} }).catch(() => {}); } catch {}
   renderStockBook();
   maybeShowTickerTape();
 }
