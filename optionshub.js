@@ -17,7 +17,7 @@
   const API = () => (typeof GH_API_REPOS !== 'undefined' ? GH_API_REPOS : 'https://api.github.com/repos/TheMostLocal');
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const num = v => (v == null || v === '' || !isFinite(+v)) ? null : +v;
-  const S = { data: null, at: 0, sort: 'ticker', dir: 'asc', q: '' };
+  const S = { data: null, at: 0, sort: 'ticker', dir: 'asc', q: '', limit: 300 };   // z196: ~2,300 chains - render 300 at a time
   const COLS = [
     ['ticker', 'Ticker', 'text'], ['spot', 'Spot', 'num'], ['iv', 'ATM IV', 'num'], ['move', 'Exp. move', 'num'],
     ['rank', 'IV rank', 'num'], ['skew', '25Δ skew', 'num'], ['slope', 'Term slope', 'num'], ['pcoi', 'Put/Call OI', 'num'],
@@ -30,7 +30,7 @@
     const get = async f => { try { const r = await fetch(`${base}${f}?_v=${Math.floor(Date.now() / 60000)}`, { cache: 'no-store' }); return r.ok ? await r.json() : null; } catch (e) { return null; } };
     const [summ, man] = await Promise.all([get('summary.json'), get('manifest.json')]);
     const st = (summ && summ.tickers) || {};
-    const all = new Set([...((man && man.tickers) || []), ...Object.keys(st)].map(t => String(t).toUpperCase()));
+    const all = new Set([...((man && man.tickers) || []), ...Object.keys(st)].map(t => String(t).toUpperCase()).filter(t => t !== 'RUN_REPORT' && !t.startsWith('_')));
     const rows = [...all].map(t => {
       const s = st[t] || {};
       return { ticker: t, spot: num(s.spot), iv: num(s.atmIv30 != null ? s.atmIv30 : s.atmIv), ivBasis: s.atmIv30 != null ? `${s.dte30 || 30}-day` : (s.nearestExpiry ? `nearest (${s.nearestExpiry})` : ''),
@@ -79,11 +79,12 @@
   async function render(host, opts) {
     if (!host) return;
     opts = opts || {};
-    if (!S.data) host.innerHTML = '<div style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);padding:20px 0">Loading every options chain…</div>';
+    if (!S.data) host.innerHTML = '<div style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);padding:20px 0">Loading the options summary…</div>';
     const d = await load(opts.force);
     if (!host.isConnected) return;
     const q = S.q.trim().toUpperCase();
-    const rows = sorted(d.rows.filter(r => !q || r.ticker.includes(q)));
+    const all = sorted(d.rows.filter(r => !q || r.ticker.includes(q)));
+    const rows = all.slice(0, S.limit);
     const icon = k => S.sort !== k ? '<span class="sort-icon">↕</span>' : `<span class="sort-icon active">${S.dir === 'asc' ? '↑' : '↓'}</span>`;
     host.innerHTML = `<div class="company-card" style="margin:0 0 12px;font-family:var(--mono)">
         <div style="display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center">
@@ -101,6 +102,7 @@
         <thead><tr>${COLS.map(([k, l]) => `<th class="sortable" data-oh-sort="${k}" style="cursor:pointer;white-space:nowrap">${l}${icon(k)}</th>`).join('')}</tr></thead>
         <tbody>${rows.map(r => `<tr>${COLS.map(([k]) => `<td style="white-space:nowrap">${cell(r, k)}</td>`).join('')}</tr>`).join('') || `<tr><td colspan="${COLS.length}" style="color:var(--ink-faint)">No ticker matches "${esc(S.q)}".</td></tr>`}</tbody>
       </table></div>
+      ${all.length > rows.length ? `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;font-family:var(--mono);font-size:10px;color:var(--ink-dim)">Showing ${rows.length} of ${all.length} - filter or sort to narrow, or <button class="btn btn-ghost" id="oh-more" style="padding:3px 9px;font-size:10px">show ${Math.min(300, all.length - rows.length)} more</button></div>` : ''}
       <div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:6px;line-height:1.5">ATM IV: at-the-money implied volatility from mid prices on the parity forward (30-day expiry when available, else the nearest) · expected move: ±1 standard deviation to that expiry · IV rank: today's ATM IV within its own history (needs 20 days) · 25Δ skew: put wing − call wing (positive = downside demand) · term slope: 90-day − 30-day ATM IV (negative = inverted, near-term stress) · quotes: share of clean two-sided quotes · unusual: strikes trading ≥ 500 contracts and ≥ 2× open interest.</div>`;
     host.querySelectorAll('[data-oh-sort]').forEach(th => th.onclick = () => {
       const k = th.dataset.ohSort, isNum = (COLS.find(c => c[0] === k) || [])[2] === 'num';
@@ -108,6 +110,8 @@
       render(host, opts);
     });
     host.querySelectorAll('[data-oh-open]').forEach(a => a.onclick = e => { e.preventDefault(); openChain(a.dataset.ohOpen); });
+    const more = host.querySelector('#oh-more');
+    if (more) more.onclick = () => { S.limit += 300; render(host, opts); };
     const qi = host.querySelector('#oh-q');
     if (qi) qi.oninput = () => { S.q = qi.value; clearTimeout(qi._t); qi._t = setTimeout(() => { render(host, opts).then(() => { const n = host.querySelector('#oh-q'); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } }); }, 250); };
     const rb = host.querySelector('#oh-req-btn'), ri = host.querySelector('#oh-req');
