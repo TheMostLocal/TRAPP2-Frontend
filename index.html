@@ -5282,7 +5282,9 @@
     flex-shrink: 0;
   }
   .sc-company-conf.verified  { color: var(--pos); }
+  .sc-company-conf.filing    { color: var(--pos); }
   .sc-company-conf.disclosed { color: #7faaca; }
+  .sc-company-conf.reported  { color: #c0a060; }
   .sc-company-conf.inferred  { color: var(--data-amber); }
   .sc-arrow {
     position: absolute;
@@ -8991,12 +8993,12 @@
       'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
   }
 </script>
-<script src="app.js?v=20260615z196"></script>
+<script src="app.js?v=20260615z197"></script>
 <script>
   // z192: the app.js this page runs must be the build it was shipped with - else say so on screen (11-16 20:43 ET an
   // older app.js was committed over z191 and the app ran on it unnoticed). A stale cached copy shows the same bar.
   (function () {
-    var want = '20260615z193', got = window.APP_JS_BUILD;
+    var want = '20260615z197', got = window.APP_JS_BUILD;
     if (got === want) return;
     try { console.error('[valuatio] app.js build ' + (got || 'unknown (pre-z192)') + ' - this page expects ' + want); } catch (e) {}
     function show() {
@@ -9022,7 +9024,9 @@
 <script src="fedmon.js?v=20260615z110"></script>
 <!-- Regime certainty: is the regime call dialed in? - z93 -->
 <script src="regimecert.js?v=20260615z127"></script>
-<script src="warning.js?v=20260615z196"></script>
+<script src="warning.js?v=20260615z197"></script>
+<!-- z197: the Business Web - money web lens on WEB, subsector chains, the company page card -->
+<script src="businessweb.js?v=20260615z197"></script>
 <!-- Data tab: dataset explorer + 3D surfaces - z95 -->
 <script src="datatab.js?v=20260615z196"></script>
 <!-- bot: app ↔ runner action outbox - z100 -->
