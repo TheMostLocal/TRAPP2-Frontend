@@ -5,7 +5,7 @@
    ============================================================ */
 // z192: this file's build - index.html checks it right after loading this script and says so on screen when it isn't the
 // build the page was shipped with (11-16 20:43 ET an older app.js, z177-era, was committed over z191 and ran unnoticed).
-var APP_JS_BUILD = '20260615z193';
+var APP_JS_BUILD = '20260615z197';
 if (typeof window !== 'undefined') window.APP_JS_BUILD = APP_JS_BUILD;
 
 // ============================================================
@@ -34363,9 +34363,11 @@ document.addEventListener('DOMContentLoaded', () => {
 //                  (e.g. AAPL/NVDA for semis, gas station retailers for oil, BMW for EVs)
 //
 //   EVERY LINK CARRIES A CONFIDENCE TIER:
-//     'verified'   = documented in 10-K / annual report supplier list
+//     'filing'     = documented in a 10-K / 10-Q / 8-K / S-1 (z197; was 'verified')
 //     'disclosed'  = public press release, supplier partnership announcement
+//     'reported'   = press reports citing documents / people (z197)
 //     'inferred'   = industry knowledge, sector grouping — labeled but unverified
+//   audit: 'pending' = the link hasn't been checked against a source yet (z197: every link of the original 27 chains)
 //
 //   This is the OPPOSITE of black-box correlation analysis. The user can audit
 //   every claim by clicking through to the cited filing. New chains get added
@@ -34379,9 +34381,14 @@ document.addEventListener('DOMContentLoaded', () => {
 // ============================================================
 
 // Standard tier labels for confidence
+// z197: the 27 chains' links were all 'verified' with no per-link citation - re-labelled 'disclosed' with audit
+// 'pending' until each is checked against a filing; TRAPP2-ANALYTICS config/supply_chains.json is the source of truth
+// from here (businessweb.js adopts its audited labels at load).
 const SC_CONFIDENCE = {
-  verified:  { label: 'verified',  color: 'var(--pos)', explainer: 'Documented in 10-K supplier list or annual report' },
+  filing:    { label: 'filing',    color: 'var(--pos)', explainer: 'A 10-K / 10-Q / 8-K / S-1 says it - with the source' },
+  verified:  { label: 'filing',    color: 'var(--pos)', explainer: 'Documented in a filing (10-K supplier / customer disclosure)' },
   disclosed: { label: 'disclosed', color: '#7faaca', explainer: 'Public press release / partnership announcement' },
+  reported:  { label: 'reported',  color: '#c0a060', explainer: 'Reported by the press citing documents or people - not confirmed by the company' },
   inferred:  { label: 'inferred',  color: 'var(--data-amber)', explainer: 'Sector-knowledge inferred — unverified' },
 };
 
@@ -43420,8 +43427,16 @@ const WEB_STATE = {
 };
 
 // Build the node/edge graph from SUPPLY_CHAINS under the current lens.
+// z197: lenses 'money' / 'money:loops' draw the Business Web's money edges instead (businessweb.js - owns / funds /
+// commits / supplies / underwrites, directed the way money or value flows, loops thick).
 function buildWebGraph() {
   const lens = WEB_STATE.lens;
+  if (lens === 'money' || lens === 'money:loops') {
+    const g = (typeof window !== 'undefined' && window.BusinessWeb) ? window.BusinessWeb.graph(lens) : null;
+    WEB_STATE.nodes = g ? g.nodes : [];
+    WEB_STATE.edges = g ? g.edges : [];
+    return { nodes: WEB_STATE.nodes, edges: WEB_STATE.edges, sectorColors: {} };
+  }
   const chains = (typeof SUPPLY_CHAINS !== 'undefined' ? SUPPLY_CHAINS : []);
   const kw = lens.startsWith('kw:') ? lens.slice(3).toLowerCase() : null;
   const sectorFilter = lens.startsWith('sector:') ? lens.slice(7) : null;
@@ -43511,7 +43526,9 @@ function stepWebForces() {
   const nodes = WEB_STATE.nodes, edges = WEB_STATE.edges;
   const n = nodes.length;
   if (!n) return;
-  const REP = 1400, SPRING = 0.012, DAMP = 0.86, CENTER = 0.004;
+  // z197: the money web is small and dense (≈20 companies, many links each) - push it apart so labels don't collide
+  const money = WEB_STATE.lens === 'money' || WEB_STATE.lens === 'money:loops';
+  const REP = money ? 5200 : 1400, SPRING = 0.012, DAMP = 0.86, CENTER = money ? 0.003 : 0.004;
   // Repulsion (O(n^2) — fine for the few-hundred-node graphs here)
   for (let i = 0; i < n; i++) {
     const a = nodes[i];
@@ -43531,7 +43548,7 @@ function stepWebForces() {
     const a = nodes[e.a], b = nodes[e.b];
     let dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
     const d = Math.sqrt(dx*dx + dy*dy + dz*dz) + 0.01;
-    const target = 90;
+    const target = money ? 170 : 90;
     const f = SPRING * (d - target);
     const fx = f * dx / d, fy = f * dy / d, fz = f * dz / d;
     a.vx += fx; a.vy += fy; a.vz += fz;
@@ -43582,12 +43599,33 @@ function renderWebFrame() {
   for (const { e } of edgeList) {
     const pa = proj[e.a], pb = proj[e.b];
     const depth = (pa.scale + pb.scale) / 2;
-    ctx.strokeStyle = `rgba(150,150,160,${0.06 + depth * 0.12})`;
-    ctx.lineWidth = Math.max(0.3, e.w * 0.4 * depth);
+    if (e.col) {
+      // z197: a money edge - its type's color, an arrowhead the way money / value flows, loops thicker
+      ctx.globalAlpha = Math.min(1, (e.loop ? 0.5 : 0.28) + depth * 0.3);
+      ctx.strokeStyle = e.col;
+      ctx.lineWidth = Math.max(0.6, (e.loop ? 2.2 : 1.1) * depth);
+    } else {
+      ctx.strokeStyle = `rgba(150,150,160,${0.06 + depth * 0.12})`;
+      ctx.lineWidth = Math.max(0.3, e.w * 0.4 * depth);
+    }
     ctx.beginPath();
     ctx.moveTo(pa.sx, pa.sy);
     ctx.lineTo(pb.sx, pb.sy);
     ctx.stroke();
+    if (e.dir) {
+      const dx = pb.sx - pa.sx, dy = pb.sy - pa.sy, L = Math.hypot(dx, dy);
+      if (L > 12) {
+        const ux = dx / L, uy = dy / L, hx = pa.sx + dx * 0.72, hy = pa.sy + dy * 0.72, sz = Math.max(4, 6 * depth);
+        ctx.fillStyle = e.col || 'rgba(150,150,160,0.5)';
+        ctx.beginPath();
+        ctx.moveTo(hx + ux * sz, hy + uy * sz);
+        ctx.lineTo(hx - uy * sz * 0.55, hy + ux * sz * 0.55);
+        ctx.lineTo(hx + uy * sz * 0.55, hy - ux * sz * 0.55);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
   }
 
   // Draw nodes back-to-front
@@ -43606,7 +43644,7 @@ function renderWebFrame() {
       ctx.stroke();
     }
     // Label larger / hovered nodes
-    if (n.degree >= 3 || isHover || pp.scale > 1.05) {
+    if (n.degree >= 3 || isHover || pp.scale > 1.05 || n.money) {
       ctx.globalAlpha = Math.min(1, pp.scale);
       ctx.fillStyle = isHover ? '#fff' : 'rgba(220,215,205,0.9)';
       ctx.font = `${Math.max(8, 10 * pp.scale)}px JetBrains Mono, monospace`;
@@ -43619,20 +43657,52 @@ function renderWebFrame() {
   WEB_STATE.raf = requestAnimationFrame(renderWebFrame);
 }
 
-function fnWEB() {
-  openFnOverlay('WEB', '');
+function webLensOptionsHtml() {
   const chains = (typeof SUPPLY_CHAINS !== 'undefined' ? SUPPLY_CHAINS : []);
   const sectors = [...new Set(chains.map(c => c.sector).filter(Boolean))].sort();
-
-  const lensOptions = [
+  const sub = chains.filter(c => c.level === 'subsector'), top = chains.filter(c => c.level !== 'subsector');
+  return [
     `<option value="all">All Chains (full web)</option>`,
+    `<optgroup label="Money web (z197)">` +
+      `<option value="money">Money web — who owns / funds / buys from whom</option>` +
+      `<option value="money:loops">Money web — loops only (circular financing)</option>` +
+    `</optgroup>`,
     `<optgroup label="By Sector">` +
       sectors.map(s => `<option value="sector:${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('') +
     `</optgroup>`,
     `<optgroup label="By Supply Chain">` +
-      chains.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}</option>`).join('') +
+      top.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}</option>`).join('') +
     `</optgroup>`,
+    sub.length ? `<optgroup label="Subsector chains (z197)">` +
+      sub.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}</option>`).join('') +
+    `</optgroup>` : '',
   ].join('');
+}
+
+// z197: re-read the lens list (subsector chains merged after the overlay opened) / rebuild after the money web loads
+function webLensRefresh() {
+  const sel = document.getElementById('web-lens');
+  if (!sel) return;
+  const v = sel.value;
+  sel.innerHTML = webLensOptionsHtml();
+  sel.value = v;
+}
+function webMoneyPanel() {
+  const el = document.getElementById('web-money-panel');
+  if (!el) return;
+  const on = WEB_STATE.lens === 'money' || WEB_STATE.lens === 'money:loops';
+  el.style.display = on ? '' : 'none';
+  if (on) el.innerHTML = (window.BusinessWeb ? window.BusinessWeb.panelHtml(WEB_STATE.lens) : '<div style="padding:8px;font-family:var(--mono);font-size:10px;color:var(--ink-faint)">businessweb.js did not load - reload the page.</div>');
+}
+function webRebuild() {
+  if (!document.getElementById('web-canvas')) return;
+  buildWebGraph(); updateWebStats(); webMoneyPanel();
+}
+if (typeof window !== 'undefined') { window.webLensRefresh = webLensRefresh; window.webRebuild = webRebuild; }
+
+function fnWEB() {
+  openFnOverlay('WEB', '');
+  const lensOptions = webLensOptionsHtml();
 
   setFnOverlayBody(`
     <div style="display:flex;flex-direction:column;height:100%;min-height:560px">
@@ -43650,23 +43720,36 @@ function fnWEB() {
         <canvas id="web-canvas" style="width:100%;height:100%;display:block;cursor:grab"></canvas>
         <div id="web-tooltip" style="position:absolute;display:none;background:var(--bg);border:1px solid var(--amber);border-radius:4px;padding:8px 10px;font-family:var(--mono);font-size:11px;color:var(--ink);pointer-events:none;z-index:10;max-width:240px;line-height:1.5"></div>
         <div class="fn-corner-hint" style="position:absolute;bottom:8px;left:8px;font-family:var(--mono);font-size:9px;color:var(--ink-faint);line-height:1.5;pointer-events:none">
-          drag to rotate · node size = # chains · edges = shared chain<br>
+          drag to rotate · node size = # chains (money web: # money links) · edges = shared chain (money web: arrows = money flow)<br>
           double-click a node → valuate it
         </div>
       </div>
+      <div id="web-money-panel" style="display:none;max-height:34vh;overflow:auto;border-top:1px solid var(--rule);margin-top:6px"></div>
     </div>
   `);
 
+  const sel = document.getElementById('web-lens');
+  if (sel) sel.value = WEB_STATE.lens;
+  if (sel && sel.value !== WEB_STATE.lens) WEB_STATE.lens = 'all';   // a keyword lens isn't in the list
   buildWebGraph();
   updateWebStats();
+  webMoneyPanel();
   if (WEB_STATE.raf) cancelAnimationFrame(WEB_STATE.raf);
   WEB_STATE.raf = requestAnimationFrame(renderWebFrame);
   wireWebControls();
+  if (window.BusinessWeb) {
+    window.BusinessWeb.mergeChains().then(r => { if (r && r.added) webLensRefresh(); }).catch(() => {});
+    window.BusinessWeb.get('money').then(() => { if (WEB_STATE.lens.startsWith('money')) webRebuild(); }).catch(() => {});
+  }
 }
 
 function updateWebStats() {
   const el = document.getElementById('web-stats');
-  if (el) el.textContent = `${WEB_STATE.nodes.length} companies · ${WEB_STATE.edges.length} links`;
+  if (!el) return;
+  if (WEB_STATE.lens.startsWith('money')) {
+    const loops = WEB_STATE.edges.filter(e => e.loop).length;
+    el.textContent = WEB_STATE.nodes.length ? `${WEB_STATE.nodes.length} companies · ${WEB_STATE.edges.length} money links · ${loops} in loops` : 'money web loading…';
+  } else el.textContent = `${WEB_STATE.nodes.length} companies · ${WEB_STATE.edges.length} links`;
 }
 
 function wireWebControls() {
@@ -43680,11 +43763,11 @@ function wireWebControls() {
   if (lensSel) lensSel.addEventListener('change', () => {
     WEB_STATE.lens = lensSel.value;
     if (kwInput) kwInput.value = '';
-    buildWebGraph(); updateWebStats();
+    buildWebGraph(); updateWebStats(); webMoneyPanel();
   });
   const applyKw = () => {
     const v = (kwInput.value || '').trim();
-    if (v) { WEB_STATE.lens = 'kw:' + v; buildWebGraph(); updateWebStats(); }
+    if (v) { WEB_STATE.lens = 'kw:' + v; buildWebGraph(); updateWebStats(); webMoneyPanel(); }
   };
   if (kwGo) kwGo.addEventListener('click', applyKw);
   if (kwInput) kwInput.addEventListener('keydown', e => { if (e.key === 'Enter') applyKw(); });
@@ -43715,9 +43798,10 @@ function wireWebControls() {
         if (best >= 0 && tip) {
           const n = WEB_STATE.nodes[best];
           tip.style.display = 'block';
-          tip.style.left = Math.min(mx + 14, rect.width - 240) + 'px';
+          tip.style.left = Math.max(0, Math.min(mx + 14, rect.width - (n.money ? 340 : 240))) + 'px';
           tip.style.top = (my + 14) + 'px';
-          tip.innerHTML = `<strong style="color:var(--amber)">${escapeHtml(n.ticker)}</strong> · ${escapeHtml(n.name)}<br>
+          tip.style.maxWidth = n.money ? '340px' : '240px';
+          tip.innerHTML = (n.money && window.BusinessWeb) ? window.BusinessWeb.tooltip(n) : `<strong style="color:var(--amber)">${escapeHtml(n.ticker)}</strong> · ${escapeHtml(n.name)}<br>
             <span style="color:var(--ink-dim)">${escapeHtml(n.sector)}</span><br>
             In ${n.chains.size} chain${n.chains.size === 1 ? '' : 's'}: ${escapeHtml([...n.chains].slice(0,4).join(', '))}${n.chains.size > 4 ? '…' : ''}`;
         } else if (tip) {
@@ -43753,34 +43837,34 @@ const SUPPLY_CHAINS = [
     sector: 'Technology',
     description: 'From EUV photolithography equipment and silicon wafers through TSMC foundry to AI accelerators and cloud GPU servers.',
     upstream: [
-      { ticker: 'ASML', role: 'EUV lithography equipment monopoly', confidence: 'verified' },
-      { ticker: 'AMAT', role: 'Deposition / etch / inspection equipment', confidence: 'verified' },
-      { ticker: 'LRCX', role: 'Wafer etch / fabrication equipment', confidence: 'verified' },
-      { ticker: 'KLAC', role: 'Process control / metrology', confidence: 'verified' },
-      { ticker: 'TOELY', role: 'Tokyo Electron — coater / developer (foreign listing)', confidence: 'verified' },
-      { ticker: '4063.T', name: 'Shin-Etsu Chemical', alias: ['SHECY'], role: 'Silicon wafers / chemicals (Japan)', confidence: 'verified' },
-      { ticker: '3436.T', name: 'SUMCO Corporation', alias: ['SUOPY'], role: 'Silicon wafer producer (Japan)', confidence: 'verified' },
+      { ticker: 'ASML', role: 'EUV lithography equipment monopoly', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AMAT', role: 'Deposition / etch / inspection equipment', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'LRCX', role: 'Wafer etch / fabrication equipment', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'KLAC', role: 'Process control / metrology', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'TOELY', role: 'Tokyo Electron — coater / developer (foreign listing)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: '4063.T', name: 'Shin-Etsu Chemical', alias: ['SHECY'], role: 'Silicon wafers / chemicals (Japan)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: '3436.T', name: 'SUMCO Corporation', alias: ['SUOPY'], role: 'Silicon wafer producer (Japan)', confidence: 'disclosed', audit: 'pending' },
     ],
     midstream: [
-      { ticker: 'TSM', role: 'Leading-edge foundry (5nm/3nm/2nm node)', confidence: 'verified' },
-      { ticker: 'INTC', role: 'IDM (own fabs + foundry services)', confidence: 'verified' },
-      { ticker: '005930.KS', name: 'Samsung Foundry', alias: ['SSNLF'], role: 'Memory + logic foundry (Korea — Samsung Electronics parent)', confidence: 'verified' },
-      { ticker: 'GFS', role: 'GlobalFoundries — mature/specialty nodes', confidence: 'verified' },
-      { ticker: 'UMC', role: 'United Microelectronics — mature nodes', confidence: 'verified' },
+      { ticker: 'TSM', role: 'Leading-edge foundry (5nm/3nm/2nm node)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'INTC', role: 'IDM (own fabs + foundry services)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: '005930.KS', name: 'Samsung Foundry', alias: ['SSNLF'], role: 'Memory + logic foundry (Korea — Samsung Electronics parent)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GFS', role: 'GlobalFoundries — mature/specialty nodes', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'UMC', role: 'United Microelectronics — mature nodes', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
-      { ticker: 'NVDA', role: 'GPU / AI accelerator design (fabless)', confidence: 'verified' },
-      { ticker: 'AMD',  role: 'CPU / GPU / DPU (fabless)', confidence: 'verified' },
-      { ticker: 'AAPL', role: 'M-series silicon for Macs/iPhones (fabless)', confidence: 'verified' },
-      { ticker: 'AVGO', role: 'Custom ASICs for hyperscalers', confidence: 'verified' },
-      { ticker: 'QCOM', role: 'Mobile SoCs (Snapdragon)', confidence: 'verified' },
-      { ticker: 'ARM',  role: 'IP licensing — core architecture', confidence: 'verified' },
-      { ticker: 'MRVL', role: 'Custom silicon / networking', confidence: 'verified' },
+      { ticker: 'NVDA', role: 'GPU / AI accelerator design (fabless)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AMD',  role: 'CPU / GPU / DPU (fabless)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AAPL', role: 'M-series silicon for Macs/iPhones (fabless)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AVGO', role: 'Custom ASICs for hyperscalers', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'QCOM', role: 'Mobile SoCs (Snapdragon)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ARM',  role: 'IP licensing — core architecture', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'MRVL', role: 'Custom silicon / networking', confidence: 'disclosed', audit: 'pending' },
       // Hyperscale buyers of the chips
-      { ticker: 'MSFT', role: 'Azure datacenter consumption', confidence: 'verified' },
-      { ticker: 'GOOGL',role: 'Google Cloud + TPU consumption', confidence: 'verified' },
-      { ticker: 'AMZN', role: 'AWS datacenter consumption', confidence: 'verified' },
-      { ticker: 'META', role: 'AI training datacenters', confidence: 'verified' },
+      { ticker: 'MSFT', role: 'Azure datacenter consumption', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GOOGL',role: 'Google Cloud + TPU consumption', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AMZN', role: 'AWS datacenter consumption', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'META', role: 'AI training datacenters', confidence: 'disclosed', audit: 'pending' },
       { ticker: 'ORCL', role: 'Oracle Cloud Infrastructure', confidence: 'disclosed' },
     ],
     citations: [
@@ -43797,46 +43881,46 @@ const SUPPLY_CHAINS = [
     sector: 'Energy',
     description: 'Wellhead production through refining and pipelines to gasoline/diesel retail and petrochemicals.',
     upstream: [
-      { ticker: 'XOM',  role: 'Integrated major — upstream E&P', confidence: 'verified' },
-      { ticker: 'CVX',  role: 'Integrated major — upstream E&P', confidence: 'verified' },
-      { ticker: 'COP',  role: 'Pure E&P (no refining)', confidence: 'verified' },
-      { ticker: 'EOG',  role: 'Shale E&P', confidence: 'verified' },
-      { ticker: 'OXY',  role: 'Permian Basin shale', confidence: 'verified' },
-      { ticker: 'PXD',  role: 'Permian shale (acquired by XOM 2024)', confidence: 'verified' },
-      { ticker: 'DVN',  role: 'Multi-basin shale', confidence: 'verified' },
-      { ticker: 'FANG', role: 'Permian shale', confidence: 'verified' },
-      { ticker: 'HES',  role: 'Guyana offshore E&P', confidence: 'verified' },
-      { ticker: '2222.SR', name: 'Saudi Aramco', role: 'World\'s largest producer (Saudi)', confidence: 'verified' },
-      { name: 'OPEC / Russia', role: 'Production allocation cartel', confidence: 'verified' },
+      { ticker: 'XOM',  role: 'Integrated major — upstream E&P', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CVX',  role: 'Integrated major — upstream E&P', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'COP',  role: 'Pure E&P (no refining)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'EOG',  role: 'Shale E&P', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'OXY',  role: 'Permian Basin shale', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'PXD',  role: 'Permian shale (acquired by XOM 2024)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'DVN',  role: 'Multi-basin shale', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'FANG', role: 'Permian shale', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'HES',  role: 'Guyana offshore E&P', confidence: 'disclosed', audit: 'pending' },
+      { ticker: '2222.SR', name: 'Saudi Aramco', role: 'World\'s largest producer (Saudi)', confidence: 'disclosed', audit: 'pending' },
+      { name: 'OPEC / Russia', role: 'Production allocation cartel', confidence: 'disclosed', audit: 'pending' },
     ],
     midstream: [
-      { ticker: 'SLB',  role: 'Oilfield services — drilling tech', confidence: 'verified' },
-      { ticker: 'HAL',  role: 'Oilfield services — fracking / completions', confidence: 'verified' },
-      { ticker: 'BKR',  role: 'Baker Hughes — services + LNG equipment', confidence: 'verified' },
-      { ticker: 'KMI',  role: 'Kinder Morgan — pipelines', confidence: 'verified' },
-      { ticker: 'WMB',  role: 'Williams — natgas pipelines', confidence: 'verified' },
-      { ticker: 'OKE',  role: 'Oneok — NGL midstream', confidence: 'verified' },
-      { ticker: 'PSX',  role: 'Phillips 66 — refining + midstream', confidence: 'verified' },
-      { ticker: 'MPC',  role: 'Marathon Petroleum — refining', confidence: 'verified' },
-      { ticker: 'VLO',  role: 'Valero — refining', confidence: 'verified' },
+      { ticker: 'SLB',  role: 'Oilfield services — drilling tech', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'HAL',  role: 'Oilfield services — fracking / completions', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'BKR',  role: 'Baker Hughes — services + LNG equipment', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'KMI',  role: 'Kinder Morgan — pipelines', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'WMB',  role: 'Williams — natgas pipelines', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'OKE',  role: 'Oneok — NGL midstream', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'PSX',  role: 'Phillips 66 — refining + midstream', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'MPC',  role: 'Marathon Petroleum — refining', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'VLO',  role: 'Valero — refining', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
-      { ticker: 'XOM',  role: 'ExxonMobil-branded retail', confidence: 'verified' },
-      { ticker: 'CVX',  role: 'Chevron-branded retail', confidence: 'verified' },
-      { ticker: 'SHEL', role: 'Shell — retail + chemicals', confidence: 'verified' },
-      { ticker: 'BP',   role: 'BP — retail (ARCO/Amoco)', confidence: 'verified' },
+      { ticker: 'XOM',  role: 'ExxonMobil-branded retail', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CVX',  role: 'Chevron-branded retail', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SHEL', role: 'Shell — retail + chemicals', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'BP',   role: 'BP — retail (ARCO/Amoco)', confidence: 'disclosed', audit: 'pending' },
       // Major consumer industries
-      { ticker: 'DAL',  role: 'Delta Air Lines — jet fuel consumer', confidence: 'verified' },
-      { ticker: 'UAL',  role: 'United — jet fuel consumer', confidence: 'verified' },
-      { ticker: 'AAL',  role: 'American — jet fuel consumer', confidence: 'verified' },
-      { ticker: 'LUV',  role: 'Southwest — jet fuel consumer', confidence: 'verified' },
-      { ticker: 'FDX',  role: 'FedEx — diesel/jet fuel', confidence: 'verified' },
-      { ticker: 'UPS',  role: 'UPS — diesel', confidence: 'verified' },
-      { ticker: 'UNP',  role: 'Union Pacific — diesel for locomotives', confidence: 'verified' },
-      { ticker: 'CSX',  role: 'CSX railroads — diesel', confidence: 'verified' },
-      { ticker: 'NSC',  role: 'Norfolk Southern — diesel', confidence: 'verified' },
-      { ticker: 'DOW',  role: 'Petrochemical feedstock', confidence: 'verified' },
-      { ticker: 'LYB',  role: 'LyondellBasell — petchem', confidence: 'verified' },
+      { ticker: 'DAL',  role: 'Delta Air Lines — jet fuel consumer', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'UAL',  role: 'United — jet fuel consumer', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AAL',  role: 'American — jet fuel consumer', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'LUV',  role: 'Southwest — jet fuel consumer', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'FDX',  role: 'FedEx — diesel/jet fuel', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'UPS',  role: 'UPS — diesel', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'UNP',  role: 'Union Pacific — diesel for locomotives', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CSX',  role: 'CSX railroads — diesel', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'NSC',  role: 'Norfolk Southern — diesel', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'DOW',  role: 'Petrochemical feedstock', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'LYB',  role: 'LyondellBasell — petchem', confidence: 'disclosed', audit: 'pending' },
     ],
     citations: [
       'EIA Refinery Capacity Report (annual)',
@@ -43852,41 +43936,41 @@ const SUPPLY_CHAINS = [
     sector: 'Consumer Discretionary / Industrials',
     description: 'Lithium / nickel / cobalt mining through cell manufacturing to vehicle assembly and charging infrastructure.',
     upstream: [
-      { ticker: 'ALB',  role: 'Albemarle — lithium producer', confidence: 'verified' },
-      { ticker: 'SQM',  role: 'Sociedad Química — Chile lithium', confidence: 'verified' },
-      { ticker: 'LTHM', role: 'Livent — lithium (now Arcadium)', confidence: 'verified' },
-      { ticker: 'FCX',  role: 'Freeport-McMoRan — copper (EV wiring)', confidence: 'verified' },
-      { ticker: 'VALE', role: 'Vale — nickel + iron', confidence: 'verified' },
-      { ticker: 'BHP',  role: 'BHP — copper + nickel', confidence: 'verified' },
-      { ticker: 'GLEN.L', name: 'Glencore', alias: ['GLNCY'], role: 'Cobalt + copper (UK listing)', confidence: 'verified' },
+      { ticker: 'ALB',  role: 'Albemarle — lithium producer', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SQM',  role: 'Sociedad Química — Chile lithium', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'LTHM', role: 'Livent — lithium (now Arcadium)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'FCX',  role: 'Freeport-McMoRan — copper (EV wiring)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'VALE', role: 'Vale — nickel + iron', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'BHP',  role: 'BHP — copper + nickel', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GLEN.L', name: 'Glencore', alias: ['GLNCY'], role: 'Cobalt + copper (UK listing)', confidence: 'disclosed', audit: 'pending' },
       { name: 'Chinese rare earth producers', role: 'Magnet materials (CMOC, etc.)', confidence: 'disclosed' },
     ],
     midstream: [
-      { ticker: '300750.SZ', name: 'CATL', alias: ['CATL.F'], role: 'Contemporary Amperex — global cell leader (China)', confidence: 'verified' },
-      { ticker: '1211.HK', name: 'BYD', alias: ['BYDDY', 'BYDDF'], role: 'BYD batteries — own + supplied to others (China)', confidence: 'verified' },
-      { ticker: '373220.KS', name: 'LG Energy Solution', role: 'Cell maker (Korea)', confidence: 'verified' },
-      { ticker: '006400.KS', name: 'Samsung SDI', role: 'Cell maker (Korea)', confidence: 'verified' },
-      { ticker: '6752.T', name: 'Panasonic Energy', alias: ['PCRFY'], role: 'Cell maker — Tesla\'s long-time partner (Japan)', confidence: 'verified' },
+      { ticker: '300750.SZ', name: 'CATL', alias: ['CATL.F'], role: 'Contemporary Amperex — global cell leader (China)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: '1211.HK', name: 'BYD', alias: ['BYDDY', 'BYDDF'], role: 'BYD batteries — own + supplied to others (China)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: '373220.KS', name: 'LG Energy Solution', role: 'Cell maker (Korea)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: '006400.KS', name: 'Samsung SDI', role: 'Cell maker (Korea)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: '6752.T', name: 'Panasonic Energy', alias: ['PCRFY'], role: 'Cell maker — Tesla\'s long-time partner (Japan)', confidence: 'disclosed', audit: 'pending' },
       { ticker: 'TSLA', role: 'In-house cell production (4680)', confidence: 'disclosed' },
       { ticker: 'ENVX', role: 'Solid-state battery R&D', confidence: 'disclosed' },
       { ticker: 'QS',   role: 'QuantumScape — solid-state R&D', confidence: 'disclosed' },
     ],
     downstream: [
-      { ticker: 'TSLA', role: 'Tesla EVs', confidence: 'verified' },
-      { ticker: '1211.HK', name: 'BYD', alias: ['BYDDY', 'BYDDF'], role: 'BYD EVs (China)', confidence: 'verified' },
-      { ticker: 'GM',   role: 'Chevy Bolt, Cadillac Lyriq', confidence: 'verified' },
-      { ticker: 'F',    role: 'Mustang Mach-E, F-150 Lightning', confidence: 'verified' },
-      { ticker: 'RIVN', role: 'Rivian — trucks/SUVs', confidence: 'verified' },
-      { ticker: 'LCID', role: 'Lucid Motors — luxury sedans', confidence: 'verified' },
-      { ticker: 'TM',   role: 'Toyota — hybrids + EVs', confidence: 'verified' },
-      { ticker: 'HMC',  role: 'Honda', confidence: 'verified' },
-      { ticker: 'STLA', role: 'Stellantis (Jeep / RAM EVs)', confidence: 'verified' },
-      { name: 'Volkswagen Group / BMW / Mercedes', role: 'German EV programs', confidence: 'verified' },
-      { name: 'Hyundai / Kia', role: 'Ioniq, EV6, etc. (Korea)', confidence: 'verified' },
+      { ticker: 'TSLA', role: 'Tesla EVs', confidence: 'disclosed', audit: 'pending' },
+      { ticker: '1211.HK', name: 'BYD', alias: ['BYDDY', 'BYDDF'], role: 'BYD EVs (China)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GM',   role: 'Chevy Bolt, Cadillac Lyriq', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'F',    role: 'Mustang Mach-E, F-150 Lightning', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'RIVN', role: 'Rivian — trucks/SUVs', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'LCID', role: 'Lucid Motors — luxury sedans', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'TM',   role: 'Toyota — hybrids + EVs', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'HMC',  role: 'Honda', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'STLA', role: 'Stellantis (Jeep / RAM EVs)', confidence: 'disclosed', audit: 'pending' },
+      { name: 'Volkswagen Group / BMW / Mercedes', role: 'German EV programs', confidence: 'disclosed', audit: 'pending' },
+      { name: 'Hyundai / Kia', role: 'Ioniq, EV6, etc. (Korea)', confidence: 'disclosed', audit: 'pending' },
       // Charging infrastructure
-      { ticker: 'CHPT', role: 'ChargePoint — DC fast charging', confidence: 'verified' },
-      { ticker: 'EVGO', role: 'EVgo — public charging network', confidence: 'verified' },
-      { ticker: 'BLNK', role: 'Blink — charging hardware', confidence: 'verified' },
+      { ticker: 'CHPT', role: 'ChargePoint — DC fast charging', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'EVGO', role: 'EVgo — public charging network', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'BLNK', role: 'Blink — charging hardware', confidence: 'disclosed', audit: 'pending' },
     ],
     citations: [
       'Tesla 10-K — battery supplier disclosures',
@@ -43902,47 +43986,47 @@ const SUPPLY_CHAINS = [
     sector: 'Technology',
     description: 'Datacenter REITs and power providers through hyperscaler clouds to SaaS and enterprise software.',
     upstream: [
-      { ticker: 'EQIX', role: 'Equinix — colocation datacenter REIT', confidence: 'verified' },
-      { ticker: 'DLR',  role: 'Digital Realty — datacenter REIT', confidence: 'verified' },
+      { ticker: 'EQIX', role: 'Equinix — colocation datacenter REIT', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'DLR',  role: 'Digital Realty — datacenter REIT', confidence: 'disclosed', audit: 'pending' },
       // Power
       { ticker: 'NEE',  role: 'NextEra — renewable power for datacenters', confidence: 'disclosed' },
       { ticker: 'CEG',  role: 'Constellation — nuclear power supplier', confidence: 'disclosed' },
       { ticker: 'VST',  role: 'Vistra — power for datacenters', confidence: 'disclosed' },
       // Networking
-      { ticker: 'ANET', role: 'Arista — datacenter switches', confidence: 'verified' },
-      { ticker: 'CSCO', role: 'Cisco — networking', confidence: 'verified' },
-      { ticker: 'NVDA', role: 'Mellanox networking — InfiniBand/Spectrum', confidence: 'verified' },
+      { ticker: 'ANET', role: 'Arista — datacenter switches', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CSCO', role: 'Cisco — networking', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'NVDA', role: 'Mellanox networking — InfiniBand/Spectrum', confidence: 'disclosed', audit: 'pending' },
       // Power components
-      { ticker: 'VRT',  role: 'Vertiv — datacenter cooling/power', confidence: 'verified' },
+      { ticker: 'VRT',  role: 'Vertiv — datacenter cooling/power', confidence: 'disclosed', audit: 'pending' },
       { ticker: 'ETN',  role: 'Eaton — datacenter electrical', confidence: 'disclosed' },
     ],
     midstream: [
-      { ticker: 'AMZN', role: 'AWS — largest cloud', confidence: 'verified' },
-      { ticker: 'MSFT', role: 'Azure', confidence: 'verified' },
-      { ticker: 'GOOGL',role: 'Google Cloud Platform', confidence: 'verified' },
-      { ticker: 'ORCL', role: 'Oracle Cloud Infrastructure', confidence: 'verified' },
-      { ticker: 'IBM',  role: 'IBM Cloud', confidence: 'verified' },
+      { ticker: 'AMZN', role: 'AWS — largest cloud', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'MSFT', role: 'Azure', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GOOGL',role: 'Google Cloud Platform', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ORCL', role: 'Oracle Cloud Infrastructure', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'IBM',  role: 'IBM Cloud', confidence: 'disclosed', audit: 'pending' },
       // CDN
-      { ticker: 'NET',  role: 'Cloudflare — CDN + edge', confidence: 'verified' },
-      { ticker: 'AKAM', role: 'Akamai — CDN', confidence: 'verified' },
-      { ticker: 'FSLY', role: 'Fastly — edge', confidence: 'verified' },
+      { ticker: 'NET',  role: 'Cloudflare — CDN + edge', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AKAM', role: 'Akamai — CDN', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'FSLY', role: 'Fastly — edge', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
       // Major SaaS apps that depend on cloud
-      { ticker: 'CRM',  role: 'Salesforce', confidence: 'verified' },
-      { ticker: 'NOW',  role: 'ServiceNow', confidence: 'verified' },
-      { ticker: 'WDAY', role: 'Workday', confidence: 'verified' },
-      { ticker: 'SNOW', role: 'Snowflake (built on AWS/Azure/GCP)', confidence: 'verified' },
-      { ticker: 'DDOG', role: 'Datadog (monitoring SaaS)', confidence: 'verified' },
-      { ticker: 'TEAM', role: 'Atlassian', confidence: 'verified' },
-      { ticker: 'ADBE', role: 'Adobe Creative Cloud', confidence: 'verified' },
-      { ticker: 'NFLX', role: 'Netflix streaming (AWS heavy)', confidence: 'verified' },
-      { ticker: 'SPOT', role: 'Spotify streaming', confidence: 'verified' },
-      { ticker: 'MDB',  role: 'MongoDB', confidence: 'verified' },
-      { ticker: 'PLTR', role: 'Palantir', confidence: 'verified' },
-      { ticker: 'CRWD', role: 'CrowdStrike (cloud security)', confidence: 'verified' },
-      { ticker: 'PANW', role: 'Palo Alto Networks (cloud security)', confidence: 'verified' },
-      { ticker: 'ZS',   role: 'Zscaler (cloud security)', confidence: 'verified' },
+      { ticker: 'CRM',  role: 'Salesforce', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'NOW',  role: 'ServiceNow', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'WDAY', role: 'Workday', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SNOW', role: 'Snowflake (built on AWS/Azure/GCP)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'DDOG', role: 'Datadog (monitoring SaaS)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'TEAM', role: 'Atlassian', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ADBE', role: 'Adobe Creative Cloud', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'NFLX', role: 'Netflix streaming (AWS heavy)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SPOT', role: 'Spotify streaming', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'MDB',  role: 'MongoDB', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'PLTR', role: 'Palantir', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CRWD', role: 'CrowdStrike (cloud security)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'PANW', role: 'Palo Alto Networks (cloud security)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ZS',   role: 'Zscaler (cloud security)', confidence: 'disclosed', audit: 'pending' },
     ],
     citations: [
       'Each hyperscaler\'s 10-K — capex disclosure',
@@ -43957,41 +44041,41 @@ const SUPPLY_CHAINS = [
     sector: 'Consumer Discretionary',
     description: 'Steel/aluminum/electronics through OEM tier-1 suppliers to vehicle assembly and dealer networks.',
     upstream: [
-      { ticker: 'NUE',  role: 'Nucor — steel', confidence: 'verified' },
-      { ticker: 'STLD', role: 'Steel Dynamics — auto steel', confidence: 'verified' },
-      { ticker: 'X',    role: 'US Steel', confidence: 'verified' },
-      { ticker: 'AA',   role: 'Alcoa — aluminum', confidence: 'verified' },
+      { ticker: 'NUE',  role: 'Nucor — steel', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'STLD', role: 'Steel Dynamics — auto steel', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'X',    role: 'US Steel', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AA',   role: 'Alcoa — aluminum', confidence: 'disclosed', audit: 'pending' },
       // Semis (autos increasingly chip-heavy)
-      { ticker: 'NXPI', role: 'NXP — auto MCUs', confidence: 'verified' },
-      { ticker: 'STM',  role: 'STMicroelectronics — auto', confidence: 'verified' },
-      { ticker: 'MCHP', role: 'Microchip — auto MCUs', confidence: 'verified' },
-      { ticker: 'ADI',  role: 'Analog Devices — auto signal chain', confidence: 'verified' },
-      { ticker: 'TXN',  role: 'Texas Instruments — analog/auto', confidence: 'verified' },
-      { ticker: 'ON',   role: 'ON Semi — auto power', confidence: 'verified' },
+      { ticker: 'NXPI', role: 'NXP — auto MCUs', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'STM',  role: 'STMicroelectronics — auto', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'MCHP', role: 'Microchip — auto MCUs', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ADI',  role: 'Analog Devices — auto signal chain', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'TXN',  role: 'Texas Instruments — analog/auto', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ON',   role: 'ON Semi — auto power', confidence: 'disclosed', audit: 'pending' },
     ],
     midstream: [
       // Tier-1 suppliers
-      { ticker: 'APTV', role: 'Aptiv — electrical/safety systems', confidence: 'verified' },
-      { ticker: 'BWA',  role: 'BorgWarner — drivetrain', confidence: 'verified' },
-      { ticker: 'LEA',  role: 'Lear — seating + electronics', confidence: 'verified' },
-      { ticker: 'MGA',  role: 'Magna International — body/exteriors', confidence: 'verified' },
-      { ticker: 'DAN',  role: 'Dana — drivetrain', confidence: 'verified' },
-      { ticker: 'AXL',  role: 'American Axle', confidence: 'verified' },
-      { name: 'Bosch / Continental / ZF / Denso', role: 'Tier-1 giants (foreign)', confidence: 'verified' },
+      { ticker: 'APTV', role: 'Aptiv — electrical/safety systems', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'BWA',  role: 'BorgWarner — drivetrain', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'LEA',  role: 'Lear — seating + electronics', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'MGA',  role: 'Magna International — body/exteriors', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'DAN',  role: 'Dana — drivetrain', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AXL',  role: 'American Axle', confidence: 'disclosed', audit: 'pending' },
+      { name: 'Bosch / Continental / ZF / Denso', role: 'Tier-1 giants (foreign)', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
-      { ticker: 'F',    role: 'Ford', confidence: 'verified' },
-      { ticker: 'GM',   role: 'General Motors', confidence: 'verified' },
-      { ticker: 'STLA', role: 'Stellantis (Jeep, RAM, Chrysler)', confidence: 'verified' },
-      { ticker: 'TM',   role: 'Toyota', confidence: 'verified' },
-      { ticker: 'HMC',  role: 'Honda', confidence: 'verified' },
-      { name: 'Volkswagen / BMW / Mercedes-Benz', role: 'German OEMs', confidence: 'verified' },
-      { name: 'Hyundai / Kia', role: 'Korean OEMs', confidence: 'verified' },
+      { ticker: 'F',    role: 'Ford', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GM',   role: 'General Motors', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'STLA', role: 'Stellantis (Jeep, RAM, Chrysler)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'TM',   role: 'Toyota', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'HMC',  role: 'Honda', confidence: 'disclosed', audit: 'pending' },
+      { name: 'Volkswagen / BMW / Mercedes-Benz', role: 'German OEMs', confidence: 'disclosed', audit: 'pending' },
+      { name: 'Hyundai / Kia', role: 'Korean OEMs', confidence: 'disclosed', audit: 'pending' },
       // Dealer networks
-      { ticker: 'AN',   role: 'AutoNation — dealer group', confidence: 'verified' },
-      { ticker: 'PAG',  role: 'Penske Automotive', confidence: 'verified' },
-      { ticker: 'GPI',  role: 'Group 1 Automotive', confidence: 'verified' },
-      { ticker: 'KMX',  role: 'CarMax — used cars', confidence: 'verified' },
+      { ticker: 'AN',   role: 'AutoNation — dealer group', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'PAG',  role: 'Penske Automotive', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GPI',  role: 'Group 1 Automotive', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'KMX',  role: 'CarMax — used cars', confidence: 'disclosed', audit: 'pending' },
     ],
     citations: [
       'OEM 10-Ks — supplier list & supplier concentration',
@@ -44007,40 +44091,40 @@ const SUPPLY_CHAINS = [
     description: 'Active ingredient manufacturers (CMOs) through branded pharma to PBMs and pharmacies.',
     upstream: [
       // CMOs / CDMOs (contract manufacturers)
-      { ticker: 'CTLT', role: 'Catalent — CDMO', confidence: 'verified' },
-      { name: 'Lonza', role: 'Lonza — Swiss CDMO (foreign)', confidence: 'verified' },
-      { ticker: 'TMO',  role: 'Thermo Fisher — bioproduction', confidence: 'verified' },
-      { ticker: 'DHR',  role: 'Danaher — Cytiva bioprocess', confidence: 'verified' },
+      { ticker: 'CTLT', role: 'Catalent — CDMO', confidence: 'disclosed', audit: 'pending' },
+      { name: 'Lonza', role: 'Lonza — Swiss CDMO (foreign)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'TMO',  role: 'Thermo Fisher — bioproduction', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'DHR',  role: 'Danaher — Cytiva bioprocess', confidence: 'disclosed', audit: 'pending' },
       // Equipment
-      { ticker: 'A',    role: 'Agilent — lab instrumentation', confidence: 'verified' },
-      { ticker: 'WAT',  role: 'Waters — analytical instruments', confidence: 'verified' },
-      { ticker: 'BIO',  role: 'Bio-Rad', confidence: 'verified' },
+      { ticker: 'A',    role: 'Agilent — lab instrumentation', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'WAT',  role: 'Waters — analytical instruments', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'BIO',  role: 'Bio-Rad', confidence: 'disclosed', audit: 'pending' },
     ],
     midstream: [
-      { ticker: 'PFE',  role: 'Pfizer', confidence: 'verified' },
-      { ticker: 'MRK',  role: 'Merck (Keytruda)', confidence: 'verified' },
-      { ticker: 'LLY',  role: 'Eli Lilly (GLP-1s)', confidence: 'verified' },
-      { ticker: 'ABBV', role: 'AbbVie (Humira / Skyrizi)', confidence: 'verified' },
-      { ticker: 'JNJ',  role: 'J&J pharma', confidence: 'verified' },
-      { ticker: 'NVO',  role: 'Novo Nordisk (Ozempic / Wegovy)', confidence: 'verified' },
-      { ticker: 'AZN',  role: 'AstraZeneca', confidence: 'verified' },
-      { ticker: 'NVS',  role: 'Novartis', confidence: 'verified' },
-      { ticker: 'GSK',  role: 'GlaxoSmithKline', confidence: 'verified' },
-      { ticker: 'BMY',  role: 'Bristol-Myers Squibb', confidence: 'verified' },
-      { ticker: 'AMGN', role: 'Amgen (biologics)', confidence: 'verified' },
-      { ticker: 'GILD', role: 'Gilead', confidence: 'verified' },
-      { ticker: 'REGN', role: 'Regeneron', confidence: 'verified' },
-      { ticker: 'VRTX', role: 'Vertex (CF franchise)', confidence: 'verified' },
+      { ticker: 'PFE',  role: 'Pfizer', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'MRK',  role: 'Merck (Keytruda)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'LLY',  role: 'Eli Lilly (GLP-1s)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ABBV', role: 'AbbVie (Humira / Skyrizi)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'JNJ',  role: 'J&J pharma', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'NVO',  role: 'Novo Nordisk (Ozempic / Wegovy)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AZN',  role: 'AstraZeneca', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'NVS',  role: 'Novartis', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GSK',  role: 'GlaxoSmithKline', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'BMY',  role: 'Bristol-Myers Squibb', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AMGN', role: 'Amgen (biologics)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GILD', role: 'Gilead', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'REGN', role: 'Regeneron', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'VRTX', role: 'Vertex (CF franchise)', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
       // PBMs / Distributors
-      { ticker: 'MCK',  role: 'McKesson — drug distribution', confidence: 'verified' },
-      { ticker: 'CAH',  role: 'Cardinal Health — distribution', confidence: 'verified' },
-      { ticker: 'COR',  role: 'Cencora (was AmerisourceBergen)', confidence: 'verified' },
-      { ticker: 'CVS',  role: 'CVS Health — pharmacy + Caremark PBM + Aetna', confidence: 'verified' },
-      { ticker: 'WBA',  role: 'Walgreens — pharmacy', confidence: 'verified' },
-      { ticker: 'UNH',  role: 'UnitedHealth — OptumRx PBM', confidence: 'verified' },
-      { ticker: 'CI',   role: 'Cigna — Express Scripts PBM', confidence: 'verified' },
+      { ticker: 'MCK',  role: 'McKesson — drug distribution', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CAH',  role: 'Cardinal Health — distribution', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'COR',  role: 'Cencora (was AmerisourceBergen)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CVS',  role: 'CVS Health — pharmacy + Caremark PBM + Aetna', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'WBA',  role: 'Walgreens — pharmacy', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'UNH',  role: 'UnitedHealth — OptumRx PBM', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CI',   role: 'Cigna — Express Scripts PBM', confidence: 'disclosed', audit: 'pending' },
     ],
     citations: [
       'Pharma 10-Ks — top-product revenue concentration',
@@ -44056,53 +44140,53 @@ const SUPPLY_CHAINS = [
     description: 'Fertilizer/seed/equipment makers through grain traders and food processors to packaged-food brands and grocery.',
     upstream: [
       // Fertilizer
-      { ticker: 'NTR',  role: 'Nutrien — potash + nitrogen', confidence: 'verified' },
-      { ticker: 'CF',   role: 'CF Industries — nitrogen', confidence: 'verified' },
-      { ticker: 'MOS',  role: 'Mosaic — phosphate + potash', confidence: 'verified' },
+      { ticker: 'NTR',  role: 'Nutrien — potash + nitrogen', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CF',   role: 'CF Industries — nitrogen', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'MOS',  role: 'Mosaic — phosphate + potash', confidence: 'disclosed', audit: 'pending' },
       // Seeds
-      { ticker: 'CTVA', role: 'Corteva — seeds + crop protection', confidence: 'verified' },
+      { ticker: 'CTVA', role: 'Corteva — seeds + crop protection', confidence: 'disclosed', audit: 'pending' },
       // Equipment
-      { ticker: 'DE',   role: 'John Deere — tractors/combines', confidence: 'verified' },
-      { ticker: 'AGCO', role: 'AGCO — agricultural equipment', confidence: 'verified' },
-      { ticker: 'CNHI', role: 'CNH Industrial', confidence: 'verified' },
+      { ticker: 'DE',   role: 'John Deere — tractors/combines', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AGCO', role: 'AGCO — agricultural equipment', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CNHI', role: 'CNH Industrial', confidence: 'disclosed', audit: 'pending' },
     ],
     midstream: [
       // Grain trading + processing
-      { ticker: 'ADM',  role: 'Archer-Daniels-Midland — grain trader/processor', confidence: 'verified' },
-      { ticker: 'BG',   role: 'Bunge — grain/oilseeds', confidence: 'verified' },
-      { name: 'Cargill', alias: [], role: 'Cargill — private; world\'s largest agribusiness', confidence: 'verified' },
-      { name: 'COFCO',  alias: [], role: 'COFCO — Chinese state agribusiness (HK-listed subs: 0506.HK, 0606.HK)', confidence: 'verified' },
+      { ticker: 'ADM',  role: 'Archer-Daniels-Midland — grain trader/processor', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'BG',   role: 'Bunge — grain/oilseeds', confidence: 'disclosed', audit: 'pending' },
+      { name: 'Cargill', alias: [], role: 'Cargill — private; world\'s largest agribusiness', confidence: 'disclosed', audit: 'pending' },
+      { name: 'COFCO',  alias: [], role: 'COFCO — Chinese state agribusiness (HK-listed subs: 0506.HK, 0606.HK)', confidence: 'disclosed', audit: 'pending' },
       // Meat processing
-      { ticker: 'TSN',  role: 'Tyson Foods — chicken/beef/pork', confidence: 'verified' },
-      { ticker: 'PPC',  role: 'Pilgrim\'s Pride — chicken', confidence: 'verified' },
-      { ticker: 'HRL',  role: 'Hormel — pork + branded foods', confidence: 'verified' },
+      { ticker: 'TSN',  role: 'Tyson Foods — chicken/beef/pork', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'PPC',  role: 'Pilgrim\'s Pride — chicken', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'HRL',  role: 'Hormel — pork + branded foods', confidence: 'disclosed', audit: 'pending' },
       // Dairy/Sugar
-      { ticker: 'IPAR', role: 'Ingredion — starches/sweeteners', confidence: 'verified' },
+      { ticker: 'IPAR', role: 'Ingredion — starches/sweeteners', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
       // CPG brands
-      { ticker: 'PG',   role: 'Procter & Gamble (food-adjacent CPG)', confidence: 'verified' },
-      { ticker: 'KO',   role: 'Coca-Cola', confidence: 'verified' },
-      { ticker: 'PEP',  role: 'PepsiCo (Frito-Lay + beverages)', confidence: 'verified' },
-      { ticker: 'MDLZ', role: 'Mondelez (Oreo, Cadbury)', confidence: 'verified' },
-      { ticker: 'GIS',  role: 'General Mills (Cheerios, Pillsbury)', confidence: 'verified' },
-      { ticker: 'K',    role: 'Kellanova (was Kellogg)', confidence: 'verified' },
-      { ticker: 'KHC',  role: 'Kraft Heinz', confidence: 'verified' },
-      { ticker: 'CPB',  role: 'Campbell Soup', confidence: 'verified' },
-      { ticker: 'HSY',  role: 'Hershey', confidence: 'verified' },
-      { ticker: 'SJM',  role: 'JM Smucker (coffee + jams)', confidence: 'verified' },
+      { ticker: 'PG',   role: 'Procter & Gamble (food-adjacent CPG)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'KO',   role: 'Coca-Cola', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'PEP',  role: 'PepsiCo (Frito-Lay + beverages)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'MDLZ', role: 'Mondelez (Oreo, Cadbury)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GIS',  role: 'General Mills (Cheerios, Pillsbury)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'K',    role: 'Kellanova (was Kellogg)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'KHC',  role: 'Kraft Heinz', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CPB',  role: 'Campbell Soup', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'HSY',  role: 'Hershey', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SJM',  role: 'JM Smucker (coffee + jams)', confidence: 'disclosed', audit: 'pending' },
       // Grocery / Distribution
-      { ticker: 'WMT',  role: 'Walmart — largest US grocer', confidence: 'verified' },
-      { ticker: 'COST', role: 'Costco', confidence: 'verified' },
-      { ticker: 'KR',   role: 'Kroger', confidence: 'verified' },
-      { ticker: 'ACI',  role: 'Albertsons', confidence: 'verified' },
-      { ticker: 'TGT',  role: 'Target', confidence: 'verified' },
+      { ticker: 'WMT',  role: 'Walmart — largest US grocer', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'COST', role: 'Costco', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'KR',   role: 'Kroger', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ACI',  role: 'Albertsons', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'TGT',  role: 'Target', confidence: 'disclosed', audit: 'pending' },
       // Restaurants
-      { ticker: 'MCD',  role: 'McDonald\'s — beef/chicken/potato buyer', confidence: 'verified' },
-      { ticker: 'SBUX', role: 'Starbucks — coffee/dairy buyer', confidence: 'verified' },
-      { ticker: 'YUM',  role: 'Yum Brands (KFC, Taco Bell)', confidence: 'verified' },
-      { ticker: 'CMG',  role: 'Chipotle — meat/produce buyer', confidence: 'verified' },
-      { ticker: 'DPZ',  role: 'Domino\'s — cheese/wheat buyer', confidence: 'verified' },
+      { ticker: 'MCD',  role: 'McDonald\'s — beef/chicken/potato buyer', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SBUX', role: 'Starbucks — coffee/dairy buyer', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'YUM',  role: 'Yum Brands (KFC, Taco Bell)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CMG',  role: 'Chipotle — meat/produce buyer', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'DPZ',  role: 'Domino\'s — cheese/wheat buyer', confidence: 'disclosed', audit: 'pending' },
     ],
     citations: [
       'USDA crop production reports',
@@ -44119,37 +44203,37 @@ const SUPPLY_CHAINS = [
     description: 'Components from displays, memory, and lenses through contract assemblers to branded smartphones and laptops.',
     upstream: [
       // Memory
-      { ticker: 'MU',   role: 'Micron — DRAM + NAND', confidence: 'verified' },
-      { ticker: '005930.KS', name: 'Samsung Electronics', alias: ['SSNLF'], role: 'DRAM/NAND/displays (Korea)', confidence: 'verified' },
-      { ticker: '000660.KS', name: 'SK hynix', alias: ['HXSCL'], role: 'DRAM + HBM (Korea)', confidence: 'verified' },
+      { ticker: 'MU',   role: 'Micron — DRAM + NAND', confidence: 'disclosed', audit: 'pending' },
+      { ticker: '005930.KS', name: 'Samsung Electronics', alias: ['SSNLF'], role: 'DRAM/NAND/displays (Korea)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: '000660.KS', name: 'SK hynix', alias: ['HXSCL'], role: 'DRAM + HBM (Korea)', confidence: 'disclosed', audit: 'pending' },
       // Displays
-      { ticker: '034220.KS', name: 'LG Display', alias: ['LPL'], role: 'OLED displays (Korea)', confidence: 'verified' },
-      { ticker: '000725.SZ', name: 'BOE Technology', role: 'Chinese display panels (LCD + OLED)', confidence: 'verified' },
+      { ticker: '034220.KS', name: 'LG Display', alias: ['LPL'], role: 'OLED displays (Korea)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: '000725.SZ', name: 'BOE Technology', role: 'Chinese display panels (LCD + OLED)', confidence: 'disclosed', audit: 'pending' },
       // Optics
-      { name: 'Largan / Genius', role: 'Smartphone camera lens (Taiwan)', confidence: 'verified' },
-      { ticker: 'CRUS', role: 'Cirrus Logic — Apple audio chips', confidence: 'verified' },
-      { ticker: 'SWKS', role: 'Skyworks — RF (Apple)', confidence: 'verified' },
-      { ticker: 'AVGO', role: 'Broadcom — Apple RF/Wi-Fi', confidence: 'verified' },
-      { ticker: 'QRVO', role: 'Qorvo — RF', confidence: 'verified' },
+      { name: 'Largan / Genius', role: 'Smartphone camera lens (Taiwan)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CRUS', role: 'Cirrus Logic — Apple audio chips', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SWKS', role: 'Skyworks — RF (Apple)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AVGO', role: 'Broadcom — Apple RF/Wi-Fi', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'QRVO', role: 'Qorvo — RF', confidence: 'disclosed', audit: 'pending' },
     ],
     midstream: [
       // Assembly
-      { ticker: '2317.TW', name: 'Foxconn (Hon Hai)', alias: ['HNHPF', 'HNHAF'], role: 'World\'s largest contract assembler (Taiwan)', confidence: 'verified' },
-      { ticker: '4938.TW', name: 'Pegatron', alias: ['PGTRF'], role: 'Apple assembler (Taiwan)', confidence: 'verified' },
-      { ticker: '3231.TW', name: 'Wistron', alias: ['WICOY'], role: 'Apple/Dell assembler (Taiwan)', confidence: 'verified' },
-      { name: 'Compal / Quanta / Inventec', role: 'Notebook ODMs (Taiwan)', confidence: 'verified' },
+      { ticker: '2317.TW', name: 'Foxconn (Hon Hai)', alias: ['HNHPF', 'HNHAF'], role: 'World\'s largest contract assembler (Taiwan)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: '4938.TW', name: 'Pegatron', alias: ['PGTRF'], role: 'Apple assembler (Taiwan)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: '3231.TW', name: 'Wistron', alias: ['WICOY'], role: 'Apple/Dell assembler (Taiwan)', confidence: 'disclosed', audit: 'pending' },
+      { name: 'Compal / Quanta / Inventec', role: 'Notebook ODMs (Taiwan)', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
-      { ticker: 'AAPL', role: 'iPhone / Mac / iPad / Watch', confidence: 'verified' },
-      { ticker: '005930.KS', name: 'Samsung Electronics', alias: ['SSNLF'], role: 'Galaxy phones (Korea)', confidence: 'verified' },
-      { ticker: 'GOOGL',role: 'Pixel phones', confidence: 'verified' },
-      { ticker: 'HPQ',  role: 'HP — PCs', confidence: 'verified' },
-      { ticker: 'DELL', role: 'Dell — PCs', confidence: 'verified' },
-      { ticker: 'LNVGY',role: 'Lenovo (ADR)', confidence: 'verified' },
-      { name: 'Xiaomi / OPPO / vivo', role: 'Chinese smartphone makers', confidence: 'verified' },
+      { ticker: 'AAPL', role: 'iPhone / Mac / iPad / Watch', confidence: 'disclosed', audit: 'pending' },
+      { ticker: '005930.KS', name: 'Samsung Electronics', alias: ['SSNLF'], role: 'Galaxy phones (Korea)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GOOGL',role: 'Pixel phones', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'HPQ',  role: 'HP — PCs', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'DELL', role: 'Dell — PCs', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'LNVGY',role: 'Lenovo (ADR)', confidence: 'disclosed', audit: 'pending' },
+      { name: 'Xiaomi / OPPO / vivo', role: 'Chinese smartphone makers', confidence: 'disclosed', audit: 'pending' },
       // Retail
-      { ticker: 'BBY',  role: 'Best Buy', confidence: 'verified' },
-      { ticker: 'AMZN', role: 'Amazon (largest CE retailer)', confidence: 'verified' },
+      { ticker: 'BBY',  role: 'Best Buy', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AMZN', role: 'Amazon (largest CE retailer)', confidence: 'disclosed', audit: 'pending' },
     ],
     citations: [
       'Apple 10-K Supplier List (annual, publicly published)',
@@ -44165,34 +44249,34 @@ const SUPPLY_CHAINS = [
     description: 'Metals/composites and propulsion technology through prime contractors to government end-customers.',
     upstream: [
       // Metals
-      { ticker: 'AA',   role: 'Alcoa — aluminum', confidence: 'verified' },
-      { ticker: 'ATI',  role: 'ATI — titanium', confidence: 'verified' },
-      { ticker: 'HAYN', role: 'Haynes — superalloys', confidence: 'verified' },
-      { ticker: 'CRS',  role: 'Carpenter Technology — specialty alloys', confidence: 'verified' },
+      { ticker: 'AA',   role: 'Alcoa — aluminum', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ATI',  role: 'ATI — titanium', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'HAYN', role: 'Haynes — superalloys', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CRS',  role: 'Carpenter Technology — specialty alloys', confidence: 'disclosed', audit: 'pending' },
       // Engines
-      { ticker: 'RTX',  role: 'Pratt & Whitney engines (RTX subsidiary)', confidence: 'verified' },
-      { ticker: 'GE',   role: 'GE Aerospace — engines', confidence: 'verified' },
-      { name: 'Rolls-Royce', role: 'Engines (UK)', confidence: 'verified' },
+      { ticker: 'RTX',  role: 'Pratt & Whitney engines (RTX subsidiary)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GE',   role: 'GE Aerospace — engines', confidence: 'disclosed', audit: 'pending' },
+      { name: 'Rolls-Royce', role: 'Engines (UK)', confidence: 'disclosed', audit: 'pending' },
       // Electronics
-      { ticker: 'TXT',  role: 'Textron — avionics + small platforms', confidence: 'verified' },
-      { ticker: 'TDG',  role: 'TransDigm — aerospace components', confidence: 'verified' },
-      { ticker: 'HEI',  role: 'Heico — aftermarket aerospace parts', confidence: 'verified' },
+      { ticker: 'TXT',  role: 'Textron — avionics + small platforms', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'TDG',  role: 'TransDigm — aerospace components', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'HEI',  role: 'Heico — aftermarket aerospace parts', confidence: 'disclosed', audit: 'pending' },
     ],
     midstream: [
       // Tier-1 systems
-      { ticker: 'L3HRS',role: 'L3Harris — comms/electronics', confidence: 'verified' },
-      { ticker: 'LHX',  role: 'L3Harris (alt ticker)', confidence: 'verified' },
-      { ticker: 'HII',  role: 'Huntington Ingalls — shipbuilding', confidence: 'verified' },
-      { ticker: 'KTOS', role: 'Kratos — UAVs', confidence: 'verified' },
+      { ticker: 'L3HRS',role: 'L3Harris — comms/electronics', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'LHX',  role: 'L3Harris (alt ticker)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'HII',  role: 'Huntington Ingalls — shipbuilding', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'KTOS', role: 'Kratos — UAVs', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
       // Prime contractors
-      { ticker: 'LMT',  role: 'Lockheed Martin (F-35, missiles)', confidence: 'verified' },
-      { ticker: 'NOC',  role: 'Northrop Grumman (B-21, ICBMs)', confidence: 'verified' },
-      { ticker: 'GD',   role: 'General Dynamics (Abrams tank, subs)', confidence: 'verified' },
-      { ticker: 'RTX',  role: 'Raytheon Technologies (missiles)', confidence: 'verified' },
-      { ticker: 'BA',   role: 'Boeing (commercial + defense)', confidence: 'verified' },
-      { name: 'Airbus / BAE / Dassault', role: 'European primes', confidence: 'verified' },
+      { ticker: 'LMT',  role: 'Lockheed Martin (F-35, missiles)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'NOC',  role: 'Northrop Grumman (B-21, ICBMs)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GD',   role: 'General Dynamics (Abrams tank, subs)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'RTX',  role: 'Raytheon Technologies (missiles)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'BA',   role: 'Boeing (commercial + defense)', confidence: 'disclosed', audit: 'pending' },
+      { name: 'Airbus / BAE / Dassault', role: 'European primes', confidence: 'disclosed', audit: 'pending' },
     ],
     citations: [
       'DOD prime contractor awards (public)',
@@ -44208,39 +44292,39 @@ const SUPPLY_CHAINS = [
     description: 'Payment networks and logistics infrastructure through e-commerce platforms to brands and direct-to-consumer.',
     upstream: [
       // Payment rails
-      { ticker: 'V',    role: 'Visa — card network', confidence: 'verified' },
-      { ticker: 'MA',   role: 'Mastercard — card network', confidence: 'verified' },
-      { ticker: 'AXP',  role: 'American Express', confidence: 'verified' },
+      { ticker: 'V',    role: 'Visa — card network', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'MA',   role: 'Mastercard — card network', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AXP',  role: 'American Express', confidence: 'disclosed', audit: 'pending' },
       // Acquirers / processors
-      { ticker: 'FIS',  role: 'Fidelity National (FIS)', confidence: 'verified' },
-      { ticker: 'FISV', role: 'Fiserv', confidence: 'verified' },
-      { ticker: 'GPN',  role: 'Global Payments', confidence: 'verified' },
-      { ticker: 'PYPL', role: 'PayPal', confidence: 'verified' },
-      { ticker: 'SQ',   role: 'Block (Square) — POS + Cash App', confidence: 'verified' },
-      { ticker: 'ADYEY',role: 'Adyen (Netherlands)', confidence: 'verified' },
+      { ticker: 'FIS',  role: 'Fidelity National (FIS)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'FISV', role: 'Fiserv', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GPN',  role: 'Global Payments', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'PYPL', role: 'PayPal', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SQ',   role: 'Block (Square) — POS + Cash App', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ADYEY',role: 'Adyen (Netherlands)', confidence: 'disclosed', audit: 'pending' },
       // Logistics
-      { ticker: 'UPS',  role: 'UPS — parcel', confidence: 'verified' },
-      { ticker: 'FDX',  role: 'FedEx — parcel', confidence: 'verified' },
+      { ticker: 'UPS',  role: 'UPS — parcel', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'FDX',  role: 'FedEx — parcel', confidence: 'disclosed', audit: 'pending' },
     ],
     midstream: [
-      { ticker: 'AMZN', role: 'Amazon — largest e-commerce', confidence: 'verified' },
-      { ticker: 'SHOP', role: 'Shopify — SMB e-commerce platform', confidence: 'verified' },
-      { ticker: 'EBAY', role: 'eBay — marketplace', confidence: 'verified' },
-      { ticker: 'ETSY', role: 'Etsy — handmade marketplace', confidence: 'verified' },
-      { ticker: 'BABA', role: 'Alibaba — China e-commerce', confidence: 'verified' },
-      { ticker: 'PDD',  role: 'PDD Holdings (Pinduoduo / Temu)', confidence: 'verified' },
-      { ticker: 'MELI', role: 'MercadoLibre — LatAm', confidence: 'verified' },
-      { ticker: 'SE',   role: 'Sea Ltd — Shopee SE Asia', confidence: 'verified' },
+      { ticker: 'AMZN', role: 'Amazon — largest e-commerce', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SHOP', role: 'Shopify — SMB e-commerce platform', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'EBAY', role: 'eBay — marketplace', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ETSY', role: 'Etsy — handmade marketplace', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'BABA', role: 'Alibaba — China e-commerce', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'PDD',  role: 'PDD Holdings (Pinduoduo / Temu)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'MELI', role: 'MercadoLibre — LatAm', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SE',   role: 'Sea Ltd — Shopee SE Asia', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
       // Marketplaces feed end-consumer brands
-      { ticker: 'NKE',  role: 'Nike — major e-commerce seller', confidence: 'verified' },
-      { ticker: 'LULU', role: 'Lululemon', confidence: 'verified' },
-      { ticker: 'TGT',  role: 'Target — omnichannel', confidence: 'verified' },
-      { ticker: 'WMT',  role: 'Walmart — omnichannel + Walmart Marketplace', confidence: 'verified' },
-      { ticker: 'COST', role: 'Costco', confidence: 'verified' },
-      { ticker: 'HD',   role: 'Home Depot — omnichannel', confidence: 'verified' },
-      { ticker: 'LOW',  role: 'Lowe\'s', confidence: 'verified' },
+      { ticker: 'NKE',  role: 'Nike — major e-commerce seller', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'LULU', role: 'Lululemon', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'TGT',  role: 'Target — omnichannel', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'WMT',  role: 'Walmart — omnichannel + Walmart Marketplace', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'COST', role: 'Costco', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'HD',   role: 'Home Depot — omnichannel', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'LOW',  role: 'Lowe\'s', confidence: 'disclosed', audit: 'pending' },
     ],
     citations: [
       'Visa / Mastercard 10-Ks — transaction volume',
@@ -44255,29 +44339,29 @@ const SUPPLY_CHAINS = [
     sector: 'Communication Services',
     description: 'Equipment makers and tower REITs through carriers to consumer wireless plans.',
     upstream: [
-      { name: 'Ericsson / Nokia / Huawei / ZTE', role: '5G radio equipment', confidence: 'verified' },
-      { ticker: 'CIEN', role: 'Ciena — optical', confidence: 'verified' },
-      { ticker: 'JNPR', role: 'Juniper Networks', confidence: 'verified' },
-      { ticker: 'CSCO', role: 'Cisco', confidence: 'verified' },
-      { ticker: 'QCOM', role: 'Qualcomm — 5G modems', confidence: 'verified' },
+      { name: 'Ericsson / Nokia / Huawei / ZTE', role: '5G radio equipment', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CIEN', role: 'Ciena — optical', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'JNPR', role: 'Juniper Networks', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CSCO', role: 'Cisco', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'QCOM', role: 'Qualcomm — 5G modems', confidence: 'disclosed', audit: 'pending' },
       // Tower REITs
-      { ticker: 'AMT',  role: 'American Tower — REIT', confidence: 'verified' },
-      { ticker: 'CCI',  role: 'Crown Castle — REIT', confidence: 'verified' },
-      { ticker: 'SBAC', role: 'SBA Communications', confidence: 'verified' },
+      { ticker: 'AMT',  role: 'American Tower — REIT', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CCI',  role: 'Crown Castle — REIT', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SBAC', role: 'SBA Communications', confidence: 'disclosed', audit: 'pending' },
     ],
     midstream: [
-      { ticker: 'T',    role: 'AT&T', confidence: 'verified' },
-      { ticker: 'VZ',   role: 'Verizon', confidence: 'verified' },
-      { ticker: 'TMUS', role: 'T-Mobile US', confidence: 'verified' },
-      { ticker: 'CMCSA',role: 'Comcast — wireless via cable', confidence: 'verified' },
-      { ticker: 'CHTR', role: 'Charter — wireless via cable', confidence: 'verified' },
-      { ticker: 'DISH', role: 'DISH Network (now EchoStar)', confidence: 'verified' },
+      { ticker: 'T',    role: 'AT&T', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'VZ',   role: 'Verizon', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'TMUS', role: 'T-Mobile US', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CMCSA',role: 'Comcast — wireless via cable', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CHTR', role: 'Charter — wireless via cable', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'DISH', role: 'DISH Network (now EchoStar)', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
       // Mobile device makers benefit from carrier subsidies
-      { ticker: 'AAPL', role: 'iPhone (carrier-subsidized)', confidence: 'verified' },
-      { ticker: '005930.KS', name: 'Samsung Electronics', alias: ['SSNLF'], role: 'Galaxy phones', confidence: 'verified' },
-      { ticker: 'GOOGL',role: 'Pixel phones', confidence: 'verified' },
+      { ticker: 'AAPL', role: 'iPhone (carrier-subsidized)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: '005930.KS', name: 'Samsung Electronics', alias: ['SSNLF'], role: 'Galaxy phones', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GOOGL',role: 'Pixel phones', confidence: 'disclosed', audit: 'pending' },
     ],
     citations: [
       'Carrier 10-Ks — capex + subscriber metrics',
@@ -44292,29 +44376,29 @@ const SUPPLY_CHAINS = [
     sector: 'Energy / Industrials',
     description: 'Polysilicon refining and inverter manufacturing through panel assembly and utility-scale developers to residential installers and grid operators.',
     upstream: [
-      { ticker: 'WFRBF', role: 'Wacker Chemie — polysilicon (Germany)', confidence: 'verified' },
-      { ticker: '3800.HK', name: 'GCL-Poly', alias: ['GCPEF'], role: 'Polysilicon (China, HK-listed)', confidence: 'verified' },
-      { ticker: '600438.SS', name: 'Tongwei', role: 'Polysilicon (China, Shanghai)', confidence: 'verified' },
-      { ticker: 'FSLR',  role: 'First Solar — thin-film tech (CdTe, vertically integrated)', confidence: 'verified' },
-      { ticker: 'ENPH',  role: 'Enphase Energy — microinverters', confidence: 'verified' },
-      { ticker: 'SEDG',  role: 'SolarEdge — string inverters + optimizers', confidence: 'verified' },
+      { ticker: 'WFRBF', role: 'Wacker Chemie — polysilicon (Germany)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: '3800.HK', name: 'GCL-Poly', alias: ['GCPEF'], role: 'Polysilicon (China, HK-listed)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: '600438.SS', name: 'Tongwei', role: 'Polysilicon (China, Shanghai)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'FSLR',  role: 'First Solar — thin-film tech (CdTe, vertically integrated)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ENPH',  role: 'Enphase Energy — microinverters', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SEDG',  role: 'SolarEdge — string inverters + optimizers', confidence: 'disclosed', audit: 'pending' },
     ],
     midstream: [
-      { ticker: '601012.SS', name: 'LONGi Green Energy', alias: ['LNGRY'], role: 'Wafers + modules (China, Shanghai)', confidence: 'verified' },
-      { name: 'JinkoSolar HK parent', alias: ['JKS'], role: 'Modules (Cayman parent — JKS ADR is the US handle)', confidence: 'verified' },
-      { ticker: '688599.SS', name: 'Trina Solar', role: 'Modules (China, STAR)', confidence: 'verified' },
-      { ticker: 'CSIQ',  role: 'Canadian Solar — modules', confidence: 'verified' },
-      { ticker: 'JKS',   role: 'JinkoSolar ADR', confidence: 'verified' },
-      { ticker: 'MAXN',  role: 'Maxeon Solar — premium residential', confidence: 'verified' },
+      { ticker: '601012.SS', name: 'LONGi Green Energy', alias: ['LNGRY'], role: 'Wafers + modules (China, Shanghai)', confidence: 'disclosed', audit: 'pending' },
+      { name: 'JinkoSolar HK parent', alias: ['JKS'], role: 'Modules (Cayman parent — JKS ADR is the US handle)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: '688599.SS', name: 'Trina Solar', role: 'Modules (China, STAR)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CSIQ',  role: 'Canadian Solar — modules', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'JKS',   role: 'JinkoSolar ADR', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'MAXN',  role: 'Maxeon Solar — premium residential', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
-      { ticker: 'NEE',   role: 'NextEra — largest US renewable utility', confidence: 'verified' },
-      { ticker: 'BEP',   role: 'Brookfield Renewable', confidence: 'verified' },
-      { ticker: 'AES',   role: 'AES Corporation — renewables', confidence: 'verified' },
-      { ticker: 'RUN',   role: 'Sunrun — residential solar installer', confidence: 'verified' },
-      { ticker: 'NOVA',  role: 'Sunnova — residential solar', confidence: 'verified' },
-      { ticker: 'ARRY',  role: 'Array Technologies — tracker systems', confidence: 'verified' },
-      { ticker: 'SHLS',  role: 'Shoals Technologies — solar BoS', confidence: 'verified' },
+      { ticker: 'NEE',   role: 'NextEra — largest US renewable utility', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'BEP',   role: 'Brookfield Renewable', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AES',   role: 'AES Corporation — renewables', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'RUN',   role: 'Sunrun — residential solar installer', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'NOVA',  role: 'Sunnova — residential solar', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ARRY',  role: 'Array Technologies — tracker systems', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SHLS',  role: 'Shoals Technologies — solar BoS', confidence: 'disclosed', audit: 'pending' },
       { ticker: 'ICLN',  role: 'iShares Global Clean Energy ETF', confidence: 'disclosed' },
       { ticker: 'TAN',   role: 'Invesco Solar ETF', confidence: 'disclosed' },
     ],
@@ -44333,48 +44417,48 @@ const SUPPLY_CHAINS = [
     sector: 'Financials',
     description: 'Core banking software and exchange infrastructure through custodians and broker-dealers to retail brokerages and wealth managers.',
     upstream: [
-      { ticker: 'FIS',   role: 'Fidelity National Info Services — core banking software', confidence: 'verified' },
-      { ticker: 'FISV',  role: 'Fiserv — core banking + payments', confidence: 'verified' },
-      { ticker: 'JKHY',  role: 'Jack Henry — community-bank core', confidence: 'verified' },
-      { ticker: 'NDAQ',  role: 'Nasdaq — exchange infrastructure', confidence: 'verified' },
-      { ticker: 'ICE',   role: 'Intercontinental Exchange', confidence: 'verified' },
-      { ticker: 'CME',   role: 'CME Group — futures/options', confidence: 'verified' },
-      { ticker: 'CBOE',  role: 'Cboe Global Markets', confidence: 'verified' },
-      { ticker: 'MKTX',  role: 'MarketAxess — fixed-income e-trading', confidence: 'verified' },
-      { ticker: 'TW',    role: 'Tradeweb', confidence: 'verified' },
+      { ticker: 'FIS',   role: 'Fidelity National Info Services — core banking software', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'FISV',  role: 'Fiserv — core banking + payments', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'JKHY',  role: 'Jack Henry — community-bank core', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'NDAQ',  role: 'Nasdaq — exchange infrastructure', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ICE',   role: 'Intercontinental Exchange', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CME',   role: 'CME Group — futures/options', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CBOE',  role: 'Cboe Global Markets', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'MKTX',  role: 'MarketAxess — fixed-income e-trading', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'TW',    role: 'Tradeweb', confidence: 'disclosed', audit: 'pending' },
     ],
     midstream: [
       // Universal banks
-      { ticker: 'JPM',   role: 'JPMorgan Chase', confidence: 'verified' },
-      { ticker: 'BAC',   role: 'Bank of America', confidence: 'verified' },
-      { ticker: 'C',     role: 'Citigroup', confidence: 'verified' },
-      { ticker: 'WFC',   role: 'Wells Fargo', confidence: 'verified' },
+      { ticker: 'JPM',   role: 'JPMorgan Chase', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'BAC',   role: 'Bank of America', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'C',     role: 'Citigroup', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'WFC',   role: 'Wells Fargo', confidence: 'disclosed', audit: 'pending' },
       // Investment banks
-      { ticker: 'GS',    role: 'Goldman Sachs', confidence: 'verified' },
-      { ticker: 'MS',    role: 'Morgan Stanley', confidence: 'verified' },
+      { ticker: 'GS',    role: 'Goldman Sachs', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'MS',    role: 'Morgan Stanley', confidence: 'disclosed', audit: 'pending' },
       // Custodians
-      { ticker: 'BK',    role: 'BNY Mellon — largest custodian', confidence: 'verified' },
-      { ticker: 'STT',   role: 'State Street — custody + admin', confidence: 'verified' },
-      { ticker: 'NTRS',  role: 'Northern Trust', confidence: 'verified' },
+      { ticker: 'BK',    role: 'BNY Mellon — largest custodian', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'STT',   role: 'State Street — custody + admin', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'NTRS',  role: 'Northern Trust', confidence: 'disclosed', audit: 'pending' },
       // Regionals
-      { ticker: 'PNC',   role: 'PNC Financial', confidence: 'verified' },
-      { ticker: 'TFC',   role: 'Truist', confidence: 'verified' },
-      { ticker: 'USB',   role: 'US Bancorp', confidence: 'verified' },
+      { ticker: 'PNC',   role: 'PNC Financial', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'TFC',   role: 'Truist', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'USB',   role: 'US Bancorp', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
       // Brokerages
-      { ticker: 'SCHW',  role: 'Charles Schwab', confidence: 'verified' },
-      { ticker: 'IBKR',  role: 'Interactive Brokers', confidence: 'verified' },
-      { ticker: 'HOOD',  role: 'Robinhood', confidence: 'verified' },
-      { ticker: 'COIN',  role: 'Coinbase (crypto brokerage)', confidence: 'verified' },
+      { ticker: 'SCHW',  role: 'Charles Schwab', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'IBKR',  role: 'Interactive Brokers', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'HOOD',  role: 'Robinhood', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'COIN',  role: 'Coinbase (crypto brokerage)', confidence: 'disclosed', audit: 'pending' },
       // Wealth managers
-      { ticker: 'BLK',   role: 'BlackRock — largest asset manager', confidence: 'verified' },
-      { ticker: 'BX',    role: 'Blackstone — alternatives', confidence: 'verified' },
-      { ticker: 'KKR',   role: 'KKR & Co.', confidence: 'verified' },
-      { ticker: 'APO',   role: 'Apollo Global', confidence: 'verified' },
-      { ticker: 'TROW',  role: 'T. Rowe Price', confidence: 'verified' },
-      { ticker: 'BEN',   role: 'Franklin Resources', confidence: 'verified' },
-      { ticker: 'IVZ',   role: 'Invesco', confidence: 'verified' },
+      { ticker: 'BLK',   role: 'BlackRock — largest asset manager', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'BX',    role: 'Blackstone — alternatives', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'KKR',   role: 'KKR & Co.', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'APO',   role: 'Apollo Global', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'TROW',  role: 'T. Rowe Price', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'BEN',   role: 'Franklin Resources', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'IVZ',   role: 'Invesco', confidence: 'disclosed', audit: 'pending' },
     ],
     relatedChains: ['ecommerce'],  // payments + e-commerce overlap
     citations: [
@@ -44391,48 +44475,48 @@ const SUPPLY_CHAINS = [
     sector: 'Real Estate / Industrials',
     description: 'Building materials and construction equipment through homebuilders and REITs to mortgage finance and brokerage.',
     upstream: [
-      { ticker: 'CAT',   role: 'Caterpillar — earthmoving equipment', confidence: 'verified' },
-      { ticker: 'DE',    role: 'John Deere — construction/forestry equipment', confidence: 'verified' },
-      { ticker: 'URI',   role: 'United Rentals — equipment rental', confidence: 'verified' },
+      { ticker: 'CAT',   role: 'Caterpillar — earthmoving equipment', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'DE',    role: 'John Deere — construction/forestry equipment', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'URI',   role: 'United Rentals — equipment rental', confidence: 'disclosed', audit: 'pending' },
       // Materials
-      { ticker: 'VMC',   role: 'Vulcan Materials — aggregates', confidence: 'verified' },
-      { ticker: 'MLM',   role: 'Martin Marietta — aggregates', confidence: 'verified' },
-      { ticker: 'EXP',   role: 'Eagle Materials — cement/gypsum', confidence: 'verified' },
-      { ticker: 'CRH',   role: 'CRH plc — building materials', confidence: 'verified' },
-      { ticker: 'JHX',   role: 'James Hardie — fiber cement', confidence: 'verified' },
+      { ticker: 'VMC',   role: 'Vulcan Materials — aggregates', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'MLM',   role: 'Martin Marietta — aggregates', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'EXP',   role: 'Eagle Materials — cement/gypsum', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CRH',   role: 'CRH plc — building materials', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'JHX',   role: 'James Hardie — fiber cement', confidence: 'disclosed', audit: 'pending' },
       // Lumber
-      { ticker: 'WY',    role: 'Weyerhaeuser — timber REIT', confidence: 'verified' },
-      { ticker: 'BCC',   role: 'Boise Cascade — wood products', confidence: 'verified' },
+      { ticker: 'WY',    role: 'Weyerhaeuser — timber REIT', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'BCC',   role: 'Boise Cascade — wood products', confidence: 'disclosed', audit: 'pending' },
     ],
     midstream: [
       // Homebuilders
-      { ticker: 'DHI',   role: 'D.R. Horton — #1 US homebuilder', confidence: 'verified' },
-      { ticker: 'LEN',   role: 'Lennar', confidence: 'verified' },
-      { ticker: 'NVR',   role: 'NVR Inc.', confidence: 'verified' },
-      { ticker: 'PHM',   role: 'PulteGroup', confidence: 'verified' },
-      { ticker: 'TOL',   role: 'Toll Brothers — luxury', confidence: 'verified' },
-      { ticker: 'KBH',   role: 'KB Home', confidence: 'verified' },
+      { ticker: 'DHI',   role: 'D.R. Horton — #1 US homebuilder', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'LEN',   role: 'Lennar', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'NVR',   role: 'NVR Inc.', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'PHM',   role: 'PulteGroup', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'TOL',   role: 'Toll Brothers — luxury', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'KBH',   role: 'KB Home', confidence: 'disclosed', audit: 'pending' },
       // Commercial REITs
-      { ticker: 'PLD',   role: 'Prologis — industrial REIT', confidence: 'verified' },
-      { ticker: 'AMT',   role: 'American Tower — communication infrastructure', confidence: 'verified' },
-      { ticker: 'PSA',   role: 'Public Storage', confidence: 'verified' },
-      { ticker: 'SPG',   role: 'Simon Property Group — malls', confidence: 'verified' },
-      { ticker: 'O',     role: 'Realty Income — net lease', confidence: 'verified' },
+      { ticker: 'PLD',   role: 'Prologis — industrial REIT', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AMT',   role: 'American Tower — communication infrastructure', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'PSA',   role: 'Public Storage', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SPG',   role: 'Simon Property Group — malls', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'O',     role: 'Realty Income — net lease', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
       // Building supplies retail
-      { ticker: 'HD',    role: 'Home Depot', confidence: 'verified' },
-      { ticker: 'LOW',   role: "Lowe's", confidence: 'verified' },
-      { ticker: 'POOL',  role: 'Pool Corporation', confidence: 'verified' },
+      { ticker: 'HD',    role: 'Home Depot', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'LOW',   role: "Lowe's", confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'POOL',  role: 'Pool Corporation', confidence: 'disclosed', audit: 'pending' },
       // Mortgage / title
-      { ticker: 'RKT',   role: 'Rocket Companies — mortgage origination', confidence: 'verified' },
-      { ticker: 'UWMC',  role: 'United Wholesale Mortgage', confidence: 'verified' },
-      { ticker: 'FNF',   role: 'Fidelity National Financial — title insurance', confidence: 'verified' },
-      { ticker: 'FAF',   role: 'First American Financial — title', confidence: 'verified' },
+      { ticker: 'RKT',   role: 'Rocket Companies — mortgage origination', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'UWMC',  role: 'United Wholesale Mortgage', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'FNF',   role: 'Fidelity National Financial — title insurance', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'FAF',   role: 'First American Financial — title', confidence: 'disclosed', audit: 'pending' },
       // Brokerage
-      { ticker: 'Z',     role: 'Zillow Group', confidence: 'verified' },
-      { ticker: 'CSGP',  role: 'CoStar Group — commercial RE data', confidence: 'verified' },
-      { ticker: 'RDFN',  role: 'Redfin', confidence: 'verified' },
+      { ticker: 'Z',     role: 'Zillow Group', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CSGP',  role: 'CoStar Group — commercial RE data', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'RDFN',  role: 'Redfin', confidence: 'disclosed', audit: 'pending' },
     ],
     relatedChains: ['banking'],  // mortgage demand correlated with bank lending
     citations: [
@@ -44450,50 +44534,50 @@ const SUPPLY_CHAINS = [
     description: 'Genome sequencing and lab automation through CDMOs and drug developers to specialty distributors and reimbursement.',
     upstream: [
       // Sequencing platforms
-      { ticker: 'ILMN',  role: 'Illumina — sequencer monopoly', confidence: 'verified' },
-      { ticker: 'PACB',  role: 'PacBio — long-read sequencing', confidence: 'verified' },
-      { ticker: 'NTLA',  role: 'Intellia Therapeutics — CRISPR', confidence: 'verified' },
+      { ticker: 'ILMN',  role: 'Illumina — sequencer monopoly', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'PACB',  role: 'PacBio — long-read sequencing', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'NTLA',  role: 'Intellia Therapeutics — CRISPR', confidence: 'disclosed', audit: 'pending' },
       // Lab equipment / reagents
-      { ticker: 'TMO',   role: 'Thermo Fisher — life sciences instruments', confidence: 'verified' },
-      { ticker: 'DHR',   role: 'Danaher — Beckman/Cytiva', confidence: 'verified' },
-      { ticker: 'A',     role: 'Agilent — analytical instruments', confidence: 'verified' },
-      { ticker: 'WAT',   role: 'Waters Corp.', confidence: 'verified' },
-      { ticker: 'BIO',   role: 'Bio-Rad', confidence: 'verified' },
-      { ticker: 'RVTY',  role: 'Revvity (was PerkinElmer)', confidence: 'verified' },
+      { ticker: 'TMO',   role: 'Thermo Fisher — life sciences instruments', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'DHR',   role: 'Danaher — Beckman/Cytiva', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'A',     role: 'Agilent — analytical instruments', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'WAT',   role: 'Waters Corp.', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'BIO',   role: 'Bio-Rad', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'RVTY',  role: 'Revvity (was PerkinElmer)', confidence: 'disclosed', audit: 'pending' },
       // CDMOs
-      { ticker: 'CTLT',  role: 'Catalent — CDMO', confidence: 'verified' },
-      { name: 'Lonza',   role: 'Swiss CDMO', confidence: 'verified' },
+      { ticker: 'CTLT',  role: 'Catalent — CDMO', confidence: 'disclosed', audit: 'pending' },
+      { name: 'Lonza',   role: 'Swiss CDMO', confidence: 'disclosed', audit: 'pending' },
     ],
     midstream: [
       // Biotech / gene therapy
-      { ticker: 'MRNA',  role: 'Moderna — mRNA platform', confidence: 'verified' },
-      { ticker: 'BNTX',  role: 'BioNTech — mRNA', confidence: 'verified' },
-      { ticker: 'VRTX',  role: 'Vertex — CF + Casgevy gene therapy', confidence: 'verified' },
-      { ticker: 'REGN',  role: 'Regeneron — biologics', confidence: 'verified' },
-      { ticker: 'AMGN',  role: 'Amgen — biologics', confidence: 'verified' },
-      { ticker: 'GILD',  role: 'Gilead — antivirals + oncology', confidence: 'verified' },
-      { ticker: 'BIIB',  role: 'Biogen — neuro', confidence: 'verified' },
-      { ticker: 'INCY',  role: 'Incyte', confidence: 'verified' },
-      { ticker: 'BMRN',  role: 'BioMarin — rare disease', confidence: 'verified' },
-      { ticker: 'ALNY',  role: 'Alnylam — RNAi platform', confidence: 'verified' },
-      { ticker: 'CRSP',  role: 'CRISPR Therapeutics', confidence: 'verified' },
-      { ticker: 'BEAM',  role: 'Beam Therapeutics — base editing', confidence: 'verified' },
-      { ticker: 'EDIT',  role: 'Editas Medicine', confidence: 'verified' },
+      { ticker: 'MRNA',  role: 'Moderna — mRNA platform', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'BNTX',  role: 'BioNTech — mRNA', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'VRTX',  role: 'Vertex — CF + Casgevy gene therapy', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'REGN',  role: 'Regeneron — biologics', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AMGN',  role: 'Amgen — biologics', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GILD',  role: 'Gilead — antivirals + oncology', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'BIIB',  role: 'Biogen — neuro', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'INCY',  role: 'Incyte', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'BMRN',  role: 'BioMarin — rare disease', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ALNY',  role: 'Alnylam — RNAi platform', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CRSP',  role: 'CRISPR Therapeutics', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'BEAM',  role: 'Beam Therapeutics — base editing', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'EDIT',  role: 'Editas Medicine', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
       // Specialty distributors / reimbursement
-      { ticker: 'IQV',   role: 'IQVIA — clinical trials', confidence: 'verified' },
-      { ticker: 'ICLR',  role: 'ICON plc — CRO', confidence: 'verified' },
-      { ticker: 'CRL',   role: 'Charles River Labs', confidence: 'verified' },
+      { ticker: 'IQV',   role: 'IQVIA — clinical trials', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ICLR',  role: 'ICON plc — CRO', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CRL',   role: 'Charles River Labs', confidence: 'disclosed', audit: 'pending' },
       // Specialty pharmacies
-      { ticker: 'OPCH',  role: 'Option Care Health — home infusion', confidence: 'verified' },
+      { ticker: 'OPCH',  role: 'Option Care Health — home infusion', confidence: 'disclosed', audit: 'pending' },
       // Big pharma buyers (deal flow)
-      { ticker: 'LLY',   role: 'Eli Lilly — frequent biotech acquirer', confidence: 'verified' },
-      { ticker: 'PFE',   role: 'Pfizer', confidence: 'verified' },
-      { ticker: 'MRK',   role: 'Merck', confidence: 'verified' },
-      { ticker: 'ABBV',  role: 'AbbVie', confidence: 'verified' },
-      { ticker: 'BMY',   role: 'Bristol-Myers Squibb', confidence: 'verified' },
-      { ticker: 'JNJ',   role: 'J&J Innovative Medicine', confidence: 'verified' },
+      { ticker: 'LLY',   role: 'Eli Lilly — frequent biotech acquirer', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'PFE',   role: 'Pfizer', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'MRK',   role: 'Merck', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ABBV',  role: 'AbbVie', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'BMY',   role: 'Bristol-Myers Squibb', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'JNJ',   role: 'J&J Innovative Medicine', confidence: 'disclosed', audit: 'pending' },
       // ETFs
       { ticker: 'XBI',   role: 'SPDR Biotech ETF', confidence: 'disclosed' },
       { ticker: 'IBB',   role: 'iShares Biotech ETF', confidence: 'disclosed' },
@@ -44514,38 +44598,38 @@ const SUPPLY_CHAINS = [
     description: 'Foundation model providers and ML infrastructure through MLOps and developer platforms to AI-native applications.',
     upstream: [
       // Foundation models (some private, some embedded in public companies)
-      { ticker: 'MSFT',  role: 'Microsoft — OpenAI partnership + Copilot', confidence: 'verified' },
-      { ticker: 'GOOGL', role: 'Alphabet — Gemini / DeepMind', confidence: 'verified' },
-      { ticker: 'META',  role: 'Meta — Llama open-weights', confidence: 'verified' },
-      { ticker: 'AMZN',  role: 'Amazon — Bedrock / Titan + Anthropic investment', confidence: 'verified' },
+      { ticker: 'MSFT',  role: 'Microsoft — OpenAI partnership + Copilot', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GOOGL', role: 'Alphabet — Gemini / DeepMind', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'META',  role: 'Meta — Llama open-weights', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AMZN',  role: 'Amazon — Bedrock / Titan + Anthropic investment', confidence: 'disclosed', audit: 'pending' },
       // Hardware substrate (cross-reference to semis_ai chain)
-      { ticker: 'NVDA',  role: 'NVIDIA — GPU dominance + CUDA moat', confidence: 'verified' },
-      { ticker: 'AMD',   role: 'AMD — MI300 datacenter accelerators', confidence: 'verified' },
+      { ticker: 'NVDA',  role: 'NVIDIA — GPU dominance + CUDA moat', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AMD',   role: 'AMD — MI300 datacenter accelerators', confidence: 'disclosed', audit: 'pending' },
     ],
     midstream: [
       // MLOps / dev tooling
-      { ticker: 'SNOW',  role: 'Snowflake — data warehouse + ML', confidence: 'verified' },
-      { ticker: 'DDOG',  role: 'Datadog — observability', confidence: 'verified' },
-      { ticker: 'MDB',   role: 'MongoDB — vector search', confidence: 'verified' },
-      { ticker: 'CRWD',  role: 'CrowdStrike — security data lake', confidence: 'verified' },
-      { ticker: 'CFLT',  role: 'Confluent — streaming data', confidence: 'verified' },
-      { ticker: 'ESTC',  role: 'Elastic — search + vector', confidence: 'verified' },
-      { ticker: 'GTLB',  role: 'GitLab — DevOps platform', confidence: 'verified' },
-      { ticker: 'TEAM',  role: 'Atlassian — dev collaboration', confidence: 'verified' },
-      { name: 'Hugging Face', role: 'Model hub (private)', confidence: 'verified' },
-      { name: 'Anthropic', role: 'Claude — Amazon-invested (private)', confidence: 'verified' },
-      { name: 'OpenAI', role: 'GPT — Microsoft-partnered (private)', confidence: 'verified' },
+      { ticker: 'SNOW',  role: 'Snowflake — data warehouse + ML', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'DDOG',  role: 'Datadog — observability', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'MDB',   role: 'MongoDB — vector search', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CRWD',  role: 'CrowdStrike — security data lake', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CFLT',  role: 'Confluent — streaming data', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ESTC',  role: 'Elastic — search + vector', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GTLB',  role: 'GitLab — DevOps platform', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'TEAM',  role: 'Atlassian — dev collaboration', confidence: 'disclosed', audit: 'pending' },
+      { name: 'Hugging Face', role: 'Model hub (private)', confidence: 'disclosed', audit: 'pending' },
+      { name: 'Anthropic', role: 'Claude — Amazon-invested (private)', confidence: 'disclosed', audit: 'pending' },
+      { name: 'OpenAI', role: 'GPT — Microsoft-partnered (private)', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
       // AI-native apps
-      { ticker: 'PLTR',  role: 'Palantir — AIP enterprise', confidence: 'verified' },
-      { ticker: 'CRM',   role: 'Salesforce — Einstein/Agentforce', confidence: 'verified' },
-      { ticker: 'NOW',   role: 'ServiceNow — Now Assist', confidence: 'verified' },
-      { ticker: 'AI',    role: 'C3.ai', confidence: 'verified' },
-      { ticker: 'PATH',  role: 'UiPath — automation+AI', confidence: 'verified' },
-      { ticker: 'DUOL',  role: 'Duolingo — GPT-powered tutoring', confidence: 'verified' },
-      { ticker: 'CHGG',  role: 'Chegg — AI tutoring pivot', confidence: 'verified' },
-      { ticker: 'ADBE',  role: 'Adobe — Firefly + Sensei', confidence: 'verified' },
+      { ticker: 'PLTR',  role: 'Palantir — AIP enterprise', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CRM',   role: 'Salesforce — Einstein/Agentforce', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'NOW',   role: 'ServiceNow — Now Assist', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AI',    role: 'C3.ai', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'PATH',  role: 'UiPath — automation+AI', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'DUOL',  role: 'Duolingo — GPT-powered tutoring', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CHGG',  role: 'Chegg — AI tutoring pivot', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ADBE',  role: 'Adobe — Firefly + Sensei', confidence: 'disclosed', audit: 'pending' },
       // Verticals
       { ticker: 'TDOC',  role: 'Teladoc — AI-augmented telemedicine', confidence: 'disclosed' },
     ],
@@ -44565,45 +44649,45 @@ const SUPPLY_CHAINS = [
     description: 'Content production studios and music labels through aggregation platforms (streaming) to advertising and licensing revenue.',
     upstream: [
       // Studios
-      { ticker: 'DIS',   role: 'Disney — Marvel/Pixar/Lucasfilm', confidence: 'verified' },
-      { ticker: 'WBD',   role: 'Warner Bros Discovery', confidence: 'verified' },
-      { ticker: 'PARA',  role: 'Paramount Global', confidence: 'verified' },
-      { ticker: 'CMCSA', role: 'Comcast/NBCUniversal', confidence: 'verified' },
-      { ticker: 'SONY',  role: 'Sony Pictures + Music', confidence: 'verified' },
+      { ticker: 'DIS',   role: 'Disney — Marvel/Pixar/Lucasfilm', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'WBD',   role: 'Warner Bros Discovery', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'PARA',  role: 'Paramount Global', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CMCSA', role: 'Comcast/NBCUniversal', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SONY',  role: 'Sony Pictures + Music', confidence: 'disclosed', audit: 'pending' },
       // Music labels
-      { ticker: 'UMG',   role: 'Universal Music Group', confidence: 'verified' },
-      { ticker: 'WMG',   role: 'Warner Music Group', confidence: 'verified' },
+      { ticker: 'UMG',   role: 'Universal Music Group', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'WMG',   role: 'Warner Music Group', confidence: 'disclosed', audit: 'pending' },
       // Sports rights
-      { name: 'NFL / NBA / MLB / NHL', role: 'League broadcast rights holders', confidence: 'verified' },
+      { name: 'NFL / NBA / MLB / NHL', role: 'League broadcast rights holders', confidence: 'disclosed', audit: 'pending' },
     ],
     midstream: [
       // Streaming platforms
-      { ticker: 'NFLX',  role: 'Netflix — largest standalone SVOD', confidence: 'verified' },
-      { ticker: 'DIS',   role: 'Disney+/Hulu', confidence: 'verified' },
-      { ticker: 'WBD',   role: 'Max', confidence: 'verified' },
-      { ticker: 'AMZN',  role: 'Prime Video + MGM', confidence: 'verified' },
-      { ticker: 'AAPL',  role: 'Apple TV+', confidence: 'verified' },
-      { ticker: 'GOOGL', role: 'YouTube — largest video platform', confidence: 'verified' },
-      { ticker: 'SPOT',  role: 'Spotify — music streaming', confidence: 'verified' },
-      { ticker: 'ROKU',  role: 'Roku — CTV platform', confidence: 'verified' },
+      { ticker: 'NFLX',  role: 'Netflix — largest standalone SVOD', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'DIS',   role: 'Disney+/Hulu', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'WBD',   role: 'Max', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AMZN',  role: 'Prime Video + MGM', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AAPL',  role: 'Apple TV+', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GOOGL', role: 'YouTube — largest video platform', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SPOT',  role: 'Spotify — music streaming', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ROKU',  role: 'Roku — CTV platform', confidence: 'disclosed', audit: 'pending' },
       // Theatrical
-      { ticker: 'IMAX',  role: 'IMAX', confidence: 'verified' },
-      { ticker: 'CNK',   role: 'Cinemark', confidence: 'verified' },
-      { ticker: 'AMC',   role: 'AMC Entertainment', confidence: 'verified' },
+      { ticker: 'IMAX',  role: 'IMAX', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CNK',   role: 'Cinemark', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AMC',   role: 'AMC Entertainment', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
       // Advertising
-      { ticker: 'GOOGL', role: 'Google Ads', confidence: 'verified' },
-      { ticker: 'META',  role: 'Meta ads', confidence: 'verified' },
-      { ticker: 'TTD',   role: 'The Trade Desk — programmatic DSP', confidence: 'verified' },
-      { ticker: 'MGNI',  role: 'Magnite — SSP', confidence: 'verified' },
-      { ticker: 'PUBM',  role: 'PubMatic — SSP', confidence: 'verified' },
-      { ticker: 'CRTO',  role: 'Criteo', confidence: 'verified' },
+      { ticker: 'GOOGL', role: 'Google Ads', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'META',  role: 'Meta ads', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'TTD',   role: 'The Trade Desk — programmatic DSP', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'MGNI',  role: 'Magnite — SSP', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'PUBM',  role: 'PubMatic — SSP', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CRTO',  role: 'Criteo', confidence: 'disclosed', audit: 'pending' },
       // Agencies
-      { ticker: 'OMC',   role: 'Omnicom', confidence: 'verified' },
-      { ticker: 'IPG',   role: 'Interpublic Group', confidence: 'verified' },
-      { ticker: 'PUBGY', role: 'Publicis (ADR)', confidence: 'verified' },
-      { ticker: 'WPP',   role: 'WPP plc', confidence: 'verified' },
+      { ticker: 'OMC',   role: 'Omnicom', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'IPG',   role: 'Interpublic Group', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'PUBGY', role: 'Publicis (ADR)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'WPP',   role: 'WPP plc', confidence: 'disclosed', audit: 'pending' },
     ],
     relatedChains: ['cloud'],  // streaming depends heavily on CDN/cloud
     citations: [
@@ -44621,34 +44705,34 @@ const SUPPLY_CHAINS = [
     description: 'Threat intel and identity management through endpoint/network/cloud security platforms to managed services and incident response.',
     upstream: [
       // Identity infrastructure
-      { ticker: 'OKTA',  role: 'Okta — identity-as-a-service', confidence: 'verified' },
-      { ticker: 'CYBR',  role: 'CyberArk — privileged access', confidence: 'verified' },
+      { ticker: 'OKTA',  role: 'Okta — identity-as-a-service', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CYBR',  role: 'CyberArk — privileged access', confidence: 'disclosed', audit: 'pending' },
       // PKI / threat intel
-      { ticker: 'DDOG',  role: 'Datadog Cloud Security', confidence: 'verified' },
-      { ticker: 'SPLK',  role: 'Splunk — SIEM (Cisco-owned)', confidence: 'verified' },
+      { ticker: 'DDOG',  role: 'Datadog Cloud Security', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SPLK',  role: 'Splunk — SIEM (Cisco-owned)', confidence: 'disclosed', audit: 'pending' },
     ],
     midstream: [
       // Platforms — endpoint
-      { ticker: 'CRWD',  role: 'CrowdStrike — Falcon EDR/XDR', confidence: 'verified' },
-      { ticker: 'S',     role: 'SentinelOne — EDR', confidence: 'verified' },
+      { ticker: 'CRWD',  role: 'CrowdStrike — Falcon EDR/XDR', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'S',     role: 'SentinelOne — EDR', confidence: 'disclosed', audit: 'pending' },
       // Network / cloud
-      { ticker: 'PANW',  role: 'Palo Alto Networks — firewall+platform', confidence: 'verified' },
-      { ticker: 'ZS',    role: 'Zscaler — zero-trust SASE', confidence: 'verified' },
-      { ticker: 'NET',   role: 'Cloudflare — WAF + Zero Trust', confidence: 'verified' },
-      { ticker: 'FTNT',  role: 'Fortinet — firewall', confidence: 'verified' },
-      { ticker: 'CHKP',  role: 'Check Point Software', confidence: 'verified' },
-      { ticker: 'CSCO',  role: 'Cisco — Splunk + Talos', confidence: 'verified' },
+      { ticker: 'PANW',  role: 'Palo Alto Networks — firewall+platform', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ZS',    role: 'Zscaler — zero-trust SASE', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'NET',   role: 'Cloudflare — WAF + Zero Trust', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'FTNT',  role: 'Fortinet — firewall', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CHKP',  role: 'Check Point Software', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CSCO',  role: 'Cisco — Splunk + Talos', confidence: 'disclosed', audit: 'pending' },
       // Email / API
       { ticker: 'PFPT',  role: 'Proofpoint (taken private 2021)', confidence: 'disclosed' },
       // Data security
-      { ticker: 'VRNS',  role: 'Varonis — data security', confidence: 'verified' },
-      { ticker: 'TENB',  role: 'Tenable — vulnerability mgmt', confidence: 'verified' },
-      { ticker: 'QLYS',  role: 'Qualys — vulnerability mgmt', confidence: 'verified' },
-      { ticker: 'RBRK',  role: 'Rubrik — data resilience', confidence: 'verified' },
+      { ticker: 'VRNS',  role: 'Varonis — data security', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'TENB',  role: 'Tenable — vulnerability mgmt', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'QLYS',  role: 'Qualys — vulnerability mgmt', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'RBRK',  role: 'Rubrik — data resilience', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
       // MSSP / IR firms
-      { name: 'Mandiant', role: 'Google Cloud IR (Mandiant acquisition)', confidence: 'verified' },
+      { name: 'Mandiant', role: 'Google Cloud IR (Mandiant acquisition)', confidence: 'disclosed', audit: 'pending' },
       { ticker: 'KNBE',  role: 'KnowBe4 (taken private 2023)', confidence: 'disclosed' },
       // Cyber insurance buyers
       { ticker: 'HACK',  role: 'ETFMG Prime Cyber Security ETF', confidence: 'disclosed' },
@@ -44671,38 +44755,38 @@ const SUPPLY_CHAINS = [
     description: 'Game engines and IP licensors through developer-publishers to console/PC hardware and distribution platforms.',
     upstream: [
       // Engines + tooling
-      { ticker: 'U',     role: 'Unity Software — game engine', confidence: 'verified' },
-      { name: 'Epic Games', role: 'Unreal Engine + Fortnite (private)', confidence: 'verified' },
+      { ticker: 'U',     role: 'Unity Software — game engine', confidence: 'disclosed', audit: 'pending' },
+      { name: 'Epic Games', role: 'Unreal Engine + Fortnite (private)', confidence: 'disclosed', audit: 'pending' },
       // Hardware (cross-ref to consumer_elec)
-      { ticker: 'NVDA',  role: 'NVIDIA GeForce GPUs', confidence: 'verified' },
-      { ticker: 'AMD',   role: 'AMD Radeon GPUs', confidence: 'verified' },
+      { ticker: 'NVDA',  role: 'NVIDIA GeForce GPUs', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AMD',   role: 'AMD Radeon GPUs', confidence: 'disclosed', audit: 'pending' },
       // Cloud gaming infra
-      { ticker: 'AMZN',  role: 'AWS Luna + GameLift', confidence: 'verified' },
-      { ticker: 'MSFT',  role: 'Xbox Cloud Gaming', confidence: 'verified' },
+      { ticker: 'AMZN',  role: 'AWS Luna + GameLift', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'MSFT',  role: 'Xbox Cloud Gaming', confidence: 'disclosed', audit: 'pending' },
     ],
     midstream: [
       // Publishers
-      { ticker: 'EA',    role: 'Electronic Arts', confidence: 'verified' },
-      { ticker: 'TTWO',  role: 'Take-Two Interactive (GTA/Rockstar)', confidence: 'verified' },
-      { ticker: 'MSFT',  role: 'Activision/Blizzard/King (acquired 2023)', confidence: 'verified' },
-      { ticker: 'RBLX',  role: 'Roblox', confidence: 'verified' },
-      { ticker: '7974.T', name: 'Nintendo', alias: ['NTDOY'], role: 'Nintendo (Japan-listed; NTDOY = OTC ADR)', confidence: 'verified' },
-      { ticker: 'NTDOY', role: 'Nintendo ADR', confidence: 'verified' },
-      { ticker: 'SONY',  role: 'Sony PlayStation', confidence: 'verified' },
+      { ticker: 'EA',    role: 'Electronic Arts', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'TTWO',  role: 'Take-Two Interactive (GTA/Rockstar)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'MSFT',  role: 'Activision/Blizzard/King (acquired 2023)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'RBLX',  role: 'Roblox', confidence: 'disclosed', audit: 'pending' },
+      { ticker: '7974.T', name: 'Nintendo', alias: ['NTDOY'], role: 'Nintendo (Japan-listed; NTDOY = OTC ADR)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'NTDOY', role: 'Nintendo ADR', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SONY',  role: 'Sony PlayStation', confidence: 'disclosed', audit: 'pending' },
       // Mobile-first
-      { ticker: 'AAPL',  role: 'iOS App Store (30% take-rate)', confidence: 'verified' },
-      { ticker: 'GOOGL', role: 'Google Play', confidence: 'verified' },
+      { ticker: 'AAPL',  role: 'iOS App Store (30% take-rate)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GOOGL', role: 'Google Play', confidence: 'disclosed', audit: 'pending' },
       // Chinese mobile
-      { ticker: 'NTES',  role: 'NetEase', confidence: 'verified' },
-      { ticker: '0700.HK', name: 'Tencent', alias: ['TCEHY', 'TCTZF'], role: 'Tencent gaming (HK)', confidence: 'verified' },
+      { ticker: 'NTES',  role: 'NetEase', confidence: 'disclosed', audit: 'pending' },
+      { ticker: '0700.HK', name: 'Tencent', alias: ['TCEHY', 'TCTZF'], role: 'Tencent gaming (HK)', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
       // Esports / streaming
-      { ticker: 'GOOGL', role: 'YouTube Gaming', confidence: 'verified' },
-      { ticker: 'AMZN',  role: 'Twitch', confidence: 'verified' },
+      { ticker: 'GOOGL', role: 'YouTube Gaming', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AMZN',  role: 'Twitch', confidence: 'disclosed', audit: 'pending' },
       // Retail / distribution
-      { ticker: 'GME',   role: 'GameStop — physical retail', confidence: 'verified' },
-      { name: 'Steam (Valve)', role: 'Largest PC distribution (private)', confidence: 'verified' },
+      { ticker: 'GME',   role: 'GameStop — physical retail', confidence: 'disclosed', audit: 'pending' },
+      { name: 'Steam (Valve)', role: 'Largest PC distribution (private)', confidence: 'disclosed', audit: 'pending' },
     ],
     relatedChains: ['consumer_elec', 'ai_software'],
     citations: [
@@ -44720,27 +44804,27 @@ const SUPPLY_CHAINS = [
     sector: 'Materials',
     description: 'From iron ore and coking coal mining through blast-furnace and electric-arc steelmaking to construction, autos, and machinery end-users.',
     upstream: [
-      { ticker: 'BHP', role: 'Iron ore + metallurgical coal (Australia)', confidence: 'verified' },
-      { ticker: 'RIO', role: 'Rio Tinto — iron ore major', confidence: 'verified' },
-      { ticker: 'VALE', role: 'Vale — world iron ore leader (Brazil)', confidence: 'verified' },
-      { ticker: 'FCX', role: 'Freeport — copper + molybdenum', confidence: 'verified' },
-      { ticker: 'SCCO', role: 'Southern Copper', confidence: 'verified' },
+      { ticker: 'BHP', role: 'Iron ore + metallurgical coal (Australia)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'RIO', role: 'Rio Tinto — iron ore major', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'VALE', role: 'Vale — world iron ore leader (Brazil)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'FCX', role: 'Freeport — copper + molybdenum', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SCCO', role: 'Southern Copper', confidence: 'disclosed', audit: 'pending' },
     ],
     midstream: [
-      { ticker: 'NUE', role: 'Nucor — largest US steelmaker (EAF)', confidence: 'verified' },
-      { ticker: 'STLD', role: 'Steel Dynamics — EAF', confidence: 'verified' },
-      { ticker: 'CLF', role: 'Cleveland-Cliffs — integrated + auto-grade', confidence: 'verified' },
-      { ticker: 'X', role: 'US Steel', confidence: 'verified' },
-      { ticker: 'MT', role: 'ArcelorMittal — global (Luxembourg)', confidence: 'verified' },
-      { ticker: 'PKX', role: 'POSCO — Korea steel major', confidence: 'verified' },
-      { ticker: 'AA', role: 'Alcoa — aluminum smelting', confidence: 'verified' },
+      { ticker: 'NUE', role: 'Nucor — largest US steelmaker (EAF)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'STLD', role: 'Steel Dynamics — EAF', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CLF', role: 'Cleveland-Cliffs — integrated + auto-grade', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'X', role: 'US Steel', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'MT', role: 'ArcelorMittal — global (Luxembourg)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'PKX', role: 'POSCO — Korea steel major', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AA', role: 'Alcoa — aluminum smelting', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
-      { ticker: 'CAT', role: 'Construction + mining machinery', confidence: 'verified' },
-      { ticker: 'DE', role: 'Deere — agricultural machinery', confidence: 'verified' },
-      { ticker: 'GM', role: 'Auto body steel consumption', confidence: 'verified' },
-      { ticker: 'F', role: 'Ford — auto steel + aluminum', confidence: 'verified' },
-      { ticker: 'PCAR', role: 'PACCAR — heavy trucks', confidence: 'verified' },
+      { ticker: 'CAT', role: 'Construction + mining machinery', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'DE', role: 'Deere — agricultural machinery', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GM', role: 'Auto body steel consumption', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'F', role: 'Ford — auto steel + aluminum', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'PCAR', role: 'PACCAR — heavy trucks', confidence: 'disclosed', audit: 'pending' },
       { name: 'Construction / infrastructure', role: 'Rebar + structural steel demand', confidence: 'disclosed' },
     ],
     relatedChains: ['auto_ice', 'real_estate'],
@@ -44754,24 +44838,24 @@ const SUPPLY_CHAINS = [
     sector: 'Materials',
     description: 'From exploration and mining through refining to central-bank, jewelry, and investment demand — plus the ETFs that vault physical metal.',
     upstream: [
-      { ticker: 'NEM', role: 'Newmont — world largest gold miner', confidence: 'verified' },
-      { ticker: 'GOLD', role: 'Barrick Gold', confidence: 'verified' },
-      { ticker: 'AEM', role: 'Agnico Eagle', confidence: 'verified' },
-      { ticker: 'FNV', role: 'Franco-Nevada — royalty/streaming', confidence: 'verified' },
-      { ticker: 'WPM', role: 'Wheaton Precious Metals — streaming', confidence: 'verified' },
-      { ticker: 'KGC', role: 'Kinross Gold', confidence: 'verified' },
+      { ticker: 'NEM', role: 'Newmont — world largest gold miner', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GOLD', role: 'Barrick Gold', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AEM', role: 'Agnico Eagle', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'FNV', role: 'Franco-Nevada — royalty/streaming', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'WPM', role: 'Wheaton Precious Metals — streaming', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'KGC', role: 'Kinross Gold', confidence: 'disclosed', audit: 'pending' },
     ],
     midstream: [
-      { ticker: 'RGLD', role: 'Royal Gold — royalties', confidence: 'verified' },
-      { name: 'Refiners (Valcambi, PAMP)', role: 'Swiss refining (private)', confidence: 'verified' },
+      { ticker: 'RGLD', role: 'Royal Gold — royalties', confidence: 'disclosed', audit: 'pending' },
+      { name: 'Refiners (Valcambi, PAMP)', role: 'Swiss refining (private)', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
-      { ticker: 'GLD', role: 'SPDR Gold — physical vault ETF', confidence: 'verified' },
-      { ticker: 'IAU', role: 'iShares Gold Trust', confidence: 'verified' },
-      { ticker: 'SLV', role: 'iShares Silver Trust', confidence: 'verified' },
-      { ticker: 'SIVR', role: 'abrdn Physical Silver', confidence: 'verified' },
+      { ticker: 'GLD', role: 'SPDR Gold — physical vault ETF', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'IAU', role: 'iShares Gold Trust', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SLV', role: 'iShares Silver Trust', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SIVR', role: 'abrdn Physical Silver', confidence: 'disclosed', audit: 'pending' },
       { name: 'Central banks', role: 'Reserve accumulation (PBoC, etc.)', confidence: 'disclosed' },
-      { name: 'Jewelry demand (India/China)', role: 'Largest physical consumers', confidence: 'verified' },
+      { name: 'Jewelry demand (India/China)', role: 'Largest physical consumers', confidence: 'disclosed', audit: 'pending' },
     ],
     relatedChains: [],
     citations: ['Miner 10-Ks — production + AISC', 'World Gold Council demand trends', 'ETF prospectuses'],
@@ -44784,24 +44868,24 @@ const SUPPLY_CHAINS = [
     sector: 'Energy',
     description: 'From shale gas production through pipelines and liquefaction-export terminals to power generation, heating, and global LNG importers.',
     upstream: [
-      { ticker: 'EQT', role: 'Largest US natgas producer (Appalachia)', confidence: 'verified' },
-      { ticker: 'EXE', role: 'Expand Energy (Chesapeake+Southwestern)', confidence: 'verified' },
-      { ticker: 'AR', role: 'Antero Resources', confidence: 'verified' },
-      { ticker: 'RRC', role: 'Range Resources', confidence: 'verified' },
+      { ticker: 'EQT', role: 'Largest US natgas producer (Appalachia)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'EXE', role: 'Expand Energy (Chesapeake+Southwestern)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AR', role: 'Antero Resources', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'RRC', role: 'Range Resources', confidence: 'disclosed', audit: 'pending' },
     ],
     midstream: [
-      { ticker: 'LNG', role: 'Cheniere — largest US LNG exporter', confidence: 'verified' },
-      { ticker: 'WMB', role: 'Williams — Transco pipeline', confidence: 'verified' },
-      { ticker: 'KMI', role: 'Kinder Morgan — gas pipelines', confidence: 'verified' },
-      { ticker: 'ET', role: 'Energy Transfer — midstream', confidence: 'verified' },
-      { ticker: 'OKE', role: 'ONEOK — gathering/processing', confidence: 'verified' },
-      { ticker: 'SHEL', role: 'Shell — global LNG trading', confidence: 'verified' },
+      { ticker: 'LNG', role: 'Cheniere — largest US LNG exporter', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'WMB', role: 'Williams — Transco pipeline', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'KMI', role: 'Kinder Morgan — gas pipelines', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ET', role: 'Energy Transfer — midstream', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'OKE', role: 'ONEOK — gathering/processing', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SHEL', role: 'Shell — global LNG trading', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
-      { name: 'US utilities (gas-fired power)', role: 'Largest domestic consumer', confidence: 'verified' },
-      { ticker: 'UNG', role: 'US Natural Gas Fund (futures ETF)', confidence: 'verified' },
-      { name: 'JERA / KOGAS / CNOOC', role: 'Asian LNG importers (Japan/Korea/China)', confidence: 'verified' },
-      { name: 'European utilities', role: 'Post-Russia LNG demand', confidence: 'verified' },
+      { name: 'US utilities (gas-fired power)', role: 'Largest domestic consumer', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'UNG', role: 'US Natural Gas Fund (futures ETF)', confidence: 'disclosed', audit: 'pending' },
+      { name: 'JERA / KOGAS / CNOOC', role: 'Asian LNG importers (Japan/Korea/China)', confidence: 'disclosed', audit: 'pending' },
+      { name: 'European utilities', role: 'Post-Russia LNG demand', confidence: 'disclosed', audit: 'pending' },
     ],
     relatedChains: ['oil_gas', 'solar_renew'],
     citations: ['Producer 10-Ks', 'EIA natural gas data', 'Cheniere export volumes'],
@@ -44814,26 +44898,26 @@ const SUPPLY_CHAINS = [
     sector: 'Industrials',
     description: 'From aircraft + engine makers through airlines to booking platforms, hotels, and the jet-fuel cost input that swings the whole chain.',
     upstream: [
-      { ticker: 'BA', role: 'Boeing — airframes', confidence: 'verified' },
-      { ticker: 'AIR.PA', name: 'Airbus', alias: ['EADSY'], role: 'Airbus — airframes (France)', confidence: 'verified' },
-      { ticker: 'GE', role: 'GE Aerospace — engines', confidence: 'verified' },
-      { ticker: 'RTX', role: 'Pratt & Whitney engines', confidence: 'verified' },
+      { ticker: 'BA', role: 'Boeing — airframes', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AIR.PA', name: 'Airbus', alias: ['EADSY'], role: 'Airbus — airframes (France)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GE', role: 'GE Aerospace — engines', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'RTX', role: 'Pratt & Whitney engines', confidence: 'disclosed', audit: 'pending' },
       { ticker: 'USO', role: 'Jet fuel cost proxy (crude ETF)', confidence: 'disclosed' },
     ],
     midstream: [
-      { ticker: 'DAL', role: 'Delta Air Lines', confidence: 'verified' },
-      { ticker: 'UAL', role: 'United Airlines', confidence: 'verified' },
-      { ticker: 'AAL', role: 'American Airlines', confidence: 'verified' },
-      { ticker: 'LUV', role: 'Southwest Airlines', confidence: 'verified' },
-      { ticker: 'RYAAY', role: 'Ryanair (Europe)', confidence: 'verified' },
+      { ticker: 'DAL', role: 'Delta Air Lines', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'UAL', role: 'United Airlines', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'AAL', role: 'American Airlines', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'LUV', role: 'Southwest Airlines', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'RYAAY', role: 'Ryanair (Europe)', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
-      { ticker: 'BKNG', role: 'Booking Holdings — OTA', confidence: 'verified' },
-      { ticker: 'EXPE', role: 'Expedia', confidence: 'verified' },
-      { ticker: 'ABNB', role: 'Airbnb — lodging', confidence: 'verified' },
-      { ticker: 'MAR', role: 'Marriott', confidence: 'verified' },
-      { ticker: 'HLT', role: 'Hilton', confidence: 'verified' },
-      { ticker: 'JETS', role: 'US Global Jets ETF', confidence: 'verified' },
+      { ticker: 'BKNG', role: 'Booking Holdings — OTA', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'EXPE', role: 'Expedia', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ABNB', role: 'Airbnb — lodging', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'MAR', role: 'Marriott', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'HLT', role: 'Hilton', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'JETS', role: 'US Global Jets ETF', confidence: 'disclosed', audit: 'pending' },
     ],
     relatedChains: ['oil_gas', 'defense_aero'],
     citations: ['Airline 10-Ks — capacity + load factors', 'Boeing/Airbus order books', 'IATA traffic data'],
@@ -44846,20 +44930,20 @@ const SUPPLY_CHAINS = [
     sector: 'Industrials',
     description: 'From shipbuilders through container, dry-bulk, and tanker operators to ports and the freight-rate proxies that signal global trade health.',
     upstream: [
-      { ticker: '009540.KS', name: 'HD Hyundai Heavy', role: 'Shipbuilding (Korea)', confidence: 'verified' },
-      { name: 'China State Shipbuilding', role: 'Largest shipbuilder (China)', confidence: 'verified' },
+      { ticker: '009540.KS', name: 'HD Hyundai Heavy', role: 'Shipbuilding (Korea)', confidence: 'disclosed', audit: 'pending' },
+      { name: 'China State Shipbuilding', role: 'Largest shipbuilder (China)', confidence: 'disclosed', audit: 'pending' },
     ],
     midstream: [
-      { ticker: 'ZIM', role: 'ZIM — container liner', confidence: 'verified' },
-      { ticker: 'MAERSK-B.CO', name: 'Maersk', alias: ['AMKBY'], role: 'A.P. Moller-Maersk (Denmark)', confidence: 'verified' },
-      { ticker: 'GSL', role: 'Global Ship Lease — charter', confidence: 'verified' },
-      { ticker: 'SBLK', role: 'Star Bulk — dry bulk', confidence: 'verified' },
-      { ticker: 'GNK', role: 'Genco — dry bulk', confidence: 'verified' },
-      { ticker: 'FRO', role: 'Frontline — crude tankers', confidence: 'verified' },
-      { ticker: 'STNG', role: 'Scorpio Tankers — product tankers', confidence: 'verified' },
+      { ticker: 'ZIM', role: 'ZIM — container liner', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'MAERSK-B.CO', name: 'Maersk', alias: ['AMKBY'], role: 'A.P. Moller-Maersk (Denmark)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GSL', role: 'Global Ship Lease — charter', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SBLK', role: 'Star Bulk — dry bulk', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GNK', role: 'Genco — dry bulk', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'FRO', role: 'Frontline — crude tankers', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'STNG', role: 'Scorpio Tankers — product tankers', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
-      { ticker: 'BDRY', role: 'Breakwave Dry Bulk Freight ETF', confidence: 'verified' },
+      { ticker: 'BDRY', role: 'Breakwave Dry Bulk Freight ETF', confidence: 'disclosed', audit: 'pending' },
       { ticker: 'BWET', role: 'Breakwave Tanker Freight ETF', confidence: 'disclosed' },
       { name: 'Retail / manufacturing importers', role: 'End cargo demand', confidence: 'disclosed' },
     ],
@@ -44878,19 +44962,19 @@ const SUPPLY_CHAINS = [
       { name: 'Synthetic fiber (polyester)', role: 'Petrochemical-derived fiber', confidence: 'disclosed' },
     ],
     midstream: [
-      { name: 'Shenzhou International', role: 'Knit garment OEM (HK: 2313.HK)', confidence: 'verified' },
-      { name: 'Pou Chen / Yue Yuen', role: 'Footwear OEM (Taiwan/HK)', confidence: 'verified' },
+      { name: 'Shenzhou International', role: 'Knit garment OEM (HK: 2313.HK)', confidence: 'disclosed', audit: 'pending' },
+      { name: 'Pou Chen / Yue Yuen', role: 'Footwear OEM (Taiwan/HK)', confidence: 'disclosed', audit: 'pending' },
       { name: 'Vietnamese / Bangladeshi factories', role: 'Cut-and-sew manufacturing', confidence: 'disclosed' },
     ],
     downstream: [
-      { ticker: 'NKE', role: 'Nike', confidence: 'verified' },
-      { ticker: 'ADDYY', role: 'Adidas (ADR)', confidence: 'verified' },
-      { ticker: 'LULU', role: 'Lululemon', confidence: 'verified' },
-      { ticker: 'VFC', role: 'VF Corp (Vans, North Face)', confidence: 'verified' },
-      { ticker: 'TPR', role: 'Tapestry (Coach)', confidence: 'verified' },
-      { ticker: 'GPS', role: 'Gap', confidence: 'verified' },
-      { ticker: '9983.T', name: 'Fast Retailing (Uniqlo)', alias: ['FRCOY'], role: 'Uniqlo parent (Japan)', confidence: 'verified' },
-      { name: 'Inditex (Zara)', role: 'Fast fashion (Spain: ITX.MC)', confidence: 'verified' },
+      { ticker: 'NKE', role: 'Nike', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ADDYY', role: 'Adidas (ADR)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'LULU', role: 'Lululemon', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'VFC', role: 'VF Corp (Vans, North Face)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'TPR', role: 'Tapestry (Coach)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'GPS', role: 'Gap', confidence: 'disclosed', audit: 'pending' },
+      { ticker: '9983.T', name: 'Fast Retailing (Uniqlo)', alias: ['FRCOY'], role: 'Uniqlo parent (Japan)', confidence: 'disclosed', audit: 'pending' },
+      { name: 'Inditex (Zara)', role: 'Fast fashion (Spain: ITX.MC)', confidence: 'disclosed', audit: 'pending' },
     ],
     relatedChains: [],
     citations: ['Brand 10-Ks — sourcing disclosures', 'OEM annual reports', 'Cotlook cotton index'],
@@ -44907,17 +44991,17 @@ const SUPPLY_CHAINS = [
       { name: 'Swiss movement makers', role: 'Watch movements (ETA, etc.)', confidence: 'disclosed' },
     ],
     midstream: [
-      { ticker: 'MC.PA', name: 'LVMH', alias: ['LVMUY'], role: 'LVMH — largest luxury group (France)', confidence: 'verified' },
-      { ticker: 'RMS.PA', name: 'Hermès', alias: ['HESAY'], role: 'Hermès (France)', confidence: 'verified' },
-      { ticker: 'CFR.SW', name: 'Richemont', alias: ['CFRUY'], role: 'Cartier parent (Switzerland)', confidence: 'verified' },
-      { ticker: 'KER.PA', name: 'Kering', alias: ['PPRUY'], role: 'Gucci parent (France)', confidence: 'verified' },
-      { ticker: 'PRX.AS', name: 'Prada', role: 'Prada (listed HK: 1913.HK)', confidence: 'verified' },
+      { ticker: 'MC.PA', name: 'LVMH', alias: ['LVMUY'], role: 'LVMH — largest luxury group (France)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'RMS.PA', name: 'Hermès', alias: ['HESAY'], role: 'Hermès (France)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CFR.SW', name: 'Richemont', alias: ['CFRUY'], role: 'Cartier parent (Switzerland)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'KER.PA', name: 'Kering', alias: ['PPRUY'], role: 'Gucci parent (France)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'PRX.AS', name: 'Prada', role: 'Prada (listed HK: 1913.HK)', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
-      { name: 'Chinese consumers', role: 'Largest luxury demand pool', confidence: 'verified' },
+      { name: 'Chinese consumers', role: 'Largest luxury demand pool', confidence: 'disclosed', audit: 'pending' },
       { name: 'Global flagship retail', role: 'Direct-to-consumer boutiques', confidence: 'disclosed' },
-      { ticker: 'TPR', role: 'Tapestry — accessible luxury', confidence: 'verified' },
-      { ticker: 'CPRI', role: 'Capri (Versace, Jimmy Choo)', confidence: 'verified' },
+      { ticker: 'TPR', role: 'Tapestry — accessible luxury', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'CPRI', role: 'Capri (Versace, Jimmy Choo)', confidence: 'disclosed', audit: 'pending' },
     ],
     relatedChains: ['apparel_textiles'],
     citations: ['Maison annual reports', 'Bain Luxury Goods Worldwide Market Study'],
@@ -44930,20 +45014,20 @@ const SUPPLY_CHAINS = [
     sector: 'Utilities',
     description: 'From water sourcing and treatment-equipment makers through regulated water + electric utilities to industrial, agricultural, and residential consumers.',
     upstream: [
-      { ticker: 'XYL', role: 'Xylem — water pumps + treatment equipment', confidence: 'verified' },
-      { ticker: 'ECL', role: 'Ecolab — water treatment chemicals', confidence: 'verified' },
-      { ticker: 'PNR', role: 'Pentair — water systems', confidence: 'verified' },
+      { ticker: 'XYL', role: 'Xylem — water pumps + treatment equipment', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'ECL', role: 'Ecolab — water treatment chemicals', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'PNR', role: 'Pentair — water systems', confidence: 'disclosed', audit: 'pending' },
     ],
     midstream: [
-      { ticker: 'AWK', role: 'American Water Works — largest US water utility', confidence: 'verified' },
-      { ticker: 'WTRG', role: 'Essential Utilities (Aqua)', confidence: 'verified' },
-      { ticker: 'NEE', role: 'NextEra — largest US utility + renewables', confidence: 'verified' },
-      { ticker: 'DUK', role: 'Duke Energy', confidence: 'verified' },
-      { ticker: 'SO', role: 'Southern Company', confidence: 'verified' },
+      { ticker: 'AWK', role: 'American Water Works — largest US water utility', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'WTRG', role: 'Essential Utilities (Aqua)', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'NEE', role: 'NextEra — largest US utility + renewables', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'DUK', role: 'Duke Energy', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'SO', role: 'Southern Company', confidence: 'disclosed', audit: 'pending' },
     ],
     downstream: [
-      { ticker: 'PHO', role: 'Invesco Water Resources ETF', confidence: 'verified' },
-      { ticker: 'XLU', role: 'Utilities Select Sector ETF', confidence: 'verified' },
+      { ticker: 'PHO', role: 'Invesco Water Resources ETF', confidence: 'disclosed', audit: 'pending' },
+      { ticker: 'XLU', role: 'Utilities Select Sector ETF', confidence: 'disclosed', audit: 'pending' },
       { name: 'Residential / industrial / agricultural', role: 'End consumption', confidence: 'disclosed' },
     ],
     relatedChains: ['solar_renew'],
@@ -45360,7 +45444,7 @@ function renderChainCard(chain, opts = {}) {
                     <span class="sc-company-tic">${escapeHtml(e.ticker)}</span>
                     <span class="sc-company-name">${escapeHtml(e.role || displayName)}</span>
                     ${renderReturnBadge(e.ticker, '1mo')}
-                    <span class="sc-company-conf ${e.confidence || 'inferred'}" title="${confInfo.explainer}">${confInfo.label}</span>
+                    <span class="sc-company-conf ${e.confidence || 'inferred'}" title="${confInfo.explainer}${e.audit === 'pending' ? ' · audit pending' : ''}">${confInfo.label}${e.audit === 'pending' ? '*' : ''}</span>
                   </div>
                 `;
               } else {
@@ -45368,7 +45452,7 @@ function renderChainCard(chain, opts = {}) {
                   <div class="sc-company" title="${escapeHtml(e.role || '')}">
                     <span class="sc-company-tic sc-company-private">●</span>
                     <span class="sc-company-name sc-company-private">${escapeHtml(displayName)}</span>
-                    <span class="sc-company-conf ${e.confidence || 'inferred'}" title="${confInfo.explainer}">${confInfo.label}</span>
+                    <span class="sc-company-conf ${e.confidence || 'inferred'}" title="${confInfo.explainer}${e.audit === 'pending' ? ' · audit pending' : ''}">${confInfo.label}${e.audit === 'pending' ? '*' : ''}</span>
                   </div>
                 `;
               }
@@ -45454,9 +45538,11 @@ function renderChainCard(chain, opts = {}) {
       ${relatedChainsHtml}
       <div class="sc-legend">
         <span><strong>Confidence:</strong></span>
-        <span style="color:var(--pos)"><strong>verified</strong> 10-K disclosed</span>
+        <span style="color:var(--pos)"><strong>filing</strong> 10-K / 8-K / S-1</span>
         <span style="color:#7faaca"><strong>disclosed</strong> press release / partnership</span>
+        <span style="color:#c0a060"><strong>reported</strong> press, unconfirmed</span>
         <span style="color:var(--data-amber)"><strong>inferred</strong> sector knowledge — unverified</span>
+        <span style="color:var(--ink-faint)">* audit pending</span>
         ${chain.citations?.length ? `<span style="margin-left:auto;color:var(--ink-faint)">Sources: ${chain.citations.map(c => escapeHtml(c)).join(' · ')}</span>` : ''}
       </div>
     </div>
@@ -45498,7 +45584,7 @@ function renderSupplyChainTab() {
         Click any ticker to jump-value it.
         Tickers <span style="color:var(--amber);font-weight:700">highlighted with amber outline</span> are in your Stock Book or portfolio — these are your cross-chain exposures.
         Each card shows multi-window performance (equal-weighted), per-stock 1-month return, and related chains.
-        Every link is labeled with its confidence tier (verified / disclosed / inferred) so you can audit the claim.
+        Every link is labeled with its confidence tier (filing / disclosed / reported / inferred; * = audit against a source pending) so you can audit the claim.
         For a portfolio-wide heatmap visualization, use the <strong style="color:var(--amber)">HEAT</strong> F2 function.
       </div>
       ${chains.map(c => renderChainCard(c, { search: q })).join('')}
