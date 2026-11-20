@@ -21,6 +21,9 @@
    universe is a money edge with confidence 'filing'; the money panel lists those stakes.
    z199: CUSIPs from the same filings (data/sec/cusips.json) let the app's 13F holders section match by CUSIP instead
    of by name.
+   z200: Macro Data → "Supply Chains & Business Web" - the Supply Chains page gains four Business Web views (Companies,
+   Money links, Ownership, Loops & circularity): sortable, filterable tables; ▸ opens a company's full Business Web in
+   place; config chains marked `rev` replace the app's copy (dead tickers fixed in data, not in app.js).
    Gives the app:
      WEB (3D)  - lenses "Money web" and "Money web - loops only" (arrows = the direction money / value flows)
      Company   - a Business Web card on the company page (money links, circularity, chains, index weights, the SEC
@@ -101,13 +104,20 @@
     const d = await get('chains');
     if (!d || !Array.isArray(d.chains) || typeof SUPPLY_CHAINS === 'undefined' || !Array.isArray(SUPPLY_CHAINS)) return { added: 0, relabelled: 0 };
     const have = new Map(SUPPLY_CHAINS.map(c => [c.id, c]));
-    let added = 0, relabelled = 0;
+    let added = 0, relabelled = 0, revised = 0;
     for (const c of d.chains) {
       if (!c || !c.id) continue;
       const mine = have.get(c.id);
       if (!mine) {
         SUPPLY_CHAINS.push(Object.assign({}, c, { _source: 'TRAPP2-ANALYTICS config/supply_chains.json' }));
         added++;
+        continue;
+      }
+      if (c.rev) {                                    // z200: a revised chain in the config replaces the app's copy (members, description)
+        for (const k of ['upstream', 'midstream', 'downstream']) mine[k] = (c[k] || []).map(m => Object.assign({}, m));
+        if (c.description) mine.description = c.description;
+        mine._rev = c.rev;
+        revised++;
         continue;
       }
       for (const k of ['upstream', 'midstream', 'downstream']) {
@@ -122,9 +132,9 @@
         }
       }
     }
-    merged = { added, relabelled, at: d.asOf };
+    merged = { added, relabelled, revised, at: d.asOf };
     try {
-      if (added && typeof renderSupplyChainTab === 'function' && document.getElementById('sc-content') && document.getElementById('sc-content').offsetParent) renderSupplyChainTab();
+      if ((added || revised) && typeof renderSupplyChainTab === 'function' && document.getElementById('sc-content') && document.getElementById('sc-content').offsetParent) renderSupplyChainTab();
       if (added && typeof window.webLensRefresh === 'function') window.webLensRefresh();
     } catch (e) {}
     return merged;
@@ -306,7 +316,7 @@
     return parts.join('');
   }
 
-  function companyCardHtml(t, n, money, chainsDoc, ipo, secDoc) {
+  function companyCardHtml(t, n, money, chainsDoc, ipo, secDoc, inline) {
     const edges = ((money && money.edges) || []).filter(e => e.from === t || e.to === t);
     const chainName = id => ((chainsDoc && chainsDoc.chains) || []).find(c => c.id === id)?.name || id;
     const parts = [];
@@ -340,7 +350,7 @@
         <div style="${small}">The bot: no new long from 3 sessions before a major release to 1 after; longs ×0.85 in the first 5 sessions of syndicate initiations.</div></div>`);
     }
     if (!parts.length) return '';
-    return `<div class="company-card" id="company-business-web" data-ticker="${esc(t)}">
+    return `<div class="company-card" ${inline ? 'data-bw-inline="1"' : 'id="company-business-web"'} data-ticker="${esc(t)}">
       <h4>Business Web <span style="color:var(--ink-faint);font-size:9px;text-transform:none;letter-spacing:0;font-weight:400">· who it owns, funds and buys from, who funds it - money that comes back · WEB → Money web for the whole map</span></h4>
       ${parts.join('')}
       <div style="${small};margin-top:6px">TRAPP2-ANALYTICS data/web (${esc((money && money.asOf) || '')}) - every money link carries its source and confidence (filing / disclosed / reported / inferred).</div></div>`;
@@ -408,12 +418,290 @@
     } catch (e) {}
   }
 
+
+  // ---- 5) Macro Data → Supply Chains & Business Web (z200) -----------------------------------------------------------
+  // Owner 11-20: "Can we throw this into Macro Data as a table similar to that of Supply chains? … supply chains and the
+  // Business Web in the same tab for easier research." The Supply Chains page keeps its three chain views and gains four
+  // Business Web views (index.html: the view menu's "Business Web" group); app.js's renderSupplyChainTab is wrapped (a
+  // top-level function: every caller resolves it on the window), so the chain views run unchanged.
+  const TAB = {
+    sort: { companies: ['links', -1], links: ['date', -1], ownership: ['pct', -1], conc: ['sum5', -1] },
+    filter: { companies: 'web', links: 'all', ownership: 'all' },
+    limit: 100, open: null, seq: 0,
+  };
+  const VIEW_INFO = {
+    'bw:companies': ['Companies', 'every company in the web: its money links, the commitments into and out of it, loops, 5%+ holders, the stakes it holds, chains'],
+    'bw:links': ['Money links', 'every typed link - owns / funds / commits / supplies / underwrites - with its size, confidence, date and source'],
+    'bw:ownership': ['Ownership', 'stakes between companies from the filings (13D / 13G / 13F) and how concentrated each company\'s 5%+ holders are'],
+    'bw:loops': ['Loops & circularity', 'money that comes back to where it started, companies funding their own customers, backlog that rests on tracked buyers'],
+  };
+  const fmtN = v => v == null || !isFinite(v) ? '—' : Math.round(v).toLocaleString('en-US');
+  const pctTxt = (v, approx) => v == null || !isFinite(v) ? '—' : `${approx ? '≈' : ''}${(+v).toFixed(v >= 10 ? 1 : 2).replace(/\.?0+$/, '')}%`;
+  const valueIt = t => `<span class="bw-tic" data-bw-value="${esc(t)}" title="Value ${esc(t)}" style="color:var(--amber);font-weight:700;cursor:pointer">${esc(t)}</span>`;
+  const chip = (group, key, label, on, n) => `<button type="button" class="sc-chain-meta-pill${on ? ' exposed' : ''}" data-bw-filter="${esc(group)}:${esc(key)}" style="cursor:pointer;font-family:var(--mono)">${esc(label)}${n != null ? ` <span style="color:var(--ink-faint)">${n}</span>` : ''}</button>`;
+  const th = (view, key, label, title, left) => {
+    const [k, d] = TAB.sort[view] || [];
+    return `<th class="sortable" data-bw-sort="${esc(view)}:${esc(key)}" style="cursor:pointer;${left ? 'text-align:left;' : ''}white-space:nowrap"${title ? ` title="${esc(title)}"` : ''}>${esc(label)}${k === key ? (d < 0 ? ' ▾' : ' ▴') : ''}</th>`;
+  };
+  function sortRows(rows, view, getters) {
+    const [k, d] = TAB.sort[view] || [];
+    const g = getters[k];
+    if (!g) return rows;
+    return rows.slice().sort((a, b) => {
+      const x = g(a), y = g(b);
+      const xn = x == null || x === '', yn = y == null || y === '';
+      if (xn || yn) return xn && yn ? 0 : xn ? 1 : -1;               // blanks last either way
+      return (typeof x === 'string' ? x.localeCompare(y) : x - y) * d;
+    });
+  }
+  const introBox = html => `<div style="background:var(--bg-elev);border:1px solid var(--rule);border-left:3px solid var(--amber);border-radius:0 4px 4px 0;padding:12px 16px;margin-bottom:14px;font-family:var(--mono);font-size:10px;color:var(--ink);line-height:1.7">${html}</div>`;
+  const tableWrap = (min, head, body) => `<div data-bw-wrap="1" style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table class="sb-table" style="width:100%;min-width:${min}px;${mono};font-size:10.5px"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+  const moreBtn = (shown, total) => total > shown ? `<div style="text-align:center;margin:10px 0"><button type="button" class="btn btn-ghost" data-bw-more="1" style="font-size:10px">Show more (${shown} of ${total})</button></div>` : '';
+  const threeD = `<button type="button" class="btn btn-ghost" data-bw-3d="1" style="font-size:10px;margin-left:6px">Open the 3D money web</button>`;
+  const matchQ = (q, ...xs) => !q || xs.some(x => String(x || '').toLowerCase().includes(q));
+
+  function chainNames(chainsDoc) {
+    const m = {};
+    for (const c of (chainsDoc && chainsDoc.chains) || []) m[c.id] = c.name;
+    try { if (typeof SUPPLY_CHAINS !== 'undefined') for (const c of SUPPLY_CHAINS) if (!m[c.id]) m[c.id] = c.name; } catch (e) {}
+    return m;
+  }
+  function companyRows(nodes) {
+    const out = [];
+    for (const [t, n] of Object.entries((nodes && nodes.nodes) || {})) {
+      const mo = n.money || {};
+      out.push({ t, n, name: n.name || t, sector: n.sector || '', industry: n.industry || (n.sic && n.sic[1]) || '',
+                 links: (mo.edges || []).length, owns: mo.owns || 0, ownedBy: mo.ownedBy || 0, funds: mo.funds || 0,
+                 cin: mo.commitsInUSD || null, cout: mo.commitsOutUSD || null, loops: (n.circularity && n.circularity.loops) || null,
+                 circ: n.circularity ? n.circularity.committedBackToRevenue : null, rpoShare: n.backlog ? n.backlog.shareOfRpo : null,
+                 n5: n.own ? n.own.n5 : null, sum5: n.own ? n.own.sum5 : null, top: n.own ? n.own.top : null,
+                 stakes: (n.stakes ? n.stakes.n5 : 0) + (n.f13 ? n.f13.n || 0 : 0) || null,
+                 chains: (n.chains || []).length || null, rev: n.facts ? n.facts.rev : null, mc: n.mc || null,
+                 spy: n.idx ? (n.idx.SPY != null ? n.idx.SPY : null) : null });
+    }
+    return out;
+  }
+  const CO_FILTERS = [['web', 'In the money web', r => r.links > 0], ['holders', 'With 5%+ holders on file', r => r.n5 > 0],
+                      ['stakes', 'Holds stakes (13D / 13G / 13F)', r => r.stakes > 0], ['circular', 'Funds its own buyers', r => r.circ != null || (r.n.circularity && true)],
+                      ['chains', 'In a supply chain', r => r.chains > 0], ['all', 'All companies', () => true]];
+
+  function viewCompanies(nodes, money, chainsDoc, q) {
+    const all = companyRows(nodes);
+    const f = CO_FILTERS.find(x => x[0] === TAB.filter.companies) || CO_FILTERS[0];
+    let rows = all.filter(f[2]).filter(r => matchQ(q, r.t, r.name, r.sector, r.industry, r.top && r.top[0]));
+    rows = sortRows(rows, 'companies', { ticker: r => r.t, name: r => r.name.toLowerCase(), sector: r => r.sector || null, links: r => r.links || null,
+                                         cin: r => r.cin, cout: r => r.cout, loops: r => r.loops, circ: r => r.circ, n5: r => r.n5, sum5: r => r.sum5,
+                                         stakes: r => r.stakes, chains: r => r.chains, rev: r => r.rev, mc: r => r.mc, spy: r => r.spy });
+    const cn = chainNames(chainsDoc);
+    const shown = rows.slice(0, TAB.limit);
+    const head = th('companies', 'ticker', 'Ticker', '', true) + th('companies', 'name', 'Company', '', true) + th('companies', 'sector', 'Sector · industry', '', true)
+      + th('companies', 'links', 'Money links', 'owns · owned by · funds — every typed link it is part of') + th('companies', 'cin', 'Committed to it', 'purchase / capacity commitments from tracked buyers (USD)')
+      + th('companies', 'cout', 'It commits', 'its own purchase commitments to tracked sellers (USD)') + th('companies', 'loops', 'Loops', 'money loops it is part of')
+      + th('companies', 'circ', 'Back ÷ revenue', 'commitments back from companies it funds or owns, as a share of one year\'s revenue (multi-year vs one year - a scale)')
+      + th('companies', 'n5', '5%+ holders', 'holders with 5% or more of a class, from Schedule 13D / 13G') + th('companies', 'sum5', 'Held by them', 'their stakes added up, within the main share class')
+      + th('companies', 'stakes', 'Its stakes', '5%+ stakes it filed (13D / 13G) + positions in its own 13F') + th('companies', 'chains', 'Chains', 'supply chains it is placed in')
+      + th('companies', 'rev', 'Revenue', 'SEC, trailing twelve months where available') + th('companies', 'spy', 'S&P 500 wt', 'index weight');
+    const body = shown.map(r => {
+      const open = TAB.open === r.t;
+      const lk = r.links ? `${r.links}<span style="color:var(--ink-faint)"> · ${[r.owns ? r.owns + ' owns' : '', r.ownedBy ? r.ownedBy + ' owned by' : '', r.funds ? r.funds + ' funds' : ''].filter(Boolean).join(' · ')}</span>` : '—';
+      const chainsTitle = (r.n.chains || []).map(c => `${cn[c[0]] || c[0]} (${c[1]}stream)`).join(' · ');
+      return `<tr data-bw-row="${esc(r.t)}"${open ? ' style="background:var(--bg-elev)"' : ''}>
+        <td style="text-align:left;white-space:nowrap"><button type="button" data-bw-open="${esc(r.t)}" title="${open ? 'Close' : 'Open'} ${esc(r.t)}'s Business Web" style="background:none;border:none;color:var(--ink-faint);cursor:pointer;padding:0 4px 0 0;font-family:var(--mono)">${open ? '▾' : '▸'}</button>${valueIt(r.t)}</td>
+        <td style="text-align:left;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.name)}">${esc(r.name)}${r.n.kind === 'private' ? ' <span style="color:var(--ink-faint)">(private)</span>' : ''}</td>
+        <td style="text-align:left;color:var(--ink-dim);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc([r.sector, r.industry].filter(Boolean).join(' · '))}">${esc([r.sector, r.industry].filter(Boolean).join(' · ') || '—')}</td>
+        <td style="white-space:nowrap">${lk}</td><td>${r.cin ? esc(usd(r.cin)) : '—'}</td><td>${r.cout ? esc(usd(r.cout)) : '—'}</td><td>${r.loops || '—'}</td>
+        <td>${r.circ != null ? Math.round(r.circ * 100) + '%' : '—'}</td>
+        <td title="${r.top ? esc(`largest: ${r.top[0]} ${r.top[1]}%`) : ''}">${r.n5 || '—'}</td><td>${r.sum5 != null ? esc(r.sum5) + '%' : '—'}</td>
+        <td>${r.stakes || '—'}</td><td title="${esc(chainsTitle)}">${r.chains || '—'}</td><td>${r.rev ? esc(usd(r.rev)) : '—'}</td><td>${r.spy != null ? (+r.spy).toFixed(2) + '%' : '—'}</td></tr>
+        ${open ? `<tr data-bw-detail="${esc(r.t)}"><td colspan="14" style="text-align:left;white-space:normal;padding:8px 6px 12px"><div data-bw-sticky="1" style="position:sticky;left:6px;max-width:100%"><div data-bw-card="${esc(r.t)}" style="${small}">Loading ${esc(r.t)}'s filings…</div></div></td></tr>` : ''}`;
+    }).join('');
+    const counts = Object.fromEntries(CO_FILTERS.map(([k, , fn]) => [k, all.filter(fn).length]));
+    return introBox(`<strong style="color:var(--amber)">Business Web · Companies</strong> - ${esc(VIEW_INFO['bw:companies'][1])}. ${rows.length} shown of ${all.length}${q ? ` matching "${esc(q)}"` : ''}.
+        Click a ticker to value it, ▸ to open its Business Web (money links, 5%+ holders, its stakes and 13F holdings, SEC money structure, chains). Column headers sort.${threeD}
+        <div style="margin-top:8px;display:flex;gap:5px;flex-wrap:wrap">${CO_FILTERS.map(([k, label]) => chip('companies', k, label, TAB.filter.companies === k, counts[k])).join('')}</div>`)
+      + (rows.length ? tableWrap(1180, head, body) + moreBtn(shown.length, rows.length) : `<div style="padding:30px;text-align:center;${small}">No company matches${q ? ` "${esc(q)}"` : ''} in this view.</div>`)
+      + `<div style="${small};margin-top:6px">TRAPP2-ANALYTICS data/web (${esc((nodes && nodes.asOf) || '')}) · holders and stakes fill in as the SEC run reads each company's 13D / 13G / 13F filings.</div>`;
+  }
+
+  const LINK_TYPES = ['owns', 'funds', 'commits', 'supplies', 'underwrites'];
+  function viewLinks(money, q) {
+    const loopEdges = new Set((money.loops || []).flatMap(L => L.edges || []));
+    const names = money.names || {};
+    const all = (money.edges || []).map(e => ({ e, date: ((e.events || []).slice(-1)[0] || {}).date || '', loop: loopEdges.has(e.id),
+                                                size: e.amountUSD || e.valueUSD || (e.f13 && e.f13.valueUSD) || (e.gw ? e.gw * 1e10 : null) }));
+    const fk = TAB.filter.links;
+    let rows = all.filter(r => fk === 'all' || (fk === 'loops' ? r.loop : LINK_TYPES.includes(fk) ? r.e.type === fk : r.e.confidence === fk))
+                  .filter(r => matchQ(q, r.e.from, r.e.to, names[r.e.from], names[r.e.to], r.e.label));
+    rows = sortRows(rows, 'links', { from: r => r.e.from, type: r => r.e.type, to: r => r.e.to, size: r => r.size, conf: r => r.e.confidence || null, date: r => r.date || null });
+    const src = money.sources || {};
+    const shown = rows.slice(0, TAB.limit);
+    const head = th('links', 'from', 'From', '', true) + th('links', 'type', 'Link', '', true) + th('links', 'to', 'To', '', true) + '<th style="text-align:left">What</th>'
+      + th('links', 'size', 'Size', '$ / GW / % (13F value for filed holdings)') + th('links', 'conf', 'Confidence') + th('links', 'date', 'Latest', '', true) + '<th style="text-align:left">Source</th>';
+    const body = shown.map(({ e, date, loop }) => {
+      const sids = [...new Set((e.events || []).map(v => v.src).filter(x => x && x !== 'SEC'))];
+      const s0 = sids.map(id => src[id]).filter(Boolean)[0];
+      const sec = (e.events || []).some(v => v.src === 'SEC');
+      return `<tr><td style="text-align:left">${valueIt(e.from)}</td>
+        <td style="text-align:left;white-space:nowrap"><span style="color:${TYPE_COL[e.type] || 'var(--ink)'}">■ ${esc(TYPE_WORD[e.type] || e.type)}</span>${loop ? ' <span title="part of a money loop" style="color:var(--amber)">⟲</span>' : ''}</td>
+        <td style="text-align:left">${valueIt(e.to)}</td>
+        <td style="text-align:left;max-width:340px;white-space:normal;color:var(--ink-dim)">${esc(e.label || '')}</td>
+        <td style="white-space:nowrap">${esc(edgeAmount(e) || '—')}</td>
+        <td style="color:${CONF_COL[e.confidence] || 'var(--ink-faint)'}">${esc(e.confidence || '')}</td>
+        <td style="text-align:left;color:var(--ink-faint);white-space:nowrap">${esc(date)}</td>
+        <td style="text-align:left;max-width:220px;white-space:normal">${s0 && s0.url ? `<a href="${esc(s0.url)}" target="_blank" rel="noopener" style="color:var(--ink-dim)">${esc(s0.title || sids[0])}</a>` : s0 ? esc(s0.title) : ''}${sec ? `${s0 ? ' · ' : ''}<span style="color:${CONF_COL.filing}">SEC filing</span>` : ''}${!s0 && !sec ? '<span style="color:var(--ink-faint)">—</span>' : ''}</td></tr>`;
+    }).join('');
+    const cnt = k => k === 'all' ? all.length : k === 'loops' ? all.filter(r => r.loop).length : LINK_TYPES.includes(k) ? all.filter(r => r.e.type === k).length : all.filter(r => r.e.confidence === k).length;
+    const chips = [['all', 'All'], ['loops', 'In a loop'], ...LINK_TYPES.map(k => [k, k]), ['filing', 'filing'], ['disclosed', 'disclosed'], ['reported', 'reported'], ['inferred', 'inferred']]
+      .map(([k, l]) => chip('links', k, l, fk === k, cnt(k))).join('');
+    return introBox(`<strong style="color:var(--amber)">Business Web · Money links</strong> - ${esc(VIEW_INFO['bw:links'][1])}. ${rows.length} shown of ${all.length}.
+        Direction is the way money or value flows (a warrant: issuer → holder; underwriting fees: issuer → bank).${threeD}
+        <div style="margin-top:8px;display:flex;gap:5px;flex-wrap:wrap">${chips}</div>`)
+      + (rows.length ? tableWrap(980, head, body) + moreBtn(shown.length, rows.length) : `<div style="padding:30px;text-align:center;${small}">No link matches.</div>`)
+      + `<div style="${small};margin-top:6px">Curated in TRAPP2-ANALYTICS config/web_relationships.json (every edge with its source and confidence) + the SEC's 13D / 13G / 13F filings · built ${esc(money.asOf || '')}.</div>`;
+  }
+
+  function viewOwnership(nodes, money, q) {
+    const names = money.names || {};
+    const nn = (nodes && nodes.nodes) || {};
+    const all = (money.edges || []).filter(e => e.type === 'owns').map(e => {
+      const ev = (e.events || []).filter(v => v.src === 'SEC').slice(-1)[0] || {};
+      const filedPct = e.pctFiled != null ? e.pctFiled : e.kind13 ? e.pct : null;
+      return { e, pct: filedPct != null ? filedPct : e.pct, approx: e.pctFiled == null && !!e.pctApprox, filed: filedPct != null || !!e.kind13,
+               value: e.valueUSD || (e.f13 && e.f13.valueUSD) || null, form: e.kind13 || (e.pctFiled != null ? 'curated + filing' : e.f13 ? 'curated + 13F' : 'curated'),
+               date: ev.date || ((e.events || []).slice(-1)[0] || {}).date || '' };
+    });
+    const fk = TAB.filter.ownership;
+    let rows = all.filter(r => fk === 'all' || (fk === 'filed' ? r.filed : fk === '13F' ? (r.e.kind13 === '13F' || !!r.e.f13) : fk === 'activist' ? r.e.kind13 === '13D' : !r.filed))
+                  .filter(r => matchQ(q, r.e.from, r.e.to, names[r.e.from], names[r.e.to], r.e.holder));
+    rows = sortRows(rows, 'ownership', { owner: r => r.e.from, company: r => r.e.to, pct: r => r.pct, value: r => r.value, form: r => r.form, date: r => r.date || null });
+    const head = th('ownership', 'owner', 'Owner', '', true) + th('ownership', 'company', 'Owns', '', true) + th('ownership', 'pct', '% of company', 'filed % (13D / 13G); ≈ = 13F shares ÷ diluted shares; ~ = reported')
+      + th('ownership', 'value', '13F value', 'quarter-end market value in the owner\'s 13F') + th('ownership', 'form', 'Source', '', true) + th('ownership', 'date', 'Event', '', true) + '<th style="text-align:left">Stated purpose (13D)</th>';
+    const nm = t => names[t] && names[t] !== t ? ` <span style="color:var(--ink-faint)">${esc(names[t])}</span>` : '';
+    const body = rows.slice(0, TAB.limit).map(r => `<tr><td style="text-align:left">${valueIt(r.e.from)}${nm(r.e.from)}</td>
+        <td style="text-align:left">${valueIt(r.e.to)}${nm(r.e.to)}</td>
+        <td>${r.pct != null ? (r.filed && !r.approx ? '' : r.approx ? '' : '~') + pctTxt(r.pct, r.approx) : '—'}</td><td>${r.value ? esc(usd(r.value)) : '—'}</td>
+        <td style="text-align:left;color:${r.filed ? CONF_COL.filing : 'var(--ink-dim)'}">${esc(r.form)}${r.e.rule ? ` <span style="color:var(--ink-faint)">${esc(r.e.rule)}</span>` : ''}</td>
+        <td style="text-align:left;color:var(--ink-faint);white-space:nowrap">${esc(r.date)}</td><td style="text-align:left;white-space:normal;max-width:320px;color:var(--ink-dim)">${esc(r.e.purpose || '')}</td></tr>`).join('');
+    // concentration: every company's 5%+ holders, from nodes
+    let conc = Object.entries(nn).filter(([, n]) => n.own && n.own.n5).map(([t, n]) => ({ t, name: n.name || t, n5: n.own.n5, sum5: n.own.sum5, top: n.own.top || [] }))
+      .filter(r => matchQ(q, r.t, r.name, r.top[0]));
+    conc = sortRows(conc, 'conc', { ticker: r => r.t, n5: r => r.n5, sum5: r => r.sum5, top: r => r.top[1] });
+    const chead = th('conc', 'ticker', 'Company', '', true) + th('conc', 'n5', '5%+ holders') + th('conc', 'sum5', 'Held by them', 'within the main share class') + th('conc', 'top', 'Largest', '', true);
+    const cbody = conc.slice(0, 50).map(r => `<tr><td style="text-align:left">${valueIt(r.t)}${r.name !== r.t ? ` <span style="color:var(--ink-faint)">${esc(r.name)}</span>` : ''}</td><td>${r.n5}</td><td>${r.sum5 != null ? esc(r.sum5) + '%' : '—'}</td>
+        <td style="text-align:left">${esc(r.top[0] || '')}${r.top[1] != null ? ` <span style="color:var(--ink-faint)">${esc(r.top[1])}%</span>` : ''}</td></tr>`).join('');
+    const cnt = k => all.filter(r => k === 'all' || (k === 'filed' ? r.filed : k === '13F' ? (r.e.kind13 === '13F' || !!r.e.f13) : k === 'activist' ? r.e.kind13 === '13D' : !r.filed)).length;
+    const chips = [['all', 'All stakes'], ['filed', 'From filings'], ['13F', 'With 13F'], ['activist', '13D (active)'], ['curated', 'Curated only']].map(([k, l]) => chip('ownership', k, l, fk === k, cnt(k))).join('');
+    return introBox(`<strong style="color:var(--amber)">Business Web · Ownership</strong> - ${esc(VIEW_INFO['bw:ownership'][1])}. ${rows.length} stakes shown of ${all.length}.
+        Asset managers' and banks' passive client holdings are left out (they show on each company's 5%+ holder list).${threeD}
+        <div style="margin-top:8px;display:flex;gap:5px;flex-wrap:wrap">${chips}</div>`)
+      + (rows.length ? tableWrap(900, head, body) + moreBtn(Math.min(rows.length, TAB.limit), rows.length) : `<div style="padding:24px;text-align:center;${small}">No stake matches.</div>`)
+      + `<div style="margin-top:14px;color:var(--ink-faint);text-transform:uppercase;letter-spacing:.08em;font-size:9px;${mono}">Ownership concentration - 5%+ holders filed about each company (${conc.length})</div>`
+      + (conc.length ? tableWrap(560, chead, cbody) + (conc.length > 50 ? `<div style="${small};margin-top:4px">Top 50 by the sort above · search to find any company.</div>` : '')
+                     : `<div style="padding:16px;${small}">No holders on file yet - the SEC run reads every company's Schedule 13D / 13G filings, ~600 a run (Business Web names first).</div>`);
+  }
+
+  function viewLoops(money) {
+    return introBox(`<strong style="color:var(--amber)">Business Web · Loops & circularity</strong> - ${esc(VIEW_INFO['bw:loops'][1])}.${threeD}`) + panelHtml('money');
+  }
+
+  let tabWired = null;
+  function wireTab(el) {
+    if (tabWired === el) return;
+    tabWired = el;
+    el.addEventListener('click', ev => {
+      const a = ev.target.closest('[data-bw-sort],[data-bw-filter],[data-bw-more],[data-bw-open],[data-bw-value],[data-bw-3d]');
+      if (!a || !el.contains(a)) return;
+      const mode = curMode();
+      if (!mode || !mode.startsWith('bw:')) return;
+      if (a.dataset.bwValue) { try { if (typeof executeCommand === 'function') executeCommand(a.dataset.bwValue); } catch (e) {} return; }
+      if (a.hasAttribute('data-bw-3d')) { open3d(); return; }       // (a digit after the dash: no dataset camel-case)
+      if (a.dataset.bwSort) {
+        const [view, key] = a.dataset.bwSort.split(':');
+        const cur = TAB.sort[view] || [];
+        TAB.sort[view] = [key, cur[0] === key ? -cur[1] : (['ticker', 'name', 'owner', 'company', 'from', 'to', 'type', 'form', 'sector'].includes(key) ? 1 : -1)];
+      } else if (a.dataset.bwFilter) {
+        const [g, k] = a.dataset.bwFilter.split(':');
+        TAB.filter[g] = k; TAB.limit = 100;
+      } else if (a.dataset.bwMore) TAB.limit += 200;
+      else if (a.dataset.bwOpen) TAB.open = TAB.open === a.dataset.bwOpen ? null : a.dataset.bwOpen;
+      renderTab(el, mode, curQuery());
+    });
+  }
+  const curMode = () => { try { return state.supplychain.viewMode; } catch (e) { return null; } };
+  const curQuery = () => { try { return (state.supplychain.searchQuery || '').toLowerCase().trim(); } catch (e) { return ''; } };
+  function open3d() {
+    try {
+      if (typeof WEB_STATE !== 'undefined' && WEB_STATE) WEB_STATE.lens = 'money';
+      if (typeof fnWEB !== 'function') return;
+      fnWEB();
+      const sel = document.getElementById('web-lens');
+      if (sel && sel.value !== 'money' && [...sel.options].some(o => o.value === 'money')) { sel.value = 'money'; sel.dispatchEvent(new Event('change')); }
+    } catch (e) {}
+  }
+
+  async function renderTab(el, mode, q) {
+    if (!el) return;
+    wireTab(el);
+    const seq = ++TAB.seq;
+    const search = document.getElementById('sc-search');
+    if (search && search.dataset.bwPh !== mode) { search.placeholder = 'Search ticker, company, holder…'; search.dataset.bwPh = mode; }
+    if (!C.money || !C.nodes) el.innerHTML = `<div style="padding:30px;text-align:center;${small}">Loading the Business Web…</div>`;
+    const [nodes, money, chainsDoc] = await Promise.all([get('nodes'), get('money'), get('chains')]);
+    if (seq !== TAB.seq || curMode() !== mode) return;                       // superseded by a newer render / view
+    if (!money || !nodes) {
+      el.innerHTML = introBox(`<strong style="color:var(--amber)">Business Web</strong> - ${FAIL.money || FAIL.nodes ? 'not reachable right now (TRAPP2-ANALYTICS data/web). It is rebuilt weekdays with the Early warning run (0920 / 1840 ET).' : 'loading…'}`);
+      return;
+    }
+    el.innerHTML = mode === 'bw:links' ? viewLinks(money, q) : mode === 'bw:ownership' ? viewOwnership(nodes, money, q)
+      : mode === 'bw:loops' ? viewLoops(money) : viewCompanies(nodes, money, chainsDoc, q);
+    if (mode === 'bw:companies' && TAB.open) {
+      const t = TAB.open, host = [...el.querySelectorAll('[data-bw-card]')].find(x => x.dataset.bwCard === t);
+      if (host) {
+        const [ipo, secDoc] = await Promise.all([get('ipo'), getSec(t), loadCusips()]);
+        if (seq !== TAB.seq) return;
+        const html = companyCardHtml(t, nodes.nodes[t], money, chainsDoc, ipo, secDoc, true);
+        host.outerHTML = html || `<div style="${small}">Nothing on file for ${esc(t)} yet.</div>`;
+      }
+      fitOpen(el);
+    }
+  }
+  // the open company's card sits inside a wide, sideways-scrolling table: pin it to the visible width (phones too)
+  function fitOpen(el) {
+    const st = el && el.querySelector('[data-bw-sticky]'), wrap = st && st.closest('[data-bw-wrap]');
+    if (st && wrap && wrap.clientWidth > 0) st.style.width = Math.max(260, wrap.clientWidth - 14) + 'px';
+  }
+  let fitT = null;
+  window.addEventListener('resize', () => { clearTimeout(fitT); fitT = setTimeout(() => fitOpen(document.getElementById('sc-content')), 150); });
+
+  function hookChainTab() {
+    try {
+      if (typeof window.renderSupplyChainTab !== 'function' || window.renderSupplyChainTab.__bw) return !!window.renderSupplyChainTab;
+      const orig = window.renderSupplyChainTab;
+      const hooked = function () {
+        const el = document.getElementById('sc-content');
+        const mode = curMode();
+        if (el && mode && String(mode).startsWith('bw:')) return renderTab(el, mode, curQuery());
+        const search = document.getElementById('sc-search');
+        if (search && search.dataset.bwPh) { delete search.dataset.bwPh; if (mode !== 'byticker') search.placeholder = 'Search ticker, company, or chain…'; }
+        const r = orig.apply(this, arguments);
+        if (el && mode === 'bychain' && !el.querySelector('[data-bw-hint]')) {
+          el.insertAdjacentHTML('afterbegin', `<div data-bw-hint="1" style="${small};margin:0 0 8px">Business Web views (companies, money links, ownership, loops) are in the view menu above, under "Business Web".</div>`);
+        }
+        return r;
+      };
+      hooked.__bw = true;
+      window.renderSupplyChainTab = hooked;
+      return true;
+    } catch (e) { return false; }
+  }
+  hookChainTab();                                               // app.js has loaded (this file comes after it)
+
   setInterval(() => { if (document.getElementById('company-13f-holders')) renderCompanyCard(); }, 1500);
-  const boot = () => { mergeChains().catch(() => {}); loadCusips().then(hookCusip); };
+  const boot = () => { hookChainTab(); mergeChains().catch(() => {}); loadCusips().then(hookCusip); };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => setTimeout(boot, 2500));
   else setTimeout(boot, 2500);
 
   window.BusinessWeb = { get, getSec, mergeChains, graph, tooltip, panelHtml, renderCompanyCard, companyCardHtml, holdersHtml, flow,
-                         loadCusips, cusipFor, hookCusip,
+                         loadCusips, cusipFor, hookCusip, renderTab, hookChainTab, TAB,
                          ready: () => !!C.money, failed: name => !!FAIL[name] };
 })();
