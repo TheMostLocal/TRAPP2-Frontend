@@ -6,7 +6,7 @@
    A group opens its last-used page and shows its own sub-tabs underneath:
      Stock Book & Valuation : Stock Book · Valuation · Options (new: every chain)
      Macro Data             : Regime · Macro Quad · Bonds & Treasuries · Fed ·
-                              Supply Chains · Global Trade
+                              Supply Chains & Business Web (z200) · Global Trade
      Data & Research        : Data · Research · Scenarios · Risk Calculator · Probability
    Nothing is removed: every page is the same panel, rendered by the same code,
    opened through the same switchTab(). The original tab buttons stay in the page
@@ -17,7 +17,7 @@
   'use strict';
   const GROUPS = [
     { id: 'book', label: 'Stock Book & Valuation', icon: '📒', tabs: [['stockbook', 'Stock Book'], ['valuation', 'Valuation'], ['options', 'Options']] },
-    { id: 'macro', label: 'Macro Data', icon: '🌐', tabs: [['regime', 'Regime'], ['macro', 'Macro Quad'], ['bonds', 'Bonds & Treasuries'], ['credit', 'Credit'], ['fed', 'Fed'], ['supplychain', 'Supply Chains'], ['globaltrade', 'Global Trade'], ['volsent', 'Volatility & Sentiment']] },
+    { id: 'macro', label: 'Macro Data', icon: '🌐', tabs: [['regime', 'Regime'], ['macro', 'Macro Quad'], ['bonds', 'Bonds & Treasuries'], ['credit', 'Credit'], ['fed', 'Fed'], ['supplychain', 'Supply Chains & Business Web'], ['globaltrade', 'Global Trade'], ['volsent', 'Volatility & Sentiment']] },
     { id: 'lab', label: 'Data & Research', icon: '🔬', tabs: [['data', 'Data'], ['research', 'Research'], ['earnings', 'Earnings'], ['creditdesk', 'Bonds & CDS'], ['headcount', 'Headcount'], ['scenarios', 'Scenarios'], ['risk', 'Risk Calculator'], ['probability', 'Probability']] },
   ];
   const LAST = 'valuatio.nav.lastTab.v1';
@@ -87,6 +87,10 @@
         if (sub) sub.textContent = 'Volatility & Sentiment · VIX term structure, SKEW, auctions, BLS, news tone';
         const host = document.getElementById('volsent-mount');
         if (host && window.MarketExtras) window.MarketExtras.render(host);
+      }
+      if (tab === 'supplychain') {                              // z200: the chains and the Business Web, one page
+        const sub = document.getElementById('masthead-sub');
+        if (sub) sub.textContent = 'Supply Chains & Business Web · upstream → downstream · who owns, funds and buys from whom · money loops';
       }
       if (tab === 'headcount') {                                // z151: employees + hiring breadth
         const sub = document.getElementById('masthead-sub');
