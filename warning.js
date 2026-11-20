@@ -4,17 +4,34 @@
    Reads TRAPP2-ANALYTICS/data/warning/signals.json (pipeline/warning_signals.py): the published loss, lending,
    funding, labour, collateral, leverage and growth data scored against their own history since the 1980s-90s
    (publication lags respected), four gauges (fundamental stress, market stress, fragility, organic growth), a
-   composite RISK percentile, the regime, flags (market blindness, the marginal buyer stepping back, seasonal traps,
+   composite RISK percentile, the regime, flags (market blindness, the marginal buyer stepping back, seasonal traps, history rhymes, supported hypotheses on,
    debt-fuelled vs organic growth, insider buying, 8-K red flags), bottom-up breadth (filings, insiders, short
    interest, headcount, the options market, credit ratings, 52-week highs / lows), the industries each warning hits
    (the bot sizes and scores from them) and a backtest against NBER recessions and 20 % drawdowns.
    The card sits above the regime hero. In-memory only (nothing stored in the browser).
+
+   z197 (owner 11-19: "the dot com bubble and everything that went into that … where these first warnings occured …
+   other crashes, recessions, and scares … This isn't an art its a science and this system is the tester … think on
+   hypotheses and be proven right or wrong but it should be exploring at all times … History rhymes and bail outs are
+   bad"): HISTORY RHYMES (today's pillar fingerprint vs every episode's), CRISES & FIRST WARNINGS (15 episodes since
+   1973 - what broke, the first published warnings and their lead, the bail-out and the gap it left), the HYPOTHESIS LAB
+   (seeded lessons + automatic exploration, each supported / rejected / inconclusive on the data, every 'on' signal a
+   dated prediction graded later), and the IPO CALENDAR (lock-ups, the underwriters' quiet period, fees - data/web).
    ========================================================================== */
 (function () {
   'use strict';
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const raw = () => { try { if (typeof GH_RAW !== 'undefined') return GH_RAW; } catch (e) {} return 'https://raw.githubusercontent.com/TheMostLocal'; };
-  let W = null, at = 0, pending = null, failed = false, open = { ind: false, bt: false, bu: false };
+  let W = null, at = 0, pending = null, failed = false, open = { ind: false, bt: false, bu: false, ep: false, lab: false, ipo: false };
+  let IPO = null, ipoAt = 0, ipoFailed = false;
+  async function loadIpo() {
+    if (IPO && Date.now() - ipoAt < 30 * 60 * 1000) return IPO;
+    try {
+      const r = await fetch(`${raw()}/TRAPP2-ANALYTICS/main/data/web/ipo.json`, { cache: 'no-cache' });
+      if (r.ok) { IPO = await r.json(); ipoAt = Date.now(); ipoFailed = false; } else ipoFailed = true;
+    } catch (e) { ipoFailed = true; }
+    return IPO;
+  }
   async function load(force) {
     if (!force && W && Date.now() - at < 15 * 60 * 1000) return W;
     if (pending) return pending;
@@ -29,7 +46,7 @@
   }
   const LEVEL_COL = { low: 'var(--pos)', moderate: 'var(--data-amber)', elevated: '#e0a24a', high: '#e0704a', extreme: 'var(--neg)', unknown: 'var(--ink-faint)' };
   const FLAG_COL = { blindness: 'var(--neg)', 'marginal-buyer': '#e0704a', filings: '#e0a24a', curve: '#e0a24a', 'debt-fuelled': '#e0a24a',
-                     seasonal: 'var(--ink-dim)', organic: 'var(--pos)', insiders: 'var(--pos)' };
+                     seasonal: 'var(--ink-dim)', organic: 'var(--pos)', insiders: 'var(--pos)', hypothesis: '#c47ba0', rhyme: '#7faaca' };
   const pctTxt = v => v == null ? '—' : `${Math.round(v)}`;
   const share = v => v == null ? '—' : `${Math.round(v * 100)}%`;
   const num = (v, d = 1) => v == null || !isFinite(v) ? '—' : (+v).toFixed(d);
@@ -135,6 +152,73 @@
       ${bk ? `<div style="overflow-x:auto"><table class="sb-table" style="width:100%;min-width:520px;${mono};font-size:10px;margin-top:6px"><thead><tr><th>Risk level</th><th>Months</th><th>Next 12m return</th><th>20% drawdown</th><th>Avg worst drawdown</th><th>Recession within 12m</th></tr></thead><tbody>${bk}<tr style="color:var(--ink-faint)"><td>all months</td><td>${base.n ?? '—'}</td><td>${num(base.fwd12Ret)}%</td><td>${num(base.dd20Rate)}%</td><td>—</td><td>${num(base.recessionWithin12)}%</td></tr></tbody></table></div>` : ''}`;
   }
 
+  // ---- z197: history rhymes ----------------------------------------------------------------------------------
+  function rhymesHtml(d) {
+    const rs = (d.rhymes || []).filter(r => r.similarity != null);
+    if (!rs.length) return '';
+    return `<div style="${mono};font-size:10px;color:var(--ink-dim);margin-top:8px;line-height:1.55"><span style="color:var(--ink-faint);text-transform:uppercase;letter-spacing:.08em;font-size:9px">History rhymes · </span>
+      ${rs.slice(0, 3).map((r, i) => `<span title="${esc(r.lesson || '')}"><strong style="color:${r.similarity >= 0.6 ? 'var(--ink)' : 'var(--ink-dim)'}">${esc(r.name)}</strong> ${num(r.similarity, 2)}${r.shared && r.shared.length ? ` <span style="color:var(--ink-faint)">(${esc(r.shared.join(', '))})</span>` : ''}</span>`).join(' · ')}
+      ${rs[0] && rs[0].lesson ? `<div style="color:var(--ink-faint)">Closest's lesson: ${esc(rs[0].lesson)}</div>` : ''}
+      <div style="${small}">Cosine similarity of today's pillar scores with each episode's 6 months before its peak (1 = the same shape). A rhyme is a lead to dig into, not a forecast - the hypothesis lab below says what the data has earned.</div></div>`;
+  }
+
+  // ---- z197: crises, recessions, scares - where the first warnings were ---------------------------------------
+  function episodesHtml(eps) {
+    if (!eps || !eps.length) return `<div style="${small}">No episode history in this read.</div>`;
+    const rd = (e, k) => { const r = (e.readings || {})[k]; return r ? `${r.risk == null ? '—' : Math.round(r.risk)}<span style="color:var(--ink-faint)">/${r.fund == null ? '—' : Math.round(r.fund)}/${r.mkt == null ? '—' : Math.round(r.mkt)}</span>${r.blind ? '<span style="color:var(--neg)" title="market blindness that month">●</span>' : ''}` : '—'; };
+    return `<div style="${small};margin:6px 0">Each row: what broke, the first published warnings (the month a series crossed into its top 30% from below and stayed there, and its lead in months before the market peak), the reading at 12 / 6 / 3 / 0 months before the peak (risk / fundamental / market), the policy response and the gap it left. Readings need the series' history to reach back that far.</div>
+      ${eps.slice().reverse().map(e => `<div style="border:1px solid var(--rule);border-radius:4px;padding:7px 9px;margin:6px 0">
+        <div style="display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline;${mono};font-size:10.5px"><strong style="color:var(--ink)">${esc(e.name)}</strong>
+          <span style="color:var(--ink-faint)">${esc(e.kind || '')}</span><span style="color:var(--ink-dim)">peak ${esc(e.peak || '—')} → trough ${esc(e.trough || '—')}${e.recession ? ` · recession ${esc(e.recession[0])} – ${esc(e.recession[1])}` : ''}</span></div>
+        <div style="${mono};font-size:10px;color:var(--ink-dim);line-height:1.5;margin-top:3px">${esc(e.broke || '')}</div>
+        ${(e.firstWarnings || []).length ? `<div style="${mono};font-size:10px;margin-top:4px;line-height:1.5"><span style="color:var(--ink-faint)">FIRST WARNINGS IN OUR DATA · </span>${e.firstWarnings.map(w => `<span title="${esc(w.pillar)} · score ${num(w.score, 0)} in ${esc(w.month)}">${esc(w.label)} <strong style="color:var(--data-amber)">${w.lead}m</strong></span>`).join(' · ')}</div>` : `<div style="${small};margin-top:4px">No series in our set crossed from below in the 24 months before the peak${e.readings && Object.values(e.readings).every(r => r.fund == null) ? ' (not enough history on file for this episode)' : ' - a shock our published data did not lead'}.</div>`}
+        ${(e.warnings || []).length ? `<div style="${mono};font-size:9.5px;color:var(--ink-faint);margin-top:3px;line-height:1.5">On the record: ${esc(e.warnings.join(' · '))}</div>` : ''}
+        <div style="${mono};font-size:10px;margin-top:4px">${['t-12', 't-6', 't-3', 't-0'].map(k => `<span style="margin-right:10px"><span style="color:var(--ink-faint)">${k}</span> ${rd(e, k)}</span>`).join('')}</div>
+        ${e.policy || e.gap ? `<div style="${mono};font-size:10px;color:var(--ink-dim);margin-top:4px;line-height:1.5">${e.policy ? `<span style="color:var(--ink-faint)">RESPONSE · </span>${esc(e.policy)}` : ''}${e.gap ? `<br><span style="color:var(--neg)">GAP LEFT · </span>${esc(e.gap)}` : ''}</div>` : ''}
+        ${e.lesson ? `<div style="${mono};font-size:10px;color:var(--ink);margin-top:3px">Lesson: ${esc(e.lesson)}</div>` : ''}
+      </div>`).join('')}`;
+  }
+
+  // ---- z197: the hypothesis lab ----------------------------------------------------------------------------------
+  const OUTCOME_TXT = { DD10_6: '10% drawdown ≤ 6m', DD15_12: '15% drawdown ≤ 12m', DD20_12: '20% drawdown ≤ 12m', DD20_18: '20% drawdown ≤ 18m',
+                        REC12: 'recession ≤ 12m', REC24: 'recession ≤ 24m', ABOVE_MED12: 'above-median 12m return' };
+  const ST_COL = { supported: 'var(--pos)', rejected: 'var(--neg)', inconclusive: 'var(--data-amber)', untestable: 'var(--ink-faint)' };
+  function labHtml(lab) {
+    if (!lab || !lab.counts) return `<div style="${small}">The lab runs with the full read (needs the FRED history).</div>`;
+    const c = lab.counts || {}, rec = lab.record || {}, ex = lab.explored || {};
+    const row = h => `<tr><td style="text-align:left;color:var(--ink-faint)">${esc(h.id)}</td><td style="text-align:left">${esc(h.statement)}</td><td style="text-align:left;color:var(--ink-dim)">${esc(OUTCOME_TXT[h.outcome] || h.outcome || '')}</td>
+      <td style="color:${ST_COL[h.status] || 'var(--ink)'};font-weight:700">${esc(h.status)}</td><td>${h.lift == null ? '—' : num(h.lift, 2) + '×'}</td><td>${h.p == null ? '—' : num(h.p, 3)}</td>
+      <td title="signal months / all months">${h.n1 == null ? '—' : `${h.n1}/${h.n}`}</td><td title="episodes caught / episodes in the sample">${h.events ? `${h.caught}/${h.events}` : '—'}</td><td>${h.nowOn ? '<strong style="color:var(--neg)">ON</strong>' : h.nowOn === false ? 'off' : '—'}</td></tr>`;
+    const all = [...(lab.seeded || [])];
+    return `<div style="${mono};font-size:10px;color:var(--ink-dim);margin-top:6px;line-height:1.55">
+        <strong style="color:var(--pos)">${c.supported || 0} supported</strong> · <strong style="color:var(--neg)">${c.rejected || 0} rejected</strong> · <strong style="color:var(--data-amber)">${c.inconclusive || 0} inconclusive</strong> · ${c.untestable || 0} untestable (no history yet).
+        Exploration: ${ex.tested || 0} of ${ex.candidates || 0} candidate signals tested this run, false-discovery rate held at ${ex.fdr != null ? Math.round(ex.fdr * 100) + '%' : '—'}.
+        Prediction ledger: ${rec.opened || 0} dated predictions${rec.since ? ` since ${esc(rec.since)}` : ''} · ${rec.pending || 0} pending · graded ${rec.graded || 0}: <strong style="color:var(--pos)">${rec.right || 0} right</strong> / <strong style="color:var(--neg)">${rec.wrong || 0} wrong</strong>.</div>
+      <div style="${small};margin-top:2px">${esc(lab.rules || '')}. Lift = how much more often the outcome followed the signal than it followed any month; p = how often a signal slid to a random point in history did as well.</div>
+      ${(lab.nowOn || []).length ? `<div style="${mono};font-size:10px;color:var(--ink);margin-top:6px"><span style="color:var(--neg)">ON NOW · </span>${lab.nowOn.map(h => `${esc(h.id)} <span style="color:${ST_COL[h.status]}">(${esc(h.status)})</span>`).join(' · ')}</div>` : ''}
+      ${(lab.discoveries || []).length ? `<div style="${mono};font-size:10px;margin-top:6px;line-height:1.5"><span style="color:var(--ink-faint)">DISCOVERIES (survive the FDR; now tested every run) · </span>${lab.discoveries.map(dd => `${esc(dd.statement)} <span style="color:var(--ink-faint)">(lift ${num(dd.lift, 2)}×, p ${num(dd.p, 3)}, ${dd.caught}/${dd.events})</span>`).join(' · ')}</div>` : `<div style="${small};margin-top:6px">No exploration discovery has survived the false-discovery control yet - the honest answer on today's history.</div>`}
+      <div style="overflow-x:auto"><table class="sb-table" style="width:100%;min-width:760px;${mono};font-size:10px;margin-top:6px"><thead><tr><th style="text-align:left">#</th><th style="text-align:left">Hypothesis (stated so it can fail)</th><th style="text-align:left">Outcome tested</th><th>Verdict</th><th>Lift</th><th>p</th><th>Signal months</th><th>Caught</th><th>Now</th></tr></thead><tbody>${all.map(row).join('')}</tbody></table></div>`;
+  }
+
+  // ---- z197: IPO calendar & underwriter conflicts ------------------------------------------------------------
+  function ipoHtml(ipo) {
+    if (!ipo) return `<div style="${small};margin-top:6px">${ipoFailed ? 'No IPO calendar yet: TRAPP2-ANALYTICS data/web/ipo.json appears after the Early warning workflow runs with the z197 Business Web step.' : 'Loading…'}</div>`;
+    const ipos = ipo.ipos || {};
+    const ev = (ipo.events || []).map(e => `<tr><td style="text-align:left;color:var(--amber)">${esc(e.ticker)}</td><td style="text-align:left">${esc(e.date || e.rule || '')}</td><td>${e.daysAway == null ? '—' : e.daysAway >= 0 ? `in ${e.daysAway} d` : `${-e.daysAway} d ago`}</td>
+      <td style="text-align:left;color:${e.major ? 'var(--neg)' : 'var(--ink)'}">${esc(e.kind)}${e.major ? ' · major' : ''}</td><td style="text-align:left;color:var(--ink-dim)">${esc(e.text || '')}</td></tr>`).join('');
+    const cards = Object.entries(ipos).map(([t, v]) => {
+      const uw = v.underwriters || {}, f = v.fees || {}, pl = v.placement || {};
+      return `<div style="${mono};font-size:10px;color:var(--ink-dim);line-height:1.55;margin-top:6px;border-left:2px solid #c47ba0;padding-left:8px">
+        <strong style="color:var(--ink)">${esc(t)} · ${esc(v.name || '')}</strong> first trade ${esc(v.firstTrade || '—')}${v.price ? ` at $${esc(v.price)}` : ''}${uw.lead ? ` · lead underwriters ${esc(uw.lead.join(', '))}${uw.count ? ` (${uw.count} banks)` : ''}` : ''}
+        ${f.owner || (f.estimates || []).length ? `<br>Underwriting fees: ${esc(f.owner || '')}${(f.estimates || []).length ? ` · estimates ${esc(f.estimates.map(x => `$${(x.usd / 1e6).toFixed(0)}M (${x.by})`).join('; '))}` : ''}${f.note ? ` · ${esc(f.note)}` : ''}` : ''}
+        ${pl.usd ? `<br>Placement: $${(pl.usd / 1e9).toFixed(1)}bn ${esc(pl.class || '')} to ${esc((pl.buyers || []).join(', '))} - ${esc(pl.lockup || '')}` : ''}</div>`;
+    }).join('');
+    return `<div style="${mono};font-size:10px;color:var(--ink-dim);margin-top:6px;line-height:1.55">The banks that take a company public are paid on the deal, and their analysts start coverage when the quiet period ends (FINRA Rule 2241: 10 days after the IPO) - conflicted coverage: weigh those initiations and price targets accordingly. Lock-up releases put insiders' and early holders' shares on the market. The bot opens no new long from 3 sessions before a major release to 1 after, and sizes longs ×0.85 in the first 5 sessions of syndicate initiations.</div>
+      ${cards}
+      ${ev ? `<div style="overflow-x:auto"><table class="sb-table" style="width:100%;min-width:560px;${mono};font-size:10px;margin-top:6px"><thead><tr><th style="text-align:left">Ticker</th><th style="text-align:left">Date / rule</th><th>When</th><th style="text-align:left">Event</th><th style="text-align:left">What</th></tr></thead><tbody>${ev}</tbody></table></div>` : ''}
+      <div style="${small};margin-top:4px">${esc(ipo.note || '')} Built ${esc(ipo.asOf || '')} from TRAPP2-ANALYTICS config/ipo_watch.json.</div>`;
+  }
+
   function botHtml(d) {
     const er = ((d.backtest || {}).earned) || {};
     const r = d.risk;
@@ -162,9 +246,13 @@
       ${bar('Fragility', g.fragility, false, 'leverage build-up and late-cycle signs: credit vs income, corporate debt / GDP, the curve')}
       ${bar('Organic growth', g.growth, true, 'income ex transfers, payrolls, production, orders, profits - credit not outrunning income')}
       ${flagsHtml(d.flags)}
+      ${rhymesHtml(d)}
       ${sparkline(d.history, (d.backtest || {}).recessions)}
       ${pillarsHtml(d)}
       ${botHtml(d)}
+      ${sec(`Crises, recessions and scares since 1973 - where the first warnings were (${(d.episodes || []).length})`, 'ep', episodesHtml(d.episodes))}
+      ${sec(`Hypothesis lab - proven right or wrong on the data${d.lab && d.lab.counts ? ` (${(d.lab.counts.supported || 0)} supported · ${(d.lab.counts.rejected || 0)} rejected)` : ''}`, 'lab', labHtml(d.lab))}
+      ${sec('IPO calendar - lock-ups, quiet periods, underwriter conflicts', 'ipo', ipoHtml(IPO))}
       ${sec('Bottom-up: filings, insiders, short interest, options, credit, breadth', 'bu', bottomUpHtml(d.bottomUp, d.exposures))}
       ${sec('Backtest: recessions and drawdowns', 'bt', backtestHtml(d.backtest))}
       ${sec('Every series', 'ind', indicatorsHtml(d))}
@@ -187,7 +275,11 @@
     else if (hero && hero.parentNode === panel) hero.insertAdjacentHTML('beforebegin', html);
     else panel.insertAdjacentHTML('beforeend', html);
     const card = document.getElementById('early-warning-card');
-    if (card) card.querySelectorAll('[data-ew-toggle]').forEach(b => b.addEventListener('click', () => { const k = b.dataset.ewToggle; open[k] = !open[k]; renderCard(false); }));
+    if (card) card.querySelectorAll('[data-ew-toggle]').forEach(b => b.addEventListener('click', () => {
+      const k = b.dataset.ewToggle; open[k] = !open[k];
+      if (k === 'ipo' && open.ipo && !IPO) loadIpo().then(() => renderCard(false));
+      renderCard(false);
+    }));
   }
 
   document.addEventListener('click', e => {
@@ -198,5 +290,5 @@
     const panel = document.querySelector('.tab-panel[data-panel="regime"]');
     if (panel && panel.classList.contains('active') && !document.getElementById('early-warning-card')) renderCard(false);
   }, 1500);
-  window.EarlyWarning = { load, renderCard };
+  window.EarlyWarning = { load, renderCard, loadIpo };
 })();
