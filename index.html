@@ -5201,7 +5201,7 @@
   }
   .sc-flow {
     display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-columns: repeat(3, minmax(0, 1fr));   /* z200: a long role ellipsizes instead of widening its tier */
     gap: 14px;
     margin-top: 12px;
   }
@@ -7066,7 +7066,7 @@
   </button>
   <button class="tab-btn" data-tab="supplychain">
     <span class="tab-num">08</span>
-    <span class="tab-label">Supply Chains</span>
+    <span class="tab-label">Supply Chains &amp; Business Web</span>
   </button>
   <button class="tab-btn" data-tab="globaltrade" title="Country-level trade flows, production, consumption — with live logistics proxies (BDRY, IYT, JETS, USO)">
     <span class="tab-num">09</span>
@@ -8299,14 +8299,22 @@
 
   <div class="news-header" style="flex-wrap:nowrap;align-items:flex-start">
     <div style="min-width:0;flex:1">
-      <h2 class="news-title">Supply Chain Map</h2>
-      <p class="news-subtitle">Upstream → midstream → downstream linkages · cross-portfolio exposure discovery · verified vs inferred clearly tagged</p>
+      <h2 class="news-title">Supply Chains &amp; Business Web</h2>
+      <p class="news-subtitle">Upstream → midstream → downstream linkages · who owns, funds and buys from whom · money loops · every link tagged filing / disclosed / reported / inferred</p>
     </div>
     <div class="news-controls" style="flex-shrink:0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
-      <select class="news-filter" id="sc-view-mode">
-        <option value="bychain" selected>Browse by Chain</option>
-        <option value="byticker">Find by Ticker</option>
-        <option value="portfolio">My Portfolio Exposure</option>
+      <select class="news-filter" id="sc-view-mode" title="Supply-chain views and Business Web views">
+        <optgroup label="Supply chains">
+          <option value="bychain" selected>Browse by Chain</option>
+          <option value="byticker">Find by Ticker</option>
+          <option value="portfolio">My Portfolio Exposure</option>
+        </optgroup>
+        <optgroup label="Business Web">
+          <option value="bw:companies">Companies — who owns, funds, buys from whom</option>
+          <option value="bw:links">Money links</option>
+          <option value="bw:ownership">Ownership — 13D / 13G / 13F</option>
+          <option value="bw:loops">Loops &amp; circularity</option>
+        </optgroup>
       </select>
       <input type="text" class="news-filter" id="sc-search" placeholder="Search ticker, company, or chain…" style="min-width:200px"/>
     </div>
@@ -9026,7 +9034,7 @@
 <script src="regimecert.js?v=20260615z127"></script>
 <script src="warning.js?v=20260615z198"></script>
 <!-- z197: the Business Web - money web lens on WEB, subsector chains, the company page card -->
-<script src="businessweb.js?v=20260615z199"></script>
+<script src="businessweb.js?v=20260615z200"></script>
 <!-- Data tab: dataset explorer + 3D surfaces - z95 -->
 <script src="datatab.js?v=20260615z196"></script>
 <!-- bot: app ↔ runner action outbox - z100 -->
@@ -9040,6 +9048,6 @@
 <script src="marketextras.js?v=20260615z158"></script>
 <script src="live.js?v=20260615z188"></script>
 <script src="quantdesk.js?v=20260615z186"></script>
-<script src="navgroups.js?v=20260615z171"></script>
+<script src="navgroups.js?v=20260615z200"></script>
 </body>
 </html>
