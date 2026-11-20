@@ -12,6 +12,8 @@
                     audited confidence (filing / disclosed / reported / inferred) for the chains it does
      nodes.json   - per ticker: chains + stage, SEC money structure, index weights, rating, money links, IPO events
                     (loaded only when a company page opens)
+   z198 (P1): the SEC money structure adds backlog (RPO), purchase obligations and equity stakes (equity-method, listed,
+   private); 'backlog from tracked buyers' sets the commitments in the web against the backlog a company reports.
    Gives the app:
      WEB (3D)  - lenses "Money web" and "Money web - loops only" (arrows = the direction money / value flows)
      Company   - a Business Web card on the company page (money links, circularity, chains, index weights, the SEC
@@ -165,6 +167,10 @@
       `<tr><td style="text-align:left;color:var(--amber)">${esc(t)}</td><td style="text-align:left">${esc((c.fundedBuyers || []).map(f => `${f.to} (${f.how})`).join(', '))}</td>
         <td>${esc(usd(c.investedUSD))}</td><td>${esc(backTxt(c))}</td>
         <td>${c.committedBackToRevenue != null ? (c.committedBackToRevenue * 100).toFixed(0) + '%' : '<span style="color:var(--ink-faint)" title="no current SEC revenue on file">—</span>'}</td><td>${c.loops}</td></tr>`).join('');
+    const blog = Object.entries(m.backlog || {}).filter(([, b]) => b.commitIn || b.commitGW).sort((a, b) => (b[1].commitIn || 0) - (a[1].commitIn || 0)).map(([t, b]) =>
+      `<tr><td style="text-align:left;color:var(--amber)">${esc(t)}</td><td style="text-align:left">${esc((b.from || []).map(x => x.buyer).join(', '))}</td>
+        <td>${esc([b.commitIn ? usd(b.commitIn) : null, b.commitGW ? b.commitGW + ' GW' : null].filter(Boolean).join(' / '))}</td><td>${b.rpo ? esc(usd(b.rpo)) : '<span style="color:var(--ink-faint)" title="no RPO on file yet (SEC facts refresh)">—</span>'}</td>
+        <td>${b.shareOfRpo != null ? Math.round(b.shareOfRpo * 100) + '%' : '—'}</td><td>${b.yearsOfRevenue != null ? b.yearsOfRevenue : '—'}</td></tr>`).join('');
     const legend = Object.entries(TYPE_COL).map(([k, c]) => `<span><span style="color:${c}">■</span> ${esc(k)}</span>`).join(' · ');
     const notes = Object.entries(m.nodeNotes || {}).map(([t, n]) => `<div><strong style="color:var(--ink)">${esc(t)}</strong>: ${esc(Object.entries(n).filter(([k]) => !/src$/i.test(k)).map(([, v]) => v).join(' · '))}</div>`).join('');
     const src = Object.entries(m.sources || {}).map(([k, s]) => `<div>${esc(k)} · ${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener" style="color:var(--ink-dim)">${esc(s.title)}</a>` : esc(s.title)}</div>`).join('');
@@ -174,6 +180,8 @@
       <ul style="list-style:none;margin:2px 0 0;padding:0">${loops || '<li>none</li>'}</ul>
       ${circ ? `<div style="margin-top:8px;color:var(--ink-faint);text-transform:uppercase;letter-spacing:.08em;font-size:9px">Funding its own customers</div>
       <div style="overflow-x:auto"><table class="sb-table" style="width:100%;min-width:560px;${mono};font-size:10px;margin-top:4px"><thead><tr><th style="text-align:left">Company</th><th style="text-align:left">Funds / owns these buyers</th><th>Invested</th><th>Committed back</th><th title="multi-year commitments vs one year's revenue - a scale, not like for like">÷ revenue</th><th>Loops</th></tr></thead><tbody>${circ}</tbody></table></div>` : ''}
+      ${blog ? `<div style="margin-top:8px;color:var(--ink-faint);text-transform:uppercase;letter-spacing:.08em;font-size:9px">Backlog from tracked buyers - who the sellers' order books depend on</div>
+      <div style="overflow-x:auto"><table class="sb-table" style="width:100%;min-width:560px;${mono};font-size:10px;margin-top:4px"><thead><tr><th style="text-align:left">Seller</th><th style="text-align:left">Committed buyers</th><th>Commitments</th><th>Reported backlog (RPO)</th><th title="announced commitments may not all be booked yet - over 100% means announced beyond what is booked">÷ backlog</th><th>Years of revenue</th></tr></thead><tbody>${blog}</tbody></table></div>` : ''}
       ${notes ? `<div style="margin-top:8px">${notes}</div>` : ''}
       <details style="margin-top:6px"><summary style="cursor:pointer;color:var(--ink-faint)">Sources (${Object.keys(m.sources || {}).length}) · confidence: <span style="color:${CONF_COL.filing}">filing</span> · <span style="color:${CONF_COL.disclosed}">disclosed</span> · <span style="color:${CONF_COL.reported}">reported</span> · <span style="color:${CONF_COL.inferred}">inferred</span></summary>${src}</details>
       <div style="${small};margin-top:6px">Amounts as announced / filed; "up to" commitments and capacity (GW) are not cash; ÷ revenue compares multi-year commitments with one year's revenue. Built ${esc(m.asOf || '')} from TRAPP2-ANALYTICS config/web_relationships.json - every edge carries its source and confidence; corrections go there.</div>
@@ -183,7 +191,8 @@
   // ---- 3) the company page card --------------------------------------------------------------------------------
   function factsHtml(f) {
     if (!f) return '';
-    const cells = [['Revenue', f.rev], ['Operating income', f.opInc], ['Net income', f.ni], ['Operating cash flow', f.ocf], ['Capex', f.capex], ['Cash', f.cash], ['Long-term debt', f.debt], ['Equity', f.eq]]
+    const cells = [['Revenue', f.rev], ['Operating income', f.opInc], ['Net income', f.ni], ['Operating cash flow', f.ocf], ['Capex', f.capex], ['Cash', f.cash], ['Long-term debt', f.debt], ['Equity', f.eq],
+                   ['Backlog (RPO)', f.rpo], ['Purchase obligations', f.purchOb], ['Equity-method stakes', f.eqMethod], ['Listed equity stakes', f.eqListed], ['Private equity stakes', f.eqPrivate]]
       .filter(([, v]) => v != null);
     if (!cells.length) return '';
     return `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:6px;margin-top:6px">${cells.map(([k, v]) => `<div style="border:1px solid var(--rule);border-radius:3px;padding:5px 7px"><div style="${small};text-transform:uppercase;letter-spacing:.06em">${esc(k)}</div><div style="${mono};font-size:12px;color:var(--ink)">${esc(usd(v))}</div></div>`).join('')}</div>
@@ -201,6 +210,8 @@
       parts.push(`<div style="overflow-x:auto"><table class="sb-table" style="width:100%;min-width:480px;${mono};font-size:10px"><thead><tr><th style="text-align:left">Money link</th><th>Size</th><th>Confidence</th><th style="text-align:left">Latest</th></tr></thead><tbody>${rows}</tbody></table></div>`);
     }
     const c = n && n.circularity;
+    const bl = n && n.backlog;
+    if (bl && (bl.commitIn || bl.commitGW)) parts.push(`<div style="${mono};font-size:10.5px;color:var(--ink);margin-top:6px;line-height:1.5">Commitments into it from tracked buyers: ${esc([bl.commitIn ? usd(bl.commitIn) : null, bl.commitGW ? bl.commitGW + ' GW' : null].filter(Boolean).join(' / '))} (${esc((bl.from || []).map(x => x.buyer).join(', '))})${bl.shareOfRpo != null ? ` - <strong>${Math.round(bl.shareOfRpo * 100)}%</strong> of the backlog it reports (RPO ${esc(usd(bl.rpo))})${bl.shareOfRpo > 1 ? ', i.e. announced beyond what is booked' : ''}` : ''}${bl.yearsOfRevenue != null ? ` · ${bl.yearsOfRevenue} years of revenue` : ''}.</div>`);
     if (c) parts.push(`<div style="${mono};font-size:10.5px;color:var(--ink);margin-top:6px;line-height:1.5">Funds or owns companies that are committed buyers of it: ${esc(usd(c.investedUSD))} in, ${esc(backTxt(c))} committed back${c.committedBackToRevenue != null ? ` - ${(c.committedBackToRevenue * 100).toFixed(0)}% of a year's revenue (multi-year)` : ''} · in ${c.loops} money loop${c.loops === 1 ? '' : 's'}.</div>`);
     if (n && n.notes) parts.push(`<div style="${mono};font-size:10px;color:var(--ink-dim);margin-top:4px;line-height:1.5">${esc(Object.entries(n.notes).filter(([k]) => !/src$/i.test(k)).map(([, v]) => v).join(' · '))}</div>`);
     if (n && n.facts) parts.push(factsHtml(n.facts));
