@@ -17,6 +17,11 @@
    1973 - what broke, the first published warnings and their lead, the bail-out and the gap it left), the HYPOTHESIS LAB
    (seeded lessons + automatic exploration, each supported / rejected / inconclusive on the data, every 'on' signal a
    dated prediction graded later), and the IPO CALENDAR (lock-ups, the underwriters' quiet period, fees - data/web).
+
+   z198: DEEP HISTORY - the panel from 1955 (18 episodes from the 1962 'Kennedy slide' on, each naming the pillars its
+   readings rest on, and how the panel thins going back), the S&P 500 as the lab's market, and TRACK RECORDS: every
+   series' crossings into the top fifth and how many were followed by a 20 % fall or a recession within two years -
+   which first warnings deserve the name, and which are noise.
    ========================================================================== */
 (function () {
   'use strict';
@@ -104,16 +109,25 @@
     }).join('')}</div>`;
   }
 
+  // z198: a series' record as a warning - [warnings, hits, median months to the event] vs the base rate
+  function trackTxt(t, base) {
+    if (!t || !t[0]) return '<span style="color:var(--ink-faint)">—</span>';
+    const rate = t[1] / t[0], good = base != null && t[0] >= 3 && rate >= 1.5 * base, bad = base != null && t[0] >= 3 && rate <= base;
+    return `<span style="color:${good ? 'var(--pos)' : bad ? 'var(--neg)' : 'var(--ink)'}" title="${t[0]} warnings, ${t[1]} followed by a 20% fall or a recession within 2 years${t[2] != null ? ` (median ${t[2]} months later)` : ''}">${t[1]}/${t[0]}</span>`;
+  }
+
   function indicatorsHtml(d) {
     const rows = (d.indicators || []).filter(r => r.score != null || r.value != null);
+    const base = (d.track || {}).base;
     const tf = { level: 'level', yoy_diff: 'Δ 1y', yoy_pct: '% 1y', chg6: 'Δ 6m', yoy_gap: 'gap 1y' };
     return `<div style="overflow-x:auto;margin-top:6px"><table class="sb-table" style="width:100%;min-width:640px;${mono};font-size:10px">
-      <thead><tr><th style="text-align:left">Series</th><th style="text-align:left">Pillar</th><th>Latest</th><th>As of</th><th>Read</th><th>Score</th></tr></thead>
+      <thead><tr><th style="text-align:left">Series</th><th style="text-align:left">Pillar</th><th>Latest</th><th>As of</th><th>Read</th><th>Score</th><th title="warnings (crossings into the top fifth) since the series began → how many were followed by a 20% fall or a recession within 2 years">Track</th></tr></thead>
       <tbody>${rows.map(r => `<tr><td style="text-align:left">${esc(r.label)} <span style="color:var(--ink-faint)">${esc(r.series)}</span></td><td style="text-align:left;color:var(--ink-dim)">${esc(r.pillar)}</td>
         <td>${r.value == null ? '—' : esc(num(r.value, Math.abs(r.value) >= 100 ? 0 : 2))}</td><td style="color:var(--ink-faint)">${esc(r.date || '—')}</td>
         <td>${r.x == null ? '—' : `${esc(num(r.x, 2))} <span style="color:var(--ink-faint)">${esc(tf[r.transform] || '')}</span>`}</td>
-        <td style="color:${r.score == null ? 'var(--ink-faint)' : r.pillar === 'growth' ? (r.score >= 60 ? 'var(--pos)' : r.score <= 35 ? 'var(--neg)' : 'var(--ink)') : (r.score >= 75 ? 'var(--neg)' : r.score <= 35 ? 'var(--pos)' : 'var(--ink)')}">${r.score == null ? (r.value == null ? 'no data' : 'building') : Math.round(r.score)}</td></tr>`).join('')}</tbody></table></div>
-      <div style="${small};margin-top:4px">Score = percentile vs the series' own history (stress pillars: higher = more stress; growth: higher = stronger). "Building": fewer than 5 years of history on file. Missing: ${esc(((d.coverage || {}).missing || []).join(', ') || 'none')}.</div>`;
+        <td style="color:${r.score == null ? 'var(--ink-faint)' : r.pillar === 'growth' ? (r.score >= 60 ? 'var(--pos)' : r.score <= 35 ? 'var(--neg)' : 'var(--ink)') : (r.score >= 75 ? 'var(--neg)' : r.score <= 35 ? 'var(--pos)' : 'var(--ink)')}">${r.score == null ? (r.value == null ? 'no data' : 'building') : Math.round(r.score)}</td>
+        <td>${trackTxt(r.track, base)}</td></tr>`).join('')}</tbody></table></div>
+      <div style="${small};margin-top:4px">Score = percentile vs the series' own history (stress pillars: higher = more stress; growth: higher = stronger). "Building": fewer than 5 years of history on file. Track: warnings → hits (a 20% S&P 500 fall or a recession within 2 years; ${base != null ? Math.round(base * 100) + '% of all months were followed by one' : 'base rate pending'}). Missing: ${esc(((d.coverage || {}).missing || []).join(', ') || 'none')}.</div>`;
   }
 
   function bottomUpHtml(bu, exposures) {
@@ -163,17 +177,34 @@
   }
 
   // ---- z197: crises, recessions, scares - where the first warnings were ---------------------------------------
-  function episodesHtml(eps) {
+  const PILLAR_TXT = { loss: 'loss data', lenders: 'lenders', labor: 'jobs', collateral: 'collateral', funding: 'funding & markets',
+                      fragility: 'leverage', valuation: 'valuation', shocks: 'policy & shocks', growth: 'growth' };
+  const PILLAR_SINCE = { loss: 'loss data (published from 1985)', lenders: 'the loan-officer survey (1990)' };
+  function basisTxt(e) {
+    const b = e.basis || [];
+    if (!b.length) return '';
+    const missing = Object.keys(PILLAR_SINCE).filter(p => !b.includes(p));
+    return `<div style="${small};margin-top:3px">Readings rest on: ${esc(b.map(p => PILLAR_TXT[p] || p).join(', '))}${missing.length ? ` · not yet published then: ${esc(missing.map(p => PILLAR_SINCE[p]).join(', '))}` : ''}</div>`;
+  }
+  function coverageHtml(cov) {
+    if (!cov || !cov.length) return '';
+    return `<details style="margin:4px 0 6px"><summary style="cursor:pointer;${small}">How the panel thins going back (indicators scored per gauge, every 5 years)</summary>
+      <div style="overflow-x:auto"><table class="sb-table" style="width:100%;min-width:420px;${mono};font-size:10px;margin-top:4px"><thead><tr><th style="text-align:left">Year</th><th>Fundamental</th><th>Market</th><th>Fragility</th><th>Growth</th></tr></thead>
+      <tbody>${cov.map(c => `<tr><td style="text-align:left">${c.year}</td><td>${c.fundamental}</td><td>${c.market}</td><td>${c.fragility}</td><td>${c.growth}</td></tr>`).join('')}</tbody></table></div></details>`;
+  }
+  function episodesHtml(eps, cov) {
     if (!eps || !eps.length) return `<div style="${small}">No episode history in this read.</div>`;
     const rd = (e, k) => { const r = (e.readings || {})[k]; return r ? `${r.risk == null ? '—' : Math.round(r.risk)}<span style="color:var(--ink-faint)">/${r.fund == null ? '—' : Math.round(r.fund)}/${r.mkt == null ? '—' : Math.round(r.mkt)}</span>${r.blind ? '<span style="color:var(--neg)" title="market blindness that month">●</span>' : ''}` : '—'; };
-    return `<div style="${small};margin:6px 0">Each row: what broke, the first published warnings (the month a series crossed into its top 30% from below and stayed there, and its lead in months before the market peak), the reading at 12 / 6 / 3 / 0 months before the peak (risk / fundamental / market), the policy response and the gap it left. Readings need the series' history to reach back that far.</div>
+    return `<div style="${small};margin:6px 0">Each row: what broke, the first published warnings (the month a series crossed into its top fifth from below and stayed there, its lead in months before the market peak, and in brackets its whole record as a warning: hits / crossings), the reading at 12 / 6 / 3 / 0 months before the peak (risk / fundamental / market), what the reading rests on, the policy response and the gap it left.</div>
+      ${coverageHtml(cov)}
       ${eps.slice().reverse().map(e => `<div style="border:1px solid var(--rule);border-radius:4px;padding:7px 9px;margin:6px 0">
         <div style="display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline;${mono};font-size:10.5px"><strong style="color:var(--ink)">${esc(e.name)}</strong>
           <span style="color:var(--ink-faint)">${esc(e.kind || '')}</span><span style="color:var(--ink-dim)">peak ${esc(e.peak || '—')} → trough ${esc(e.trough || '—')}${e.recession ? ` · recession ${esc(e.recession[0])} – ${esc(e.recession[1])}` : ''}</span></div>
         <div style="${mono};font-size:10px;color:var(--ink-dim);line-height:1.5;margin-top:3px">${esc(e.broke || '')}</div>
-        ${(e.firstWarnings || []).length ? `<div style="${mono};font-size:10px;margin-top:4px;line-height:1.5"><span style="color:var(--ink-faint)">FIRST WARNINGS IN OUR DATA · </span>${e.firstWarnings.map(w => `<span title="${esc(w.pillar)} · score ${num(w.score, 0)} in ${esc(w.month)}">${esc(w.label)} <strong style="color:var(--data-amber)">${w.lead}m</strong></span>`).join(' · ')}</div>` : `<div style="${small};margin-top:4px">No series in our set crossed from below in the 24 months before the peak${e.readings && Object.values(e.readings).every(r => r.fund == null) ? ' (not enough history on file for this episode)' : ' - a shock our published data did not lead'}.</div>`}
+        ${(e.firstWarnings || []).length ? `<div style="${mono};font-size:10px;margin-top:4px;line-height:1.5"><span style="color:var(--ink-faint)">FIRST WARNINGS IN OUR DATA · </span>${e.firstWarnings.map(w => `<span title="${esc(w.pillar)} · score ${num(w.score, 0)} in ${esc(w.month)}${w.track ? ` · its record as a warning: ${w.track[1]} of ${w.track[0]} crossings were followed by a 20% fall or a recession within 2 years` : ''}">${esc(w.label)} <strong style="color:var(--data-amber)">${w.lead}m</strong>${w.track ? ` <span style="color:var(--ink-faint)">(${w.track[1]}/${w.track[0]})</span>` : ''}</span>`).join(' · ')}</div>` : `<div style="${small};margin-top:4px">No series in our set crossed from below in the 24 months before the peak${e.readings && Object.values(e.readings).every(r => r.fund == null) ? ' (not enough history on file for this episode)' : ' - a shock our published data did not lead'}.</div>`}
         ${(e.warnings || []).length ? `<div style="${mono};font-size:9.5px;color:var(--ink-faint);margin-top:3px;line-height:1.5">On the record: ${esc(e.warnings.join(' · '))}</div>` : ''}
         <div style="${mono};font-size:10px;margin-top:4px">${['t-12', 't-6', 't-3', 't-0'].map(k => `<span style="margin-right:10px"><span style="color:var(--ink-faint)">${k}</span> ${rd(e, k)}</span>`).join('')}</div>
+        ${basisTxt(e)}
         ${e.policy || e.gap ? `<div style="${mono};font-size:10px;color:var(--ink-dim);margin-top:4px;line-height:1.5">${e.policy ? `<span style="color:var(--ink-faint)">RESPONSE · </span>${esc(e.policy)}` : ''}${e.gap ? `<br><span style="color:var(--neg)">GAP LEFT · </span>${esc(e.gap)}` : ''}</div>` : ''}
         ${e.lesson ? `<div style="${mono};font-size:10px;color:var(--ink);margin-top:3px">Lesson: ${esc(e.lesson)}</div>` : ''}
       </div>`).join('')}`;
@@ -183,7 +214,21 @@
   const OUTCOME_TXT = { DD10_6: '10% drawdown ≤ 6m', DD15_12: '15% drawdown ≤ 12m', DD20_12: '20% drawdown ≤ 12m', DD20_18: '20% drawdown ≤ 18m',
                         REC12: 'recession ≤ 12m', REC24: 'recession ≤ 24m', ABOVE_MED12: 'above-median 12m return' };
   const ST_COL = { supported: 'var(--pos)', rejected: 'var(--neg)', inconclusive: 'var(--data-amber)', untestable: 'var(--ink-faint)' };
-  function labHtml(lab) {
+  function trackBoard(d) {
+    const tr = d.track || {}, base = tr.base;
+    const rows = (d.indicators || []).filter(r => r.track && r.track[0] >= 3 && r.pillar !== 'growth').map(r => ({ r, rate: r.track[1] / r.track[0] }));
+    if (!rows.length || base == null) return '';
+    rows.sort((a, b) => b.rate - a.rate || b.r.track[0] - a.r.track[0]);
+    const li = x => `${esc(x.r.label)} <strong style="color:var(--ink)">${x.r.track[1]}/${x.r.track[0]}</strong>${x.r.track[2] != null ? ` <span style="color:var(--ink-faint)">~${Math.round(x.r.track[2])}m</span>` : ''}`;
+    const best = rows.filter(x => x.rate >= 1.5 * base).slice(0, 8), noise = rows.filter(x => x.rate <= base).slice(-8).reverse();
+    return `<div style="${mono};font-size:10px;color:var(--ink-dim);margin-top:8px;line-height:1.6">
+      <span style="color:var(--ink-faint);text-transform:uppercase;letter-spacing:.08em;font-size:9px">Track records · which first warnings deserve the name</span>
+      <div><span style="color:var(--pos)">EARNED IT · </span>${best.length ? best.map(li).join(' · ') : 'none yet'}</div>
+      <div><span style="color:var(--neg)">NOISE (no better than any month) · </span>${noise.length ? noise.map(li).join(' · ') : 'none'}</div>
+      <div style="${small}">${esc(tr.rule || '')}; base rate ${Math.round(base * 100)}% of all months · market: ${esc(tr.market || '—')}. Earned = at least 1.5× the base rate over 3+ warnings.</div></div>`;
+  }
+
+  function labHtml(lab, d) {
     if (!lab || !lab.counts) return `<div style="${small}">The lab runs with the full read (needs the FRED history).</div>`;
     const c = lab.counts || {}, rec = lab.record || {}, ex = lab.explored || {};
     const row = h => `<tr><td style="text-align:left;color:var(--ink-faint)">${esc(h.id)}</td><td style="text-align:left">${esc(h.statement)}</td><td style="text-align:left;color:var(--ink-dim)">${esc(OUTCOME_TXT[h.outcome] || h.outcome || '')}</td>
@@ -194,9 +239,10 @@
         <strong style="color:var(--pos)">${c.supported || 0} supported</strong> · <strong style="color:var(--neg)">${c.rejected || 0} rejected</strong> · <strong style="color:var(--data-amber)">${c.inconclusive || 0} inconclusive</strong> · ${c.untestable || 0} untestable (no history yet).
         Exploration: ${ex.tested || 0} of ${ex.candidates || 0} candidate signals tested this run, false-discovery rate held at ${ex.fdr != null ? Math.round(ex.fdr * 100) + '%' : '—'}.
         Prediction ledger: ${rec.opened || 0} dated predictions${rec.since ? ` since ${esc(rec.since)}` : ''} · ${rec.pending || 0} pending · graded ${rec.graded || 0}: <strong style="color:var(--pos)">${rec.right || 0} right</strong> / <strong style="color:var(--neg)">${rec.wrong || 0} wrong</strong>.</div>
-      <div style="${small};margin-top:2px">${esc(lab.rules || '')}. Lift = how much more often the outcome followed the signal than it followed any month; p = how often a signal slid to a random point in history did as well.</div>
-      ${(lab.nowOn || []).length ? `<div style="${mono};font-size:10px;color:var(--ink);margin-top:6px"><span style="color:var(--neg)">ON NOW · </span>${lab.nowOn.map(h => `${esc(h.id)} <span style="color:${ST_COL[h.status]}">(${esc(h.status)})</span>`).join(' · ')}</div>` : ''}
+      <div style="${small};margin-top:2px">${esc(lab.rules || '')}. Lift = how much more often the outcome followed the signal than it followed any month; p = how often a signal slid to a random point in history did as well. Market: ${esc(((d || {}).track || {}).market || ((d || {}).backtest || {}).equity || '—')}; recessions: NBER.</div>
+      ${(lab.nowOn || []).length ? `<div style="${mono};font-size:10px;color:var(--ink);margin-top:6px"><span style="color:var(--neg)">ON NOW · </span>${lab.nowOn.map(h => `${esc(h.id)} <span style="color:${ST_COL[h.status]}">(${esc(h.status)})</span>`).join(' · ')}<span style="color:var(--ink-faint)"> - only a supported one that points down moves the bot (×0.90 on new longs); the rest are dated predictions in the ledger</span></div>` : ''}
       ${(lab.discoveries || []).length ? `<div style="${mono};font-size:10px;margin-top:6px;line-height:1.5"><span style="color:var(--ink-faint)">DISCOVERIES (survive the FDR; now tested every run) · </span>${lab.discoveries.map(dd => `${esc(dd.statement)} <span style="color:var(--ink-faint)">(lift ${num(dd.lift, 2)}×, p ${num(dd.p, 3)}, ${dd.caught}/${dd.events})</span>`).join(' · ')}</div>` : `<div style="${small};margin-top:6px">No exploration discovery has survived the false-discovery control yet - the honest answer on today's history.</div>`}
+      ${d ? trackBoard(d) : ''}
       <div style="overflow-x:auto"><table class="sb-table" style="width:100%;min-width:760px;${mono};font-size:10px;margin-top:6px"><thead><tr><th style="text-align:left">#</th><th style="text-align:left">Hypothesis (stated so it can fail)</th><th style="text-align:left">Outcome tested</th><th>Verdict</th><th>Lift</th><th>p</th><th>Signal months</th><th>Caught</th><th>Now</th></tr></thead><tbody>${all.map(row).join('')}</tbody></table></div>`;
   }
 
@@ -219,13 +265,19 @@
       <div style="${small};margin-top:4px">${esc(ipo.note || '')} Built ${esc(ipo.asOf || '')} from TRAPP2-ANALYTICS config/ipo_watch.json.</div>`;
   }
 
+  // z198: the lab's supported, bearish hypotheses that are on - the bot trims new longs x0.9 for them (mirrors bot_runner)
+  function labBear(d) {
+    return (((d.lab || {}).nowOn) || []).filter(h => h.status === 'supported' && (/^(DD|REC)/.test(h.outcome || '') || (h.outcome === 'ABOVE_MED12' && h.expect === 'lower')));
+  }
+
   function botHtml(d) {
     const er = ((d.backtest || {}).earned) || {};
     const r = d.risk;
+    const lb = labBear(d);
     if (r == null || d.provisional) return `<div style="${small};margin-top:6px">The bot records this read on every trade but doesn't act on it until a full (non-provisional) read exists.</div>`;
     let base = r < 60 ? 1 : r < 75 ? 0.9 : r < 90 ? 0.8 : 0.7;
     if (!er.throttle) base = Math.max(base, 0.9);
-    return `<div style="${mono};font-size:10px;color:var(--ink-dim);margin-top:6px;line-height:1.55">What the bot does with it: new longs sized <strong style="color:var(--ink)">×${base.toFixed(2)}</strong>${er.throttle ? '' : ' (throttle not earned by the backtest - capped at ×0.90)'}, less in an exposed industry (×(1 − 0.35·exposure)); a <em>warning</em> signal in the blend that the learning layer weights; ${d.level === 'extreme' && /acute|spreading/.test(d.regime) ? '<strong style="color:var(--neg)">no new leveraged long funds</strong>; ' : ''}shorts in exposed industries up to ×1.15 only when earned; the read is stamped on every trade (warningAtEntry).</div>`;
+    return `<div style="${mono};font-size:10px;color:var(--ink-dim);margin-top:6px;line-height:1.55">What the bot does with it: new longs sized <strong style="color:var(--ink)">×${base.toFixed(2)}</strong>${er.throttle ? '' : ' (throttle not earned by the backtest - capped at ×0.90)'}, less in an exposed industry (×(1 − 0.35·exposure)); a <em>warning</em> signal in the blend that the learning layer weights; ${d.level === 'extreme' && /acute|spreading/.test(d.regime) ? '<strong style="color:var(--neg)">no new leveraged long funds</strong>; ' : ''}shorts in exposed industries up to ×1.15 only when earned; ${lb.length ? `<strong style="color:var(--neg)">×0.90 more for the lab's supported ${lb.length === 1 ? 'hypothesis' : 'hypotheses'} on now (${esc(lb.map(h => h.id).join(', '))})</strong>; ` : 'a further ×0.90 whenever a hypothesis the lab supports turns on and points down (none on now); '}the read is stamped on every trade (warningAtEntry).</div>`;
   }
 
   function cardHtml(d) {
@@ -250,8 +302,8 @@
       ${sparkline(d.history, (d.backtest || {}).recessions)}
       ${pillarsHtml(d)}
       ${botHtml(d)}
-      ${sec(`Crises, recessions and scares since 1973 - where the first warnings were (${(d.episodes || []).length})`, 'ep', episodesHtml(d.episodes))}
-      ${sec(`Hypothesis lab - proven right or wrong on the data${d.lab && d.lab.counts ? ` (${(d.lab.counts.supported || 0)} supported · ${(d.lab.counts.rejected || 0)} rejected)` : ''}`, 'lab', labHtml(d.lab))}
+      ${sec(`Crises, recessions and scares since ${((d.episodes || [])[0] || {}).id || 1962} - where the first warnings were (${(d.episodes || []).length})`, 'ep', episodesHtml(d.episodes, d.coverageHistory))}
+      ${sec(`Hypothesis lab - proven right or wrong on the data${d.lab && d.lab.counts ? ` (${(d.lab.counts.supported || 0)} supported · ${(d.lab.counts.rejected || 0)} rejected)` : ''}`, 'lab', labHtml(d.lab, d))}
       ${sec('IPO calendar - lock-ups, quiet periods, underwriter conflicts', 'ipo', ipoHtml(IPO))}
       ${sec('Bottom-up: filings, insiders, short interest, options, credit, breadth', 'bu', bottomUpHtml(d.bottomUp, d.exposures))}
       ${sec('Backtest: recessions and drawdowns', 'bt', backtestHtml(d.backtest))}
