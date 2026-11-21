@@ -5,7 +5,7 @@
      News · Bets · Quant · Stock Book & Valuation · Macro Data · Data & Research · Review   (Quant: z171)
    A group opens its last-used page and shows its own sub-tabs underneath:
      Stock Book & Valuation : Stock Book · Valuation · Options (new: every chain)
-     Macro Data             : Regime · Macro Quad · Bonds & Treasuries · Fed ·
+     Macro Data             : Today's Trends (z201) · Regime · Macro Quad · Bonds & Treasuries · Fed ·
                               Supply Chains & Business Web (z200) · Global Trade
      Data & Research        : Data · Research · Scenarios · Risk Calculator · Probability
    Nothing is removed: every page is the same panel, rendered by the same code,
@@ -17,7 +17,7 @@
   'use strict';
   const GROUPS = [
     { id: 'book', label: 'Stock Book & Valuation', icon: '📒', tabs: [['stockbook', 'Stock Book'], ['valuation', 'Valuation'], ['options', 'Options']] },
-    { id: 'macro', label: 'Macro Data', icon: '🌐', tabs: [['regime', 'Regime'], ['macro', 'Macro Quad'], ['bonds', 'Bonds & Treasuries'], ['credit', 'Credit'], ['fed', 'Fed'], ['supplychain', 'Supply Chains & Business Web'], ['globaltrade', 'Global Trade'], ['volsent', 'Volatility & Sentiment']] },
+    { id: 'macro', label: 'Macro Data', icon: '🌐', tabs: [['trends', "Today's Trends"], ['regime', 'Regime'], ['macro', 'Macro Quad'], ['bonds', 'Bonds & Treasuries'], ['credit', 'Credit'], ['fed', 'Fed'], ['supplychain', 'Supply Chains & Business Web'], ['globaltrade', 'Global Trade'], ['volsent', 'Volatility & Sentiment']] },
     { id: 'lab', label: 'Data & Research', icon: '🔬', tabs: [['data', 'Data'], ['research', 'Research'], ['earnings', 'Earnings'], ['creditdesk', 'Bonds & CDS'], ['headcount', 'Headcount'], ['scenarios', 'Scenarios'], ['risk', 'Risk Calculator'], ['probability', 'Probability']] },
   ];
   const LAST = 'valuatio.nav.lastTab.v1';
@@ -87,6 +87,12 @@
         if (sub) sub.textContent = 'Volatility & Sentiment · VIX term structure, SKEW, auctions, BLS, news tone';
         const host = document.getElementById('volsent-mount');
         if (host && window.MarketExtras) window.MarketExtras.render(host);
+      }
+      if (tab === 'trends') {                                   // z201: runs, the sell-off read, what moves the S&P 500
+        const sub = document.getElementById('masthead-sub');
+        if (sub) sub.textContent = "Today's Trends · close-to-close runs and how rare they are · the sell-off read · what is moving the S&P 500 and how";
+        const host = document.getElementById('trends-mount');
+        if (host && window.TodaysTrends) window.TodaysTrends.render(host);
       }
       if (tab === 'supplychain') {                              // z200: the chains and the Business Web, one page
         const sub = document.getElementById('masthead-sub');
