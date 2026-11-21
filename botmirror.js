@@ -150,7 +150,11 @@
     try { window.saveBotState(bot); } finally { window.__botMerging--; }
     const info = { at: bot.mirroredAt, journalAt: J.generatedAt || null, trades: bot.bets.length,
                    open: bot.bets.filter(b => b.status === 'open').length, bankroll: +J.bankroll, aside: aside.size,
-                   risk: (J.risk && typeof J.risk === 'object') ? J.risk : null };              // z186: the runner's risk book
+                   risk: (J.risk && typeof J.risk === 'object') ? J.risk : null,               // z186: the runner's risk book
+                   // z202: the trends record - how trades did by the market they were opened in, and the verdict on
+                   // buying sell-offs that sets the runner's trim (a few small rows)
+                   trend: (Array.isArray(J.trendScores) || (J.trendEvidence && typeof J.trendEvidence === 'object'))
+                     ? { scores: Array.isArray(J.trendScores) ? J.trendScores.slice(0, 12) : [], evidence: J.trendEvidence || null } : null };
     put(SYNC, info);
     return info;
   }
@@ -258,10 +262,25 @@
           + `${dd.dd > 0 ? `${pc(dd.dd)} below the ${$(dd.hwm)} high (${esc(dd.hwmDate || '—')})` : 'at its high'} → new trades sized ×${(+dd.scale).toFixed(2)}`
           + (R.halted ? ` · <span style="color:var(--neg);font-weight:700">no new trades today</span> (down ${pc(-(R.dayChange || 0))} on the day)` : '')
           + ` · shares ${pc(R.gross)} of the book · options at risk ${pc(R.optionRisk)}${L.optionBookCap ? ` (cap ${pc(L.optionBookCap)})` : ''}`
-          + ` · net beta ${R.netBeta >= 0 ? '+' : ''}${pc(R.netBeta)}${capB ? ` (cap ±${pc(capB)})` : ''} · shorts ${R.shortsOn ? 'on' : 'off'}`
+          + ` · net beta ${R.netBeta >= 0 ? '+' : ''}${pc(R.netBeta)}${capB ? ` (cap ±${pc(capB)}${R.longBetaScale != null && R.longBetaScale < 1 ? `; long side +${pc(capB * R.longBetaScale)} - ${esc(R.longBetaWhy || 'a sell-off')}` : ''})` : ''} · shorts ${R.shortsOn ? 'on' : 'off'}`
           + (sec ? ` · net by sector ${sec}` : '')
           + (over.length ? ` · <span style="color:var(--amber)">over the ${pc(L.sectorCap)} sector cap: ${over.map(esc).join(', ')} — only trades that shrink them</span>` : '')
           + `<span style="color:var(--ink-faint)"> · each trade risks ${pc((L.riskPerTrade || [])[0])}–${pc((L.riskPerTrade || [])[1])} of the book at its stop</span></span>`;
+      }
+    } catch (e) {}
+    // z202: TRENDS - the market each trade was opened in (the read at that day's open: calm / pressure / selloff) and
+    // the runner's verdict on buying sell-offs (it decides the trim on new equity longs in a sell-off)
+    let trendLn = '';
+    try {
+      const T = info && info.trend, ev = T && T.evidence, sc = (T && T.scores) || [];
+      if (ev || sc.length) {
+        const pl = v => `${v >= 0 ? '+' : '−'}${$(Math.abs(+v || 0)).replace(/^[−-]/, '')}`;
+        const by = dir => sc.filter(r => r.direction === dir).map(r => `${esc(r.read)} ${r.trades}${r.winRate == null ? '' : ` · ${Math.round(r.winRate * 100)}% won`} · <span style="color:${(+r.totalPnl || 0) >= 0 ? 'var(--pos)' : 'var(--neg)'}">${pl(r.totalPnl)}</span>`).join(' / ');
+        const mult = ev ? (ev.verdict === 'worse' ? '×0.80 (earned)' : ev.verdict === 'better' ? 'untrimmed (the record says it paid)' : '×0.90 (a prior)') : '';
+        trendLn = `<span style="flex-basis:100%;color:var(--ink-dim)"><span style="color:var(--amber);font-weight:700">TRENDS</span> by the market each trade was opened in (the read at that day's open): `
+          + `longs ${by('long') || '—'} · shorts ${by('short') || '—'}`
+          + (ev ? ` · <span style="color:${ev.verdict === 'worse' ? 'var(--neg)' : ev.verdict === 'better' ? 'var(--pos)' : 'var(--ink-faint)'}">buying sell-offs: ${esc(ev.verdict)}${ev.why ? ` - ${esc(ev.why)}` : ''}</span> → new equity longs in a sell-off ${mult}` : '')
+          + '</span>';
       }
     } catch (e) {}
     const line = S.busy ? 'syncing with the runner…' : S.err ? `sync failed: ${esc(S.err)} — showing the last synced copy`
@@ -269,7 +288,7 @@
       : 'not synced yet';
     el.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;font-family:var(--mono);font-size:10.5px;padding:7px 12px;border:1px solid var(--rule);border-left:3px solid ${col};border-radius:4px;margin:8px 0;background:var(--bg-elev)">
       <span style="color:${col};font-weight:700">ONE BOOK · RUNNER</span><span style="color:var(--ink-dim)">${esc(s.text)}</span>
-      <span style="flex-basis:100%;color:var(--ink-dim)">${line}</span>${bridge}${riskLn}
+      <span style="flex-basis:100%;color:var(--ink-dim)">${line}</span>${bridge}${riskLn}${trendLn}
       <span style="color:var(--ink-faint)">The bot is autonomous: only the GitHub runner trades, and only while the NYSE is open — new entries once per session after 10:00 ET, exits every pass. Every device shows the same journal.</span>
       <span style="margin-left:auto;display:flex;gap:6px">${btn('Refresh', "BotMirror.sync('button')")}</span></div>`;
     strip();
