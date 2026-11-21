@@ -1,5 +1,5 @@
 /* ==========================================================================
-   quantdesk.js — the QUANT BOOK tab (z171, universe line z174, strategy lab z175, curve + stocks / funds z176, macro quad z177, lab v2 z180, signal vs cost z186; card z163, dashboard z170).
+   quantdesk.js — the QUANT BOOK tab (z171, universe line z174, strategy lab z175, curve + stocks / funds z176, macro quad z177, lab v2 z180, signal vs cost z186, market tape z202; card z163, dashboard z170).
    Its own top-level tab, laid out like Bot Bets: ◆ Portfolio (today, record, equity, engine & pipeline, open
    positions, statistics, the backtest gate, by day, strategies & risk) and ▤ Ledger (every closed quant trade,
    filterable and sortable). Separate from the swing bot in every way: data from TRAPP2-QUANT (data/quant/*) and
@@ -134,7 +134,10 @@
   const _ui = { view: 'portfolio', mode: 'all', strat: 'all', kind: 'all', sort: 'exit_ts', dir: -1 };
   // z175: the strategy lab in words - which segments, which parameters
   const SEG_WORDS = { liq: { mega: 'mega names (≥ $1B/day)', large: 'large names ($200M–1B)', mid: 'mid-size names ($50–200M)', small: 'small names (< $50M)', unknown: 'names without volume data' },
-                      tod: { open: 'the open (to 1030)', mid: 'midday (1030–1430)', late: 'late (after 1430)' }, side: { long: 'longs', short: 'shorts' } };
+                      tod: { open: 'the open (to 1030)', mid: 'midday (1030–1430)', late: 'late (after 1430)' }, side: { long: 'longs', short: 'shorts' },
+                      // z202: the market tape (quant/tape.py)
+                      mkt: { calm: 'calm market (read at the open)', pressure: 'market under pressure (read at the open)', selloff: 'market in a sell-off (read at the open)' },
+                      spx: { dn: 'S&P down 0.75 %+ on the day', flat: 'S&P within ±0.75 % on the day', up: 'S&P up 0.75 %+ on the day' } };
   function segWords(key) {
     if (key === 'all') return 'every name, all day';
     return key.split('|').map(part => { const [d, v] = part.split(':'); return d === 'sector' ? (v === 'none' ? 'no sector' : `${v} names`) : d === 'quad' ? `official ${v.replace('Q', 'Quad ')}` : ((SEG_WORDS[d] || {})[v] || part); }).join(' · ');
@@ -154,7 +157,8 @@
   function labCard(lab) {
     if (!lab || !lab.strategies) return card('Where it works · strategy lab', empty('The lab hasn\'t run yet. Each night (Actions → Quant backtest) it replays the last 60 sessions of real 1-minute bars across every universe name, scores each strategy\'s parameter variants in every segment (liquidity, time of day, side, sector, quad), trains on two thirds and tests on the last third it never saw - judged by session, with false-discovery control. A strategy trades live only in segments that pass; everywhere else it keeps running in shadow.'));
     const ses = lab.sessions || {}, r = lab.rules || {}, v2 = (+lab.labVersion || 1) >= 2;
-    const sub = `retrained ${esc(etTime(lab.asOf))} ET · trained on ${ses.train ? `${esc(ses.train[0])} … ${esc(ses.train[1])} (${ses.train[2]} sessions)` : '—'} · tested on ${ses.test ? `${esc(ses.test[0])} … ${esc(ses.test[1])} (${ses.test[2]})` : '—'} · live needs ${v2 ? `≥ ${r.minTrainSessions} / ${r.minTestSessions} sessions and ` : ''}≥ ${r.minTrainTrades} / ${r.minTestTrades} trades, ≥ ${r.minTestExpectancyBps} bps a trade out of sample, false-discovery q ≤ ${r.fdr}${v2 ? ', still positive without its best day' : ''}`;
+    const ms = lab.mktSessions || null, msTxt = h => Object.entries((ms && ms[h]) || {}).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${esc(k)} ${v}`).join(' · ');
+    const sub = `${ms ? `market read by session (z202): train ${msTxt('train') || '—'} · test ${msTxt('test') || '—'} · ` : ''}retrained ${esc(etTime(lab.asOf))} ET · trained on ${ses.train ? `${esc(ses.train[0])} … ${esc(ses.train[1])} (${ses.train[2]} sessions)` : '—'} · tested on ${ses.test ? `${esc(ses.test[0])} … ${esc(ses.test[1])} (${ses.test[2]})` : '—'} · live needs ${v2 ? `≥ ${r.minTrainSessions} / ${r.minTestSessions} sessions and ` : ''}≥ ${r.minTrainTrades} / ${r.minTestTrades} trades, ≥ ${r.minTestExpectancyBps} bps a trade out of sample, false-discovery q ≤ ${r.fdr}${v2 ? ', still positive without its best day' : ''}`;
     const warn = v2 ? '' : `<div style="font-family:var(--mono);font-size:10.5px;color:var(--amber);line-height:1.6;margin:8px 0 4px">⚠ This verdict is from lab v1: it counted every trade as independent evidence, but trades on one day move together - so it overstated the evidence. The engine trades none of it live; the next lab run (v2, judged by session) re-judges every segment.</div>`;
     const bodies = Object.entries(lab.strategies).map(([st, m]) => {
       const variants = Object.assign({}, m.variants || {});
@@ -162,6 +166,7 @@
       const status = c => !c.approved ? '<span style="color:var(--ink-faint)">shadow</span>'
         : !v2 ? '<span style="color:var(--amber)">untrusted (v1)</span>'
         : c.regimeDependent ? '<span style="color:var(--amber);font-weight:700">LIVE · only while the regime is dialed in</span>'
+        : c.marketDependent ? `<span style="color:var(--pos);font-weight:700">LIVE · only on ${esc(c.marketDependent)} sessions</span>`
         : '<span style="color:var(--pos);font-weight:700">LIVE</span>';
       const rows = (m.report || []).slice(0, 10).map(c => `<tr><td style="white-space:normal;min-width:180px">${esc(segWords(c.segment))}${(c.reasons && c.reasons.length) ? `<div style="font-size:9px;color:var(--ink-faint);margin-top:2px">${esc(c.reasons.join(' · '))}</div>` : ''}</td><td style="white-space:normal;min-width:170px">${esc(variantWords(st, (m.live || []).find(a => a.variant === c.variant) ? variants[c.variant] : (c.params || null)) || c.variant)}</td>
         <td style="text-align:right">${half(c.train)}</td><td style="text-align:right">${half(c.test, true)}</td><td style="text-align:right">${c.q}</td><td>${status(c)}</td></tr>`);
@@ -170,7 +175,7 @@
         + (rows.length ? tbl([['Segment'], ['Variant'], [v2 ? 'Train (n · sessions · net · t)' : 'Train (n · net · t)', 'right'], [v2 ? 'Test (n · sessions · net · t · ≈ indep.)' : 'Test (n · net · t)', 'right'], ['q', 'right'], ['Status']], rows, 820)
                        : empty('No segment had enough sessions and training evidence of its own to test.'));
     }).join('');
-    return card('Where it works · strategy lab', warn + bodies + `<div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:8px">net = after the spread (scaled by each name's liquidity), slippage and fees · ${v2 ? 't = session-clustered (trades on one day count together) · ≈ = how many independent trades they behave like · ' : ''}q = the chance the result is a false discovery among everything tested · a segment split by the macro quad trades live only while the regime is dialed in and the nowcast agrees with the official quad · shadow trades keep collecting evidence on every name</div>`, sub);
+    return card('Where it works · strategy lab', warn + bodies + `<div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:8px">net = after the spread (scaled by each name's liquidity), slippage and fees · ${v2 ? 't = session-clustered (trades on one day count together) · ≈ = how many independent trades they behave like · ' : ''}q = the chance the result is a false discovery among everything tested · a segment split by the macro quad trades live only while the regime is dialed in and the nowcast agrees with the official quad · a market segment (the sell-off read at the open, or the S&P's day) needs the read to vary inside both windows, then trades only on those sessions · shadow trades keep collecting evidence on every name</div>`, sub);
   }
 
   // z177: the macro quad the quant book records on every trade (official GDP/CPI and the market nowcast)
@@ -185,6 +190,32 @@
       + (ag ? `<br><span style="color:${ag.sameQuad ? 'var(--pos)' : 'var(--amber)'}">${ag.sameQuad ? '✓ they agree' : '⚠ ' + esc(ag.note || 'they disagree')}</span>` : '')
       + (live && live.regime && live.regime.why ? `<br><span style="color:${live.regime.ok ? 'var(--pos)' : 'var(--amber)'}">regime gate ${live.regime.ok ? 'OPEN' : 'SHUT'} - ${esc(live.regime.why)}${live.regime.ok ? '' : ' · quad-split segments stay in shadow'}</span>` : '')
       + `<br><span style="color:var(--ink-faint)">every quant trade records both; the lab tests each strategy by the official quad as it was known that day - a quad segment can go live only if the quad varied inside its test window, and only while the regime is dialed in (certainty ≥ 65 % and the two quads agree)</span></div>`;
+  }
+
+  // z202: the market tape the quant book records on every trade - the sell-off read as known at the open (six of Today's
+  // Trends' seven criteria, from daily closes) and the S&P 500 at the minute (SPY vs its prior close)
+  const MKT_COL = { calm: 'var(--pos)', pressure: 'var(--amber)', selloff: 'var(--neg)' };
+  function marketLine(live) {
+    const m = live && live.mkt;
+    if (!m || !m.state) return live ? `<div style="font-family:var(--mono);font-size:10px;line-height:1.7;margin-top:8px;padding:8px 10px;border-left:2px solid var(--rule);color:var(--ink-faint)">market tape: no read this session (the history didn't reach it) - trades carry no market tags</div>` : '';
+    const now = m.now || {};
+    const sgn = v => (v == null ? '—' : `${v > 0 ? '+' : ''}${(+v).toFixed(1)}`);
+    return `<div style="font-family:var(--mono);font-size:10px;line-height:1.7;margin-top:8px;padding:8px 10px;border-left:2px solid ${MKT_COL[m.state] || 'var(--rule)'}">market tape: <strong style="color:${MKT_COL[m.state] || 'inherit'}">${esc(String(m.state).toUpperCase())}</strong> <span style="color:var(--ink-faint)">(${m.on} of ${m.of} criteria at the ${esc(m.asOf || '')} close)</span>`
+      + ` · S&P run ${m.run != null ? (m.run < 0 ? `▼${-m.run}` : `▲${m.run}`) : '—'} · ${sgn(m.dd)}% from the 52-week high · ${sgn(m.vs50)}% vs the 50-day · VIX ${m.vix != null ? (+m.vix).toFixed(1) : '—'}`
+      + (live.spxBps != null ? ` · S&P now <span style="color:${col(live.spxBps)}">${sgn(live.spxBps / 100)}%</span>` : '')
+      + (now.label ? `<br><span style="color:var(--ink-dim)">today's trends (TRAPP2-ANALYTICS): ${esc(now.label)}${now.on != null ? ` · ${now.on} of ${now.of}` : ''}${now.etTime ? ` · ${esc(now.date || '')} ${esc(now.etTime)} ET` : ''}</span>` : '')
+      + `<br><span style="color:var(--ink-faint)">every quant trade records it; the lab tests each strategy by the read as known at the open (calm / pressure / selloff) and by the S&P's day (down / flat / up) - nothing is tilted until a market segment earns it out of sample</span></div>`;
+  }
+  function byMarketCard(d) {
+    const bm = (d.summ && d.summ.byMarket) || {};
+    const rows = [];
+    [['mkt', ['calm', 'pressure', 'selloff'], 'Market read at the open'], ['spx', ['dn', 'flat', 'up'], 'S&P on the day']].forEach(([dim, order, label]) => {
+      const by = bm[dim] || {};
+      order.filter(k => by[k]).forEach(k => ['live', 'shadow'].forEach(mode => { if (by[k][mode] && by[k][mode].n) rows.push(statRow(`${label}: ${(SEG_WORDS[dim] || {})[k] || k} · ${mode}`, by[k][mode])); }));
+    });
+    if (!rows.length) return card('By market · the tape at entry', empty('Appears once trades carry the market tape (z202+): each mode\'s record in calm / under-pressure / sell-off markets and on S&P down / flat / up days - the evidence behind the lab\'s market segments.'));
+    return card('By market · the tape at entry', tbl([['Market'], ['Trades', 'right'], ['Win', 'right'], ['95 % CI', 'right'], ['Expectancy', 'right'], ['Profit factor', 'right'], ['t', 'right']], rows, 640)
+      + `<div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:4px">the same trades as above, split by the market they were opened in · per-trade statistics here (shown, never decisive) - the lab judges by session</div>`);
   }
 
   // z174: what the universe holds - every US stock / ETF in the books - and what Alpaca's stock API can't trade
@@ -225,6 +256,7 @@
     const status = card('Engine & pipeline', `${why ? `<div style="font-family:var(--mono);font-size:10.5px;color:var(--amber);line-height:1.6;margin-bottom:8px">⚠ ${why}</div>` : ''}
       ${tbl([['Workflow'], ['Latest run']], [['Quant engine (0920 ET → close)', r.engine], ['Quant backtest (the gate, 1840 ET)', r.backtest], ['Tests (every push)', r.tests]].map(([n, x]) => `<tr><td>${n}</td><td>${runTxt(x)}</td></tr>`), 420)}
       ${quadLine(d.quadDoc, d.live)}
+      ${marketLine(d.live)}
       <div style="font-family:var(--mono);font-size:9.5px;color:var(--ink-faint);margin-top:6px">universe: ${d.uni ? universeLine(d.uni) : 'not built yet'} · gate: ${d.gate ? `from ${esc(etTime(d.gate.asOf))} ET` : 'no backtest yet'} · summary: ${d.summ ? `${esc(etTime(d.summ.asOf))} ET (${ago(d.summ.asOf)})` : 'none yet'} · live state: ${d.live ? `${ago(d.liveAt)} (Supabase)` : 'none'}</div>`);
     const pos = card('Open positions', opn.length ? tbl([['Symbol'], ['Side'], ['Qty', 'right'], ['Strategy'], ['Mode'], ['Entry', 'right'], ['Move', 'right']],
       opn.map(p => `<tr><td>${esc(p.symbol)}</td><td>${esc(p.side)}</td><td style="text-align:right">${p.qty}</td><td>${esc(p.strategy)}</td><td>${p.mode === 'shadow' ? '<span style="color:var(--ink-faint)">shadow</span>' : 'live'}</td><td style="text-align:right">$${(+p.entry).toFixed(2)}</td><td style="text-align:right">${bps(p.moveBps)}</td></tr>`))
@@ -262,7 +294,7 @@
     const sigCost = svRows.length ? card('Signal vs cost · why a strategy does or doesn\'t make money',
       tbl([['Strategy'], ['Trades', 'right'], ['Signal', 'right'], ['t', 'right'], ['Cost', 'right'], ['Net', 'right'], ['Reading']], svRows, 560)
       + `<div style="font-family:var(--mono);font-size:9px;color:var(--ink-faint);margin-top:6px;line-height:1.5">signal = the price move from the entry mid to the exit mid in the trade's direction, before any spread, slippage or fee · cost = what the fills took on top · net = signal − cost · no signal: the idea doesn't predict at this horizon (cheaper execution won't save it) · signal smaller than cost: the idea works but the trading eats it (cheaper fills or a longer horizon could)</div>`) : '';
-    return tiles + status + labCard(d.lab) + pos + act + stats + sigCost + gateC + byDay + rulesC;
+    return tiles + status + labCard(d.lab) + pos + act + stats + byMarketCard(d) + sigCost + gateC + byDay + rulesC;
   }
 
   function ledgerView(d) {
