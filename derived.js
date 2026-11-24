@@ -21,6 +21,14 @@
    fetchStock waits up to 3 s more for the file (loading since the page opened) once the stock's data is in, so the first
    valuation already has it; a file that arrives later only adds the block - the beta the valuation ran with is never
    changed under it.
+   z205 - THE HOLY GRAIL (Risk tab) FROM OUR CLOSES. "Import from Stock Book" (and a ticker typed into a leg) set a
+   leg's volatility as beta x 18 (15-60 %) and its correlation as 55 % - rough mappings. Now, where the file has the
+   ticker: volatility = its 1-year realized volatility (s252; the 60-day one when the year holds a one-session jump),
+   correlation = a one-factor estimate - the leg's daily correlation with the S&P 500 (sign of the 252-day beta x the
+   square root of its R²) times the other stock legs' average. A pair whose histories are loaded is still measured
+   directly by the app; only the fallback changes. A value is replaced only where the app had just put its rough one
+   (never a typed figure), is marked (dotted, with its basis on hover) until edited, and a stale / mismatched / jumpy
+   history is not used.
    ============================================================ */
 (function () {
   'use strict';
@@ -277,6 +285,112 @@
     } catch (e) {}
   }
 
+  // ---- z205: the Holy Grail legs -------------------------------------------------------------------------------------
+  const jumpWithin = (e, days) => (e.q || []).some(q => {
+    const m = /^jump:(\d{4}-\d{2}-\d{2})/.exec(q);
+    return m && (Date.parse(e.d) - Date.parse(m[1])) / 864e5 <= days;
+  });
+  function legStats(t) {
+    const e = entry(t);
+    if (!e || (e.q || []).some(q => q === 'stale' || /^px:/.test(q))) return null;
+    let vol = null, vsrc = null, rho = null;
+    if (num(e.s252) != null && num(e.s252) > 0 && !jumpWithin(e, 366)) { vol = num(e.s252); vsrc = 's252'; }
+    else if (num(e.s60) != null && num(e.s60) > 0 && !jumpWithin(e, 92)) { vol = num(e.s60); vsrc = 's60'; }
+    const b = e.b1;
+    if (Array.isArray(b) && num(b[0]) != null && num(b[2]) != null && (num(b[1]) || 0) >= 200 && !jumpWithin(e, 366))
+      rho = Math.sign(num(b[0])) * Math.sqrt(Math.max(0, Math.min(1, num(b[2]))));
+    return vol == null && rho == null ? null : { vol, vsrc, rho, beta: num(b && b[0]), r2: num(b && b[2]), d: e.d };
+  }
+  // the leg's ticker, only in the form the app itself writes ("AAPL · Apple Inc." / "AAPL") and in the Stock Book
+  function legTicker(leg) {
+    const m = /^([A-Z][A-Z0-9.\-]{0,5})(?:\s·|$)/.exec(String((leg && leg.name) || ''));
+    return m && typeof getStockbookRow === 'function' && getStockbookRow(m[1]) ? m[1] : null;
+  }
+  // what app.js puts in a leg when it has nothing measured: beta x 18 clamped to 15-60 %, else 25 %
+  function roughVol(t) {
+    const r = typeof getStockbookRow === 'function' ? getStockbookRow(t) : null;
+    return r && r.beta && isFinite(r.beta) ? Math.max(15, Math.min(60, r.beta * 18)) : 25;
+  }
+  function sourceLegs(legs, only) {
+    const st = legs.map(l => { const t = legTicker(l); return t ? { t, s: legStats(t) } : null; });
+    let n = 0;
+    legs.forEach((l, i) => {
+      if (only && !only.has(i)) return;
+      const x = st[i];
+      if (!x || !x.s || (l._mstats && l._mstats.t === x.t)) return;
+      const src = { t: x.t, d: x.s.d };
+      if (x.s.vol != null && isFinite(l.volatility) && Math.abs(l.volatility - roughVol(x.t)) < 1e-9) {
+        l.volatility = Math.round(x.s.vol * 10) / 10;
+        src.volatility = { v: l.volatility, from: x.s.vsrc };
+      }
+      const others = st.filter((y, j) => j !== i && y && y.s && y.s.rho != null).map(y => y.s.rho);
+      if (x.s.rho != null && others.length && (l.avgCorr === 55 || l.avgCorr === 70)) {
+        const avg = others.reduce((a, b) => a + b, 0) / others.length;
+        l.avgCorr = Math.max(-100, Math.min(100, Math.round(100 * x.s.rho * avg)));
+        src.avgCorr = { v: l.avgCorr, rho: Math.round(x.s.rho * 1000) / 1000, avg: Math.round(avg * 1000) / 1000, k: others.length };
+      }
+      if (src.volatility || src.avgCorr) { l._mstats = src; n++; }
+    });
+    return n;
+  }
+  function rerenderRisk() {
+    try { saveRiskPortfolio(); } catch (e) {}
+    renderRiskLegsTable(); renderHolyGrailChart(); renderRiskMetrics();
+  }
+  // load the legs' price histories (the app's own lazy loader, IndexedDB cache) so their pairs are MEASURED from daily
+  // log returns - the one-factor figure is then only the fallback for a pair whose history can't be had
+  function primeLegs(legs, tickers) {
+    const need = tickers.filter(t => typeof getHistoryForTicker === 'function' && !getHistoryForTicker(t));
+    if (!need.length || typeof primeHistoryForTickers !== 'function' || (typeof _primeAllowed === 'function' && !_primeAllowed())) return null;
+    return primeHistoryForTickers(need).then(() => {
+      if (state.risk && state.risk.legs === legs) { renderHolyGrailChart(); renderRiskMetrics(); }
+    }).catch(() => {});
+  }
+  function markLegs() {
+    const tbody = document.getElementById('risk-legs-body');
+    const legs = (typeof state !== 'undefined' && state.risk && state.risk.legs) || [];
+    if (!tbody) return;
+    let shown = 0, d = null;
+    tbody.querySelectorAll('.risk-leg-input[data-field="volatility"], .risk-leg-input[data-field="avgCorr"]').forEach(inp => {
+      const leg = legs[+inp.dataset.idx], f = inp.dataset.field, m = leg && leg._mstats, src = m && m[f];
+      if (!src || legTicker(leg) !== m.t || !isFinite(leg[f]) || Math.abs(leg[f] - src.v) > 1e-9) return;
+      inp.dataset.mstats = '1';
+      inp.style.borderBottom = '1px dotted var(--ink-faint)';
+      inp.title = f === 'volatility'
+        ? `${src.v}% - ${src.from === 's252' ? '1-year' : '60-day'} realized volatility of ${m.t} from our daily closes (sd of daily log returns x √252, through ${day(m.d)})${src.from === 's60' ? ' - the year holds a one-session jump, so the last 60 sessions' : ''}. Type over it to use your own.`
+        : `${src.v}% - one-factor estimate: ${m.t}'s daily correlation with the S&P 500 (${src.rho.toFixed(2)}, from its 252-day beta's R²) x the other ${src.k} stock leg${src.k === 1 ? '' : 's'}' average (${src.avg.toFixed(2)}). Used only for pairs without loaded price histories - those are measured directly. Type over it to use your own.`;
+      inp.addEventListener('input', () => {                   // typed over: no longer ours
+        if (!(Math.abs(parseFloat(inp.value) - src.v) <= 1e-9)) { inp.style.borderBottom = ''; inp.removeAttribute('title'); delete inp.dataset.mstats; }
+      });
+      shown++; d = d || m.d;
+    });
+    let note = document.getElementById('risk-mstats-note');
+    if (!shown) { if (note) note.remove(); return; }
+    if (!note) {
+      note = document.createElement('div');
+      note.id = 'risk-mstats-note';
+      note.style.cssText = 'font-family:var(--mono);font-size:10px;color:var(--ink-faint);margin-top:6px;line-height:1.5';
+      const wrap = tbody.closest('.risk-legs-table-wrap') || tbody.closest('table');
+      if (wrap && wrap.parentNode) wrap.parentNode.insertBefore(note, wrap.nextSibling);
+    }
+    note.textContent = `Dotted: from our daily closes (TRAPP2-ANALYTICS market.json, ${day(d)}) - volatility realized over a year, correlation a one-factor estimate vs the S&P 500. Hover for the basis; type over a value to use your own.`;
+  }
+  function wireLegNames() {
+    const tbody = document.getElementById('risk-legs-body');
+    if (!tbody) return;
+    tbody.querySelectorAll('.risk-leg-input[data-field="name"]').forEach(inp => {
+      const after = () => {                                   // runs after app.js's own handler (registered first)
+        try {
+          const legs = state.risk.legs, i = +inp.dataset.idx, t = legs[i] && legTicker(legs[i]);
+          if (!S.doc || !t) return;
+          if (sourceLegs(legs, new Set([i]))) { rerenderRisk(); primeLegs(legs, [t]); }
+        } catch (e) {}
+      };
+      inp.addEventListener('input', after);
+      inp.addEventListener('change', after);
+    });
+  }
+
   // ---- hooks into app.js's global functions (the established wrap pattern) -----------------------------------------
   function hook(name, make) {
     const orig = window[name];
@@ -313,10 +427,27 @@
         } catch (e) {}
         return r;
       }),
+      hook('importFromStockBook', orig => async function () {                    // z205
+        const before = typeof state !== 'undefined' && state.risk ? state.risk.legs : null;
+        const v = await orig.apply(this, arguments);
+        try {
+          const legs = state.risk && state.risk.legs;
+          if (!legs || legs === before || !legs.length) return v;              // cancelled, or nothing to import
+          if (!S.doc) await waitDoc(3000);
+          if (S.doc && state.risk.legs === legs && sourceLegs(legs, null)) rerenderRisk();
+          if (state.risk.legs === legs) primeLegs(legs, legs.map(legTicker).filter(Boolean));
+        } catch (e) {}
+        return v;
+      }),
+      hook('renderRiskLegsTable', orig => function () {                        // z205: the marks, the typed-ticker path
+        const r = orig.apply(this, arguments);
+        try { markLegs(); wireLegNames(); } catch (e) {}
+        return r;
+      }),
     ];
     return ok.every(Boolean);
   }
   if (!install()) document.addEventListener('DOMContentLoaded', install);
   load();
-  window.MarketStats = { load, entry, patchRow, patchStock, blockHtml, renderBlock, priceOk, _S: S };
+  window.MarketStats = { load, entry, patchRow, patchStock, blockHtml, renderBlock, priceOk, legStats, sourceLegs, _S: S };
 })();
