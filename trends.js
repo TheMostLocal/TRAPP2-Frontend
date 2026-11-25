@@ -13,6 +13,8 @@
    most-shorted names' dollars short vs the settlement before, all names, who covered / added most - about two weeks
    behind) and the latest day's Reg SHO short sales; the most-shorted 50 now rank on FINRA's shares short / shares
    outstanding (Yahoo's short % of float disagreed with FINRA by 3-300x).
+   z209 - and dealer gamma from the index ETFs' open interest (TRAPP2-OPTIONS): SPY's dollar gamma per 1 % move, where it
+   flips, the call / put walls and what the prior session did to put / call open interest; QQQ / IWM in brief.
    ============================================================ */
 (function () {
   'use strict';
@@ -171,7 +173,7 @@
   function flowsCard(doc) {
     const f = doc.flows;
     if (!f || f.date !== doc.date) return '';
-    if (!f.label && !(f.signals || []).length && !f.z) return '';
+    if (!f.label && !(f.signals || []).length && !f.z && !f.dealer) return '';
     const z = f.z || {}, ret = f.ret || {}, legs = f.legs || {};
     const bar = v => {
       if (num(v) == null) return '<span style="color:var(--ink-faint)">—</span>';
@@ -192,14 +194,27 @@
     const cov = f.coverage && f.coverage.of ? `${f.coverage.priced} of ${f.coverage.of} names priced` : '';
     const rpt = reportedHtml(f);
     return card('flows', `Positioning: <span style="color:${lc}">${esc(f.label || 'no signal')}</span> <span style="${small}">(who was forced to trade${f.provisional ? ' · so far today' : ''})</span>`,
-      table(620, th('Basket spread', true) + th('vs its year') + th('Today') + th('', true) + th('Legs', true), rows)
+      (f.z ? table(620, th('Basket spread', true) + th('vs its year') + th('Today') + th('', true) + th('Legs', true), rows) : '')
       + (sig ? `<ul style="${mono};font-size:11px;line-height:1.5;margin:8px 0 0 16px;padding:0">${sig}</ul>` : '') + rel + aft + rpt,
       `<div style="${small};margin-top:6px">The label is a price signature from long-short baskets (US common stocks, $1B+, $5M+ a day, re-formed at each prior close - ${esc(f.formedOn ? `formed ${f.formedOn}` : 'from the nightly series')}${cov ? `, ${cov}` : ''}); each spread is in standard deviations of its own last 252 sessions - "covered" or "unwound" is what the prices look like. FINRA's reported short interest (as of its settlement, published about two weeks later) and Reg SHO short sales sit beside it, not inside it. The bot and the quant book record this on every trade and open no short sale into a crowded short: 15%+ of the shares outstanding short or 10+ days to cover (FINRA), 8% / 7 days while shorts are being covered.</div>`);
   }
 
   // z207: what shorts DID (FINRA, lagged) and the latest day's short sales - lines under the basket table
+  const bn = v => (num(v) == null ? '—' : `${v < 0 ? '−' : '+'}$${Math.abs(v) >= 1e8 ? (Math.abs(v) / 1e9).toFixed(1) + 'B' : (Math.abs(v) / 1e6).toFixed(0) + 'M'}`);
+  function dealerHtml(f) {
+    const dl = f.dealer || {}, s = dl.SPY;
+    if (!s || num(s.gex) == null) return '';
+    const neg = s.gex < 0, ch = s.change || {};
+    const flip = num(s.flip) != null && num(s.flipPct) != null ? `; ${s.flip > (s.spot || 0) ? 'above' : 'below'} ~$${Math.round(s.flip).toLocaleString('en-US')} (the flip, ${pc(s.flipPct, 1)}) it turns ${neg ? 'positive' : 'negative'}` : '';
+    const walls = num(s.callWall) != null && num(s.putWall) != null ? `; call wall $${(+s.callWall).toLocaleString('en-US')}, put wall $${(+s.putWall).toLocaleString('en-US')}` : '';
+    const oi = num(ch.putChgPct) != null ? ` Put open interest <strong style="color:${Math.abs(ch.putChgPct) >= 5 ? 'var(--amber)' : 'var(--ink)'}">${pc(ch.putChgPct, 1)}</strong>, calls ${pc(ch.callChgPct, 1)} on the ${ch.common} expiries both days hold <span style="color:var(--ink-faint)">(the prior session's trading)</span>${ch.putChgPct <= -5 ? ' - hedges closed' : ch.putChgPct >= 5 ? ' - hedges added' : ''}.` : '';
+    const others = ['QQQ', 'IWM'].filter(t => dl[t] && num(dl[t].gex) != null).map(t => `${t} ${bn(dl[t].gex)}`).join(' · ');
+    return `<div><strong>Dealer gamma</strong> <span style="color:var(--ink-faint)">· SPY options, open interest × gamma</span>: <strong style="color:${neg ? 'var(--neg)' : 'var(--pos)'}">${bn(s.gex)}</strong> per 1% move - ${neg ? 'negative: dealers\' hedging adds to moves' : 'positive: dealers\' hedging damps moves'}${flip}${walls}.${oi}${others ? ` <span style="color:var(--ink-dim)">${others}.</span>` : ''} <span style="color:var(--ink-faint)">An estimate - it assumes dealers are long the calls customers sell and short the puts they buy.</span></div>`;
+  }
   function reportedHtml(f) {
     const r = f.reported, v = f.shortVolume, out = [];
+    const dh = dealerHtml(f);
+    if (dh) out.push(dh);
     const b = (r && r.basket) || {}, u = (r && r.universe) || {};
     const nm = x => `${esc(x.t)} <span style="color:${col(x.chg)}">${pc(x.chg, 0)}</span> <span style="color:var(--ink-faint)">(${(+x.pct).toFixed(0)}% short)</span>`;
     if (r && r.settle && num(b.chg) != null) {
