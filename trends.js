@@ -9,6 +9,10 @@
    the live tape (TRAPP2-1 data/intraday/latest.json, every 15 min) so the headline - the S&P 500 now and what a red
    or green close would make its run - keeps up between pipeline runs. A red day is a close below the prior close
    (close-to-close); the open is shown where it belongs (the gap, the move from the open). In memory only (no storage).
+   z207 - the positioning card adds what shorts DID: FINRA's reported short interest at its latest settlement (the 50
+   most-shorted names' dollars short vs the settlement before, all names, who covered / added most - about two weeks
+   behind) and the latest day's Reg SHO short sales; the most-shorted 50 now rank on FINRA's shares short / shares
+   outstanding (Yahoo's short % of float disagreed with FINRA by 3-300x).
    ============================================================ */
 (function () {
   'use strict';
@@ -140,7 +144,7 @@
   function notableCard(doc) {
     const all = doc.notable || [];
     const items = S.showAll ? all : all.slice(0, 10);
-    const tag = k => ({ provisional: 'today', streak: 'run', move: 'move', regime: 'read', drawdown: 'drawdown', breadth: 'inside', attribution: 'the run', fear: 'fear', distribution: 'selling', trend: 'trend', sectors: 'sectors', history: 'context', data: 'data check', flows: 'positioning', relief: 'base rate', 'follow-through': 'follow-through' }[k] || k);
+    const tag = k => ({ provisional: 'today', streak: 'run', move: 'move', regime: 'read', drawdown: 'drawdown', breadth: 'inside', attribution: 'the run', fear: 'fear', distribution: 'selling', trend: 'trend', sectors: 'sectors', history: 'context', data: 'data check', flows: 'positioning', relief: 'base rate', 'follow-through': 'follow-through', 'short interest': 'short interest', 'short volume': 'short sales' }[k] || k);
     const rows = items.map(n => `<div style="display:flex;gap:10px;padding:6px 0;border-bottom:1px solid var(--rule);${mono};font-size:11px;line-height:1.5">
         <span style="flex:0 0 34px;color:${n.sev >= 3 ? 'var(--neg)' : n.sev === 2 ? 'var(--amber)' : 'var(--ink-faint)'};letter-spacing:-1px" title="${n.sev >= 3 ? 'rare' : n.sev === 2 ? 'notable' : 'context'}">${SEV[n.sev] || '●'}</span>
         <span style="flex:0 0 64px;color:var(--ink-faint);text-transform:uppercase;font-size:9px;padding-top:2px">${esc(tag(n.kind))}</span>
@@ -159,7 +163,7 @@
   }
 
   // ---- z206: who was forced to trade - the factor baskets priced live, each in sd of its own year ---------------------
-  const FLOW_ROWS = [['si', 'Most-shorted 50 vs the average stock', 'shorts covered ↑ · pressed ↓'],
+  const FLOW_ROWS = [['si', 'Most-shorted 50 vs the average stock', 'the 50 highest short interest / shares outstanding (FINRA) - shorts covered ↑ · pressed ↓'],
                      ['mom', 'Momentum: 12-1 winners − losers', 'winners extended ↑ · unwound ↓'],
                      ['rev', "The week's losers − its winners", 'losers bounced ↑ · sold again ↓'],
                      ['beta', 'High beta − low beta', 'risk on ↑ · risk off ↓']];
@@ -186,10 +190,29 @@
     const rel = f.relief && f.relief.n ? `<div style="${mono};font-size:11px;line-height:1.6;margin-top:8px">A ${pc((((doc.indices || {})[SPX] || {}).sigma), 1).replace('%', '')} sd gain inside a sell-off. In the record since ${esc(String(f.relief.since || '').slice(0, 4))}, <strong>${f.relief.n}</strong> days like it: the next session was down ${Math.round((f.relief.nextDown || 0) * 100)}% of the time (median ${pc(f.relief.next1)}), five sessions on the median was ${pc(f.relief.next5)}, and ${Math.round((f.relief.retest || 0) * 100)}% closed below the pre-rally close within ${f.relief.look} sessions.</div>` : '';
     const aft = f.after ? `<div style="${mono};font-size:11px;line-height:1.6;margin-top:6px;color:var(--amber)">No follow-through${f.provisional ? ' so far' : ''}: ${pc(f.after.chg)} the session after the short-covering rally of ${esc(when(f.after.prior))}${num(f.after.priorChg) != null ? ` (${pc(f.after.priorChg)})` : ''}.</div>` : '';
     const cov = f.coverage && f.coverage.of ? `${f.coverage.priced} of ${f.coverage.of} names priced` : '';
+    const rpt = reportedHtml(f);
     return card('flows', `Positioning: <span style="color:${lc}">${esc(f.label || 'no signal')}</span> <span style="${small}">(who was forced to trade${f.provisional ? ' · so far today' : ''})</span>`,
       table(620, th('Basket spread', true) + th('vs its year') + th('Today') + th('', true) + th('Legs', true), rows)
-      + (sig ? `<ul style="${mono};font-size:11px;line-height:1.5;margin:8px 0 0 16px;padding:0">${sig}</ul>` : '') + rel + aft,
-      `<div style="${small};margin-top:6px">A price signature from long-short baskets (US common stocks, $1B+, $5M+ a day, re-formed at each prior close - ${esc(f.formedOn ? `formed ${f.formedOn}` : 'from the nightly series')}${cov ? `, ${cov}` : ''}); each spread is in standard deviations of its own last 252 sessions. No positioning data is fetched - "covered" or "unwound" is what the prices look like, not a reported flow. The bot records this on every trade and, while shorts are being covered, opens no short sale where 10%+ of the float is already short (20%+ any day).</div>`);
+      + (sig ? `<ul style="${mono};font-size:11px;line-height:1.5;margin:8px 0 0 16px;padding:0">${sig}</ul>` : '') + rel + aft + rpt,
+      `<div style="${small};margin-top:6px">The label is a price signature from long-short baskets (US common stocks, $1B+, $5M+ a day, re-formed at each prior close - ${esc(f.formedOn ? `formed ${f.formedOn}` : 'from the nightly series')}${cov ? `, ${cov}` : ''}); each spread is in standard deviations of its own last 252 sessions - "covered" or "unwound" is what the prices look like. FINRA's reported short interest (as of its settlement, published about two weeks later) and Reg SHO short sales sit beside it, not inside it. The bot and the quant book record this on every trade and open no short sale into a crowded short: 15%+ of the shares outstanding short or 10+ days to cover (FINRA), 8% / 7 days while shorts are being covered.</div>`);
+  }
+
+  // z207: what shorts DID (FINRA, lagged) and the latest day's short sales - lines under the basket table
+  function reportedHtml(f) {
+    const r = f.reported, v = f.shortVolume, out = [];
+    const b = (r && r.basket) || {}, u = (r && r.universe) || {};
+    const nm = x => `${esc(x.t)} <span style="color:${col(x.chg)}">${pc(x.chg, 0)}</span> <span style="color:var(--ink-faint)">(${(+x.pct).toFixed(0)}% short)</span>`;
+    if (r && r.settle && num(b.chg) != null) {
+      out.push(`<div><strong>Reported short interest</strong> <span style="color:var(--ink-faint)">· FINRA, settled ${esc(when(r.settle))}${r.partial && num(r.cover) != null ? ` · <span style="color:var(--amber)">only ${Math.round(r.cover * 100)}% of names on it yet</span>` : ''}</span>:
+        the 50 most-shorted <strong style="color:${Math.abs(b.chg) >= 5 ? 'var(--amber)' : 'var(--ink)'}">${pc(b.chg, 1)}</strong> in dollars short vs the settlement before${num(b.median) != null ? ` (median name ${pc(b.median, 1)}${num(b.dtc) != null ? `, ${(+b.dtc).toFixed(1)} days to cover` : ''})` : ''};
+        all names ${pc(u.chg, 1)} - ${u.adding || 0} added 10%+, ${u.covering || 0} covered 10%+.</div>`);
+      if ((r.covered || []).length) out.push(`<div style="color:var(--ink-dim)">Covered most: ${r.covered.slice(0, 5).map(nm).join(' · ')}</div>`);
+      if ((r.added || []).length) out.push(`<div style="color:var(--ink-dim)">Added most: ${r.added.slice(0, 5).map(nm).join(' · ')}</div>`);
+    }
+    if (v && v.date && num(v.ratio) != null) {
+      out.push(`<div><strong>Short sales</strong> <span style="color:var(--ink-faint)">· Reg SHO, ${esc(when(v.date))}</span>: the median name ${(+v.ratio).toFixed(0)}% of volume (20 sessions ${num(v.ratio20) != null ? (+v.ratio20).toFixed(0) : '—'}%)${num(v.basketZ) != null ? `; the most-shorted 50 at <strong style="color:${Math.abs(v.basketZ) >= 1 ? 'var(--amber)' : 'var(--ink)'}">${sd1(v.basketZ)} sd</strong> of their own 20 sessions` : ''}; ${v.high || 0} names 2 sd+ above theirs. <span style="color:var(--ink-faint)">Includes market makers' hedging - read the change, not the level.</span></div>`);
+    }
+    return out.length ? `<div style="${mono};font-size:11px;line-height:1.6;margin-top:10px;padding-top:8px;border-top:1px solid var(--rule)">${out.join('')}</div>` : '';
   }
 
   function insideCard(doc) {
