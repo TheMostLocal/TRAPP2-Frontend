@@ -10,6 +10,8 @@
    TRAPP2-OPTIONS). Shown as Stock Book & Valuation → Options, and as the Stock
    Book's Options section (which listed OCC contract rows — the books hold none).
    Columns sort like the Stock Book: text A→Z first, numbers high→low first.
+   z208: a chain TRAPP2-OPTIONS fetched with no live quotes (summary noQuotes - Yahoo's overnight answers: bid = ask = 0
+   and placeholder IVs) shows no IV, move, rank, skew or slope (amber quotes cell, hover says why); it sorts last.
    ========================================================================== */
 (function () {
   'use strict';
@@ -36,8 +38,11 @@
       return { ticker: t, spot: num(s.spot), iv: num(s.atmIv30 != null ? s.atmIv30 : s.atmIv), ivBasis: s.atmIv30 != null ? `${s.dte30 || 30}-day` : (s.nearestExpiry ? `nearest (${s.nearestExpiry})` : ''),
                move: num(s.expectedMove30Pct != null ? s.expectedMove30Pct : s.expectedMovePct), rank: num(s.ivRank && s.ivRank.rank), rankN: s.ivRank ? s.ivRank.n : null,
                skew: num(s.skew25), slope: num(s.termSlope), pcoi: num(s.putCallOI), pain: num(s.maxPain), quality: num(s.quoteQualityPct),
-               unusual: Array.isArray(s.unusual) ? s.unusual.length : null, expiries: num(s.expiries), asOf: s.asOf ? Date.parse(s.asOf) : null, hasRead: !!st[t] };
+               unusual: Array.isArray(s.unusual) ? s.unusual.length : null, expiries: num(s.expiries), asOf: s.asOf ? Date.parse(s.asOf) : null, hasRead: !!st[t],
+               noQ: !!s.noQuotes };
     });
+    // z208: no live quotes behind the chain - its volatility figures are not readings
+    rows.forEach(r => { if (r.noQ) { r.iv = r.move = r.rank = r.skew = r.slope = null; } });
     S.data = { rows, asOf: (summ && summ.asOf) || (man && man.asOf) || null, ok: !!(summ || man) };
     S.at = Date.now();
     return S.data;
@@ -57,7 +62,7 @@
       case 'slope': return `<span style="color:${r.slope != null && r.slope < -0.01 ? 'var(--neg)' : 'inherit'}">${pts(r.slope)}</span>`;
       case 'pcoi': return r.pcoi == null ? '—' : r.pcoi.toFixed(2);
       case 'pain': return r.pain == null ? '—' : '$' + r.pain.toLocaleString();
-      case 'quality': return r.quality == null ? '—' : r.quality.toFixed(0) + '%';
+      case 'quality': return r.noQ ? `<span style="color:var(--amber)" title="Fetched with no live quotes (Yahoo's overnight answer: bid = ask = 0) - no volatility read until the next chain with quotes">${r.quality == null ? '—' : r.quality.toFixed(0) + '%'} · none live</span>` : (r.quality == null ? '—' : r.quality.toFixed(0) + '%');
       case 'unusual': return r.unusual == null ? '—' : r.unusual ? `<span style="color:var(--amber)">${r.unusual}</span>` : '0';
       case 'asOf': return when(r.asOf);
     }
