@@ -62,7 +62,7 @@
     if (!c) return null;
     const out = { close: c.close, prev: c.prevClose, chg: c.chg, open: c.open, gap: c.gap, fromOpen: c.fromOpen, final: c.final,
                   asOf: c.asOf, date: c.date, source: 'trends' };
-    const t = tape || {};
+    const t = (doc.proxy && doc.proxy[SPX]) ? {} : (tape || {});       // z206: an ETF's read is not mixed with the index's tape
     const p = num((t.p || {})[SPX]), pv = num((t.prevClose || {})[SPX]), cl = num((t.close || {})[SPX]), op = num((t.open || {})[SPX]);
     const trading = t.session === 'regular' || t.session === 'early-close';
     const through = ((c.next || {}).after) || (c.streak || {}).through || '';
@@ -126,12 +126,13 @@
     return `<section class="company-card" style="margin:0 0 12px">
       <div style="${mono};font-size:10px;letter-spacing:.12em;color:var(--ink-dim)">TODAY'S TRENDS · ${esc(phase)} · ${state}</div>
       <div style="display:flex;flex-wrap:wrap;gap:10px 30px;margin-top:10px;${mono};align-items:flex-end">
-        ${kv('S&amp;P 500', fmt(now.close), '', 24)}
+        ${kv(esc((((doc.indices || {})[SPX] || {}).name) || 'S&P 500'), fmt(now.close), '', 24)}
         ${kv('CLOSE-TO-CLOSE', pc(now.chg), `vs ${fmt(now.prev)} prior close`, 20, col(now.chg))}
         ${num(now.gap) != null ? kv('AT THE OPEN', pc(now.gap), `opened ${fmt(now.open)}`, 16, col(now.gap)) + kv('FROM THE OPEN', pc(now.fromOpen), '', 16, col(now.fromOpen)) : ''}
         ${kv('THE SELL-OFF READ', esc(String(read.label || '—').toUpperCase()), `${read.on != null ? `${read.on} of ${read.of} criteria on` : ''}${now.source === 'tape' && doc.etTime && doc.etTime !== now.asOf ? ` · as of ${esc(doc.etTime)} ET` : read.provisional ? ' · counting today' : ''}`, 16, rc)}
       </div>
       <div style="${mono};font-size:11px;color:var(--ink);margin-top:10px;line-height:1.6">${runLine(doc, now)}</div>
+      ${doc.proxy ? `<div style="${mono};font-size:10px;color:var(--amber);margin-top:6px;line-height:1.5">Read on ETFs: ${esc(Object.entries(doc.proxy).filter(([k, v]) => k !== v).map(([k, v]) => `${k} = ${v}`).join(' · '))} (TRAPP2) - the macro book (TRAPP2-1) can't be read, so no VIX, rates, dollar, commodities or crypto until it is back.</div>` : ''}
       ${macro ? `<div style="${small};margin-top:6px">The slower read - early warning (credit, lending, labour, valuation data, ${esc(macro.date || '')}): ${esc(String(macro.level || '').toUpperCase())} risk, ${esc(macro.regime || '')}.</div>` : ''}
     </section>`;
   }
@@ -139,7 +140,7 @@
   function notableCard(doc) {
     const all = doc.notable || [];
     const items = S.showAll ? all : all.slice(0, 10);
-    const tag = k => ({ provisional: 'today', streak: 'run', move: 'move', regime: 'read', drawdown: 'drawdown', breadth: 'inside', attribution: 'the run', fear: 'fear', distribution: 'selling', trend: 'trend', sectors: 'sectors', history: 'context', data: 'data check' }[k] || k);
+    const tag = k => ({ provisional: 'today', streak: 'run', move: 'move', regime: 'read', drawdown: 'drawdown', breadth: 'inside', attribution: 'the run', fear: 'fear', distribution: 'selling', trend: 'trend', sectors: 'sectors', history: 'context', data: 'data check', flows: 'positioning', relief: 'base rate', 'follow-through': 'follow-through' }[k] || k);
     const rows = items.map(n => `<div style="display:flex;gap:10px;padding:6px 0;border-bottom:1px solid var(--rule);${mono};font-size:11px;line-height:1.5">
         <span style="flex:0 0 34px;color:${n.sev >= 3 ? 'var(--neg)' : n.sev === 2 ? 'var(--amber)' : 'var(--ink-faint)'};letter-spacing:-1px" title="${n.sev >= 3 ? 'rare' : n.sev === 2 ? 'notable' : 'context'}">${SEV[n.sev] || '●'}</span>
         <span style="flex:0 0 64px;color:var(--ink-faint);text-transform:uppercase;font-size:9px;padding-top:2px">${esc(tag(n.kind))}</span>
@@ -155,6 +156,40 @@
     return card('read', `The sell-off read: <span style="color:${r.on >= 3 ? 'var(--neg)' : 'var(--ink)'}">${esc(r.label)}</span> <span style="${small}">(${r.on} of ${r.of})</span>`,
       table(520, th('', true) + th('Criterion', true) + th('Now', true), rows),
       `<div style="${small};margin-top:6px">0–1 on: calm · 2: under pressure · 3–4: sell-off · 5+: heavy sell-off. Overlays: correction (-10% from the 52-week high), bear market (-20%). The bot reads this: in a sell-off its new longs are sized x0.9 and every trade records the read.</div>`);
+  }
+
+  // ---- z206: who was forced to trade - the factor baskets priced live, each in sd of its own year ---------------------
+  const FLOW_ROWS = [['si', 'Most-shorted 50 vs the average stock', 'shorts covered ↑ · pressed ↓'],
+                     ['mom', 'Momentum: 12-1 winners − losers', 'winners extended ↑ · unwound ↓'],
+                     ['rev', "The week's losers − its winners", 'losers bounced ↑ · sold again ↓'],
+                     ['beta', 'High beta − low beta', 'risk on ↑ · risk off ↓']];
+  const sd1 = v => { const r = Math.round(+v * 10) / 10; return r === 0 ? '0.0' : `${r > 0 ? '+' : ''}${r.toFixed(1)}`; };
+  function flowsCard(doc) {
+    const f = doc.flows;
+    if (!f || f.date !== doc.date) return '';
+    if (!f.label && !(f.signals || []).length && !f.z) return '';
+    const z = f.z || {}, ret = f.ret || {}, legs = f.legs || {};
+    const bar = v => {
+      if (num(v) == null) return '<span style="color:var(--ink-faint)">—</span>';
+      const w = Math.min(4, Math.abs(v)) / 4 * 50;
+      return `<span style="display:inline-block;position:relative;width:160px;height:10px;background:var(--bg-elev);border-radius:2px;vertical-align:middle">
+        <span style="position:absolute;top:0;bottom:0;${v < 0 ? `right:50%;width:${w}%` : `left:50%;width:${w}%`};background:${Math.abs(v) >= 2 ? (v < 0 ? 'var(--neg)' : 'var(--pos)') : 'var(--ink-faint)'};opacity:.85"></span>
+        <span style="position:absolute;left:25%;top:0;bottom:0;width:1px;background:var(--rule)" title="-2 sd"></span><span style="position:absolute;left:75%;top:0;bottom:0;width:1px;background:var(--rule)" title="+2 sd"></span>
+        <span style="position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;background:var(--ink-faint)"></span></span>`;
+    };
+    const legTxt = k => k === 'mom' && num(legs.momL) != null ? `winners ${pc(legs.momL)} · losers ${pc(legs.momS)}` : k === 'si' && num(legs.siL) != null ? `the 50 ${pc(legs.siL)} · average stock ${pc(legs.ew)}` : '';
+    const rows = FLOW_ROWS.map(([k, name, how]) => `<tr>${td(`<span title="${esc(how)}">${esc(name)}</span>`, true, 'white-space:nowrap')}
+      ${td(num(z[k]) != null ? `<strong style="color:${Math.abs(z[k]) >= 2 ? col(z[k]) : 'var(--ink)'}">${sd1(z[k])} sd</strong>` : '—')}${td(`<span style="color:${col(ret[k])}">${pc(ret[k])}</span>`)}${td(bar(z[k]), true)}${td(esc(legTxt(k)), true, 'color:var(--ink-faint);white-space:nowrap')}</tr>`).join('');
+    const strong = ['short-covering rally', 'de-grossing', 'momentum unwind', 'losers liquidated', 'shorts pressing'];
+    const lc = f.label ? (strong.includes(f.label) ? 'var(--amber)' : /risk-off|selling/.test(f.label) ? 'var(--neg)' : /rally|risk-on|buying/.test(f.label) ? 'var(--pos)' : 'var(--ink)') : 'var(--ink-faint)';
+    const sig = (f.signals || []).map(x => `<li style="margin:2px 0">${esc(x.text)}</li>`).join('');
+    const rel = f.relief && f.relief.n ? `<div style="${mono};font-size:11px;line-height:1.6;margin-top:8px">A ${pc((((doc.indices || {})[SPX] || {}).sigma), 1).replace('%', '')} sd gain inside a sell-off. In the record since ${esc(String(f.relief.since || '').slice(0, 4))}, <strong>${f.relief.n}</strong> days like it: the next session was down ${Math.round((f.relief.nextDown || 0) * 100)}% of the time (median ${pc(f.relief.next1)}), five sessions on the median was ${pc(f.relief.next5)}, and ${Math.round((f.relief.retest || 0) * 100)}% closed below the pre-rally close within ${f.relief.look} sessions.</div>` : '';
+    const aft = f.after ? `<div style="${mono};font-size:11px;line-height:1.6;margin-top:6px;color:var(--amber)">No follow-through${f.provisional ? ' so far' : ''}: ${pc(f.after.chg)} the session after the short-covering rally of ${esc(when(f.after.prior))}${num(f.after.priorChg) != null ? ` (${pc(f.after.priorChg)})` : ''}.</div>` : '';
+    const cov = f.coverage && f.coverage.of ? `${f.coverage.priced} of ${f.coverage.of} names priced` : '';
+    return card('flows', `Positioning: <span style="color:${lc}">${esc(f.label || 'no signal')}</span> <span style="${small}">(who was forced to trade${f.provisional ? ' · so far today' : ''})</span>`,
+      table(620, th('Basket spread', true) + th('vs its year') + th('Today') + th('', true) + th('Legs', true), rows)
+      + (sig ? `<ul style="${mono};font-size:11px;line-height:1.5;margin:8px 0 0 16px;padding:0">${sig}</ul>` : '') + rel + aft,
+      `<div style="${small};margin-top:6px">A price signature from long-short baskets (US common stocks, $1B+, $5M+ a day, re-formed at each prior close - ${esc(f.formedOn ? `formed ${f.formedOn}` : 'from the nightly series')}${cov ? `, ${cov}` : ''}); each spread is in standard deviations of its own last 252 sessions. No positioning data is fetched - "covered" or "unwound" is what the prices look like, not a reported flow. The bot records this on every trade and, while shorts are being covered, opens no short sale where 10%+ of the float is already short (20%+ any day).</div>`);
   }
 
   function insideCard(doc) {
@@ -222,10 +257,10 @@
   function historyCard() {
     const rows = (((S.hist || {}).rows) || []).slice(-15).reverse();
     if (!rows.length) return '';
-    const head = th('Session', true) + th('S&amp;P 500') + th('Close-to-close') + th('Gap') + th('From open') + th('Run') + th('vs 52w high') + th('VIX') + th('Members up') + th('Equal-wt') + th('Cap-wt') + th('Read', true);
+    const head = th('Session', true) + th('S&amp;P 500') + th('Close-to-close') + th('Gap') + th('From open') + th('Run') + th('vs 52w high') + th('VIX') + th('Members up') + th('Equal-wt') + th('Cap-wt') + th('Read', true) + th('Positioning', true);
     const body = rows.map(r => `<tr>${td(esc(r.date), true)}${td(fmt(r.spx))}${td(`<span style="color:${col(r.chg)}">${pc(r.chg)}</span>`)}${td(pc(r.gap))}${td(pc(r.fromOpen))}
-      ${td(r.run ? `<span style="color:${r.run < 0 ? 'var(--neg)' : 'var(--pos)'}">${r.run < 0 ? '▼' : '▲'}${Math.abs(r.run)}</span>` : '—')}${td(pc(r.dd52, 1))}${td(fmt(r.vix))}${td(r.pctUp != null ? `${Math.round(r.pctUp)}%` : '—')}${td(pc(r.ew))}${td(pc(r.cw))}${td(esc(r.read || '—'), true, 'white-space:nowrap')}</tr>`).join('');
-    return card('history', 'Recent sessions <span style="' + small + '">(stored every session: TRAPP2-ANALYTICS data/trends/daily)</span>', table(900, head, body));
+      ${td(r.run ? `<span style="color:${r.run < 0 ? 'var(--neg)' : 'var(--pos)'}">${r.run < 0 ? '▼' : '▲'}${Math.abs(r.run)}</span>` : '—')}${td(pc(r.dd52, 1))}${td(fmt(r.vix))}${td(r.pctUp != null ? `${Math.round(r.pctUp)}%` : '—')}${td(pc(r.ew))}${td(pc(r.cw))}${td(esc(r.read || '—'), true, 'white-space:nowrap')}${td(esc(r.flow || '—'), true, 'white-space:nowrap')}</tr>`).join('');
+    return card('history', 'Recent sessions <span style="' + small + '">(stored every session: TRAPP2-ANALYTICS data/trends/daily)</span>', table(980, head, body));
   }
 
   function render(host) {
@@ -263,9 +298,9 @@
       return;
     }
     const now = live(doc, S.tape) || {};
-    host.innerHTML = headline(doc, now) + notableCard(doc) + readCard(doc) + insideCard(doc) + runCard(doc) + boardCard(doc) + nextCard(doc) + historyCard()
+    host.innerHTML = headline(doc, now) + notableCard(doc) + flowsCard(doc) + readCard(doc) + insideCard(doc) + runCard(doc) + boardCard(doc) + nextCard(doc) + historyCard()
       + `<div style="${small};margin:4px 0 16px">Method: ${esc(Object.values(doc.method || {}).join(' · '))}. Built ${esc(String(doc.asOf || '').replace('T', ' ').slice(0, 16))} UTC (${esc(doc.build || '')}) · live tape ${S.tape ? esc(S.tape.etTime || '') + ' ET' : '—'} · <a href="#" data-tt-refresh="1" style="color:var(--ink-dim)">refresh</a></div>`;
   }
 
-  window.TodaysTrends = { render, paint, live, runLine, _S: S };
+  window.TodaysTrends = { render, paint, live, runLine, flowsCard, _S: S };
 })();
