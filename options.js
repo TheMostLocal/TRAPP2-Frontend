@@ -103,6 +103,11 @@
   }
   function readHtml(tk, s) {
     if (!s) return '';
+    if (s.noQuotes) {                                                   // z208: fetched with no live quotes
+      return `<div class="company-card" id="opt-read" style="margin:0 0 12px;font-family:var(--mono)"><div style="font-size:10px;letter-spacing:.12em;color:var(--ink-dim);margin-bottom:6px">OPTIONS READ · ${esc(tk)} <span style="color:var(--ink-faint)">· ${esc(String(s.asOf || '').slice(0, 16).replace('T', ' '))}</span></div>`
+        + `<div style="font-size:11px;color:var(--amber);line-height:1.5">This chain was fetched with no live quotes (${s.quoteQualityPct != null ? s.quoteQualityPct + '% two-sided' : 'none two-sided'} - Yahoo's overnight answer: bid = ask = 0 and placeholder volatilities). No IV, expected move, skew or term read until the next chain with quotes; open interest and max pain below still stand.</div>`
+        + `<div style="font-size:11px;margin-top:6px">Put/call OI ${s.putCallOI != null ? s.putCallOI.toFixed(2) : '—'} · max pain ${s.maxPain != null ? '$' + s.maxPain : '—'}</div></div>`;
+    }
     const pc = v => v == null ? '—' : (v * 100).toFixed(1) + '%';
     const pts = v => v == null ? '—' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)} pts`;
     const kv = (k, v, sub, col) => `<div><div style="font-size:9px;letter-spacing:.1em;color:var(--ink-faint)">${k}</div><div style="font-size:14px;color:${col || 'var(--ink)'}">${v}</div>${sub ? `<div style="font-size:9px;color:var(--ink-faint)">${sub}</div>` : ''}</div>`;
